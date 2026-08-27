@@ -1,0 +1,121 @@
+# 📡 Intercom Global (`.intercom-global`)
+
+> **Universal Multi-Agent Intercom, Auto-Wake & Cross-IDE Communication Mesh**  
+> Connects **Pi (`pi-intercom`)**, **Antigravity**, **Cursor / VS Code**, **OpenCode / CLI**, and **Cloud Agents (Devin)** on the same machine.
+
+---
+
+## 🌟 Features
+
+- **⚡ Native Pi-Intercom Bridge**: Connects directly to the Windows Named Pipe / Unix Socket broker used by [`nicobailon/pi-intercom`](https://github.com/nicobailon/pi-intercom).
+- **🔔 Universal Auto-Wake & Interruption**: Interrupts and forces an immediate execution turn in Pi sessions, OpenCode CLIs, Antigravity, or Devin cloud VMs.
+- **🔌 Model Context Protocol (MCP) Server**: Stdio MCP server exposing `intercom_send`, `intercom_wake`, `intercom_read`, and `intercom_list_peers` to Cursor, Antigravity, and Claude Desktop.
+- **📦 Durable File Mesh**: High-speed, lock-free JSON mailbox system with per-session routing (`agent#sessionId`).
+- **💻 Interactive Session Bridge**: Stdin/Stdout terminal wrapper that injects autonomous tasks into running CLIs (OpenCode, Aider, Pi).
+- **🌐 Standalone & Portable**: Completely isolated outside of individual project repositories.
+
+---
+
+## 🚀 Quick Install
+
+### Option A: One-Click PowerShell (Windows)
+```powershell
+cd C:\Users\Suran\.intercom-global
+.\install.ps1
+```
+
+### Option B: One-Click Bash (Linux / macOS / WSL)
+```bash
+cd ~/.intercom-global
+./install.sh
+```
+
+### Option C: Manual Link
+```bash
+npm install
+npm link
+```
+
+---
+
+## 🎮 CLI Usage
+
+After installation, the `intercom` and `intercom-wake` CLI commands are available globally anywhere in your terminal:
+
+### 1. Auto-Wake & Interrupt an AI Companion
+```powershell
+# Instantly interrupt and trigger an autonomous turn in Keshav's Pi session
+intercom wake --to Keshav --msg "Check customer route tests"
+
+# Shortcut command
+intercom-wake Madhav "Audit the server routes"
+```
+
+### 2. Send & Check Messages
+```powershell
+# Send a message to any companion
+intercom send --from Suran --to Pal --msg "All 488 Jest tests passed"
+
+# Check your inbox and mark as read
+intercom check --agent Suran
+
+# View raw mailbox history
+intercom read --agent Pal
+
+# List all active companions and mailbox sizes
+intercom peers
+```
+
+### 3. Native Pi-Intercom IPC Commands
+```powershell
+# List all live Pi sessions connected on this machine
+intercom pi list
+
+# Send a native message directly into a Pi terminal
+intercom pi send --to Madhav --msg "Here is the updated schema"
+
+# Ask a question to a Pi session and wait for its reply
+intercom pi ask --to Keshav --question "Which port is active?"
+```
+
+### 4. Interactive CLI Session Bridge
+Run any CLI wrapped in an intercom listener that automatically injects tasks into its standard input:
+```powershell
+intercom bridge --agent suraj -- opencode
+```
+
+### 5. Start the Background HTTP Daemon
+```powershell
+intercom server --auto-reply
+```
+
+---
+
+## 🧩 Cursor / Antigravity MCP Configuration
+
+Add this entry to your `mcpServers` configuration (e.g. `cursor_config.json` or `.gemini/antigravity/mcp/`):
+
+```json
+{
+  "mcpServers": {
+    "intercom-global": {
+      "command": "node",
+      "args": ["C:/Users/Suran/.intercom-global/bin/intercom-mcp.js"]
+    }
+  }
+}
+```
+
+---
+
+## 📜 License & Legal Information
+
+This project is open-source software licensed under the [MIT License](LICENSE).
+
+### Third-Party Acknowledgements
+- **[nicobailon/pi-intercom](https://github.com/nicobailon/pi-intercom)**: Created by Nico Bailon under the MIT License. `intercom-global` connects to the local IPC protocol designed for Pi coding agents.
+- **[@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol)**: Licensed under the MIT License.
+
+### Trademark & Non-Affiliation Disclaimer
+All product names, logos, and brands (including **Pi**, **Google Antigravity**, **Cursor**, **Devin**, **OpenCode**, and others) are trademarks or registered trademarks of their respective owners. Their mention in this repository is solely for compatibility, interoperability, and nominative identification, and does not imply any official endorsement, sponsorship, or affiliation.
+

@@ -1,0 +1,32 @@
+{
+  "name": "intercom-global",
+  "version": "1.0.0",
+  "description": "Universal Multi-IDE & Multi-CLI Intercom, Auto-Wake & Agent Communication Mesh",
+  "main": "src/index.js",
+  "bin": {
+    "intercom": "./bin/intercom.js",
+    "intercom-wake": "./bin/intercom-wake.js",
+    "intercom-mcp": "./bin/intercom-mcp.js"
+  },
+  "scripts": {
+    "start": "node bin/intercom.js server",
+    "server": "node bin/intercom.js server",
+    "bridge": "node src/bridges/pi-intercom.js",
+    "mcp": "node bin/intercom-mcp.js"
+  },
+  "keywords": [
+    "ai-agents",
+    "intercom",
+    "pi-intercom",
+    "cursor",
+    "antigravity",
+    "opencode",
+    "multi-agent",
+    "mcp"
+  ],
+  "author": "Suran",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.1"
+  }
+}
