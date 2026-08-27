@@ -10,6 +10,8 @@
 - **⚡ Native Pi-Intercom Bridge**: Connects directly to the Windows Named Pipe / Unix Socket broker used by [`nicobailon/pi-intercom`](https://github.com/nicobailon/pi-intercom).
 - **🔔 Universal Auto-Wake & Interruption**: Interrupts and forces an immediate execution turn in Pi sessions, OpenCode CLIs, Antigravity, or Devin cloud VMs.
 - **🔌 Model Context Protocol (MCP) Server**: Stdio MCP server exposing `intercom_send`, `intercom_wake`, `intercom_read`, and `intercom_list_peers` to Cursor, Antigravity, and Claude Desktop.
+- **🧠 Built-in Agent Skill**: Bundled [`skills/intercom-global/SKILL.md`](skills/intercom-global/SKILL.md) for self-discovering AI agents.
+- **📖 Integration Guide & Agent Rules**: Ready-to-use snippets in [`docs/GUIDE.md`](docs/GUIDE.md) for `AGENTS.md` and `.cursorrules`.
 - **📦 Durable File Mesh**: High-speed, lock-free JSON mailbox system with per-session routing (`agent#sessionId`).
 - **💻 Interactive Session Bridge**: Stdin/Stdout terminal wrapper that injects autonomous tasks into running CLIs (OpenCode, Aider, Pi).
 - **🌐 Standalone & Portable**: Completely isolated outside of individual project repositories.
