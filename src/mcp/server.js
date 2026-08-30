@@ -2,7 +2,7 @@
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontextprotocol/sdk/types.js");
-const { readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes } = require("../core/mesh");
+const { readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes, sendChannelMessage, readChannel, listChannels, broadcastToAgents } = require("../core/mesh");
 const { wakeAgent } = require("../controllers/autowake");
 
 function startMcpServer() {
@@ -28,6 +28,51 @@ function startMcpServer() {
             message: { type: "string", description: "Task instructions, questions, or findings" }
           },
           required: ["from", "to", "message"]
+        }
+      },
+      {
+        name: "intercom_broadcast",
+        description: "Broadcast a task or update to multiple companion agents concurrently (e.g. 'all' or 'pal,keshav,madhav')",
+        inputSchema: {
+          type: "object",
+          properties: {
+            from: { type: "string", description: "Your identity or session name" },
+            to: { type: "string", description: "Target agents (e.g. 'all', or comma-separated 'pal,keshav,madhav')" },
+            message: { type: "string", description: "Broadcast announcement or synchronized task" }
+          },
+          required: ["from", "to", "message"]
+        }
+      },
+      {
+        name: "intercom_channel_send",
+        description: "Publish a message to a shared multi-agent topic/channel (e.g. '#general', '#backend', '#qa')",
+        inputSchema: {
+          type: "object",
+          properties: {
+            channel: { type: "string", description: "Channel name (e.g. '#backend' or 'backend')" },
+            from: { type: "string", description: "Your identity or session name" },
+            message: { type: "string", description: "Message content" }
+          },
+          required: ["channel", "from", "message"]
+        }
+      },
+      {
+        name: "intercom_channel_read",
+        description: "Read recent messages posted in a multi-agent topic/channel",
+        inputSchema: {
+          type: "object",
+          properties: {
+            channel: { type: "string", description: "Channel name (e.g. '#backend' or 'backend')" }
+          },
+          required: ["channel"]
+        }
+      },
+      {
+        name: "intercom_channel_list",
+        description: "List all active topic channels and their message counts",
+        inputSchema: {
+          type: "object",
+          properties: {}
         }
       },
       {
@@ -107,6 +152,41 @@ function startMcpServer() {
         inbox.push(msgObj);
         writeInbox(args.to, inbox);
         return { content: [{ type: "text", text: `[Intercom] Delivered message from ${args.from} to ${args.to}` }] };
+      }
+
+      if (name === "intercom_broadcast") {
+        if (!args.from || !args.to || !args.message) {
+          return { content: [{ type: "text", text: "Missing required fields: from, to, message" }], isError: true };
+        }
+        const results = broadcastToAgents(args.from, args.to, args.message, (f, t, m) => {
+          const inbox = readInbox(t);
+          const msgObj = { id: Date.now(), from: f, to: t, message: m, timestamp: new Date().toISOString(), read: false };
+          inbox.push(msgObj);
+          writeInbox(t, inbox);
+          return msgObj;
+        });
+        return { content: [{ type: "text", text: `[Intercom Broadcast] Dispatched to ${results.length} agents: ${results.map(r => r.to).join(', ')}` }] };
+      }
+
+      if (name === "intercom_channel_send") {
+        if (!args.channel || !args.from || !args.message) {
+          return { content: [{ type: "text", text: "Missing required fields: channel, from, message" }], isError: true };
+        }
+        const msg = sendChannelMessage(args.channel, args.from, args.message);
+        return { content: [{ type: "text", text: `[Intercom Channel] Posted to ${msg.channel} (ID: ${msg.id})` }] };
+      }
+
+      if (name === "intercom_channel_read") {
+        if (!args.channel) {
+          return { content: [{ type: "text", text: "Missing required field: channel" }], isError: true };
+        }
+        const msgs = readChannel(args.channel);
+        return { content: [{ type: "text", text: msgs.length ? JSON.stringify(msgs, null, 2) : `No messages in channel ${args.channel}` }] };
+      }
+
+      if (name === "intercom_channel_list") {
+        const channels = listChannels();
+        return { content: [{ type: "text", text: JSON.stringify(channels, null, 2) }] };
       }
 
       if (name === "intercom_wake") {

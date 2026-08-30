@@ -2,9 +2,22 @@
 const http = require('http');
 const { exec } = require('child_process');
 const { PORT, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, checkAndMarkRead } = require('./mesh');
+const { readInbox, writeInbox, checkAndMarkRead, sendChannelMessage, readChannel, listChannels, broadcastToAgents } = require('./mesh');
 
 const AUTO_REPLY_ENABLED = process.argv.includes('--auto-reply') || process.env.INTERCOM_AUTO_REPLY === 'true';
+
+const sseClients = new Set();
+
+function broadcastEvent(type, payload) {
+  const data = JSON.stringify({ type, timestamp: new Date().toISOString(), payload });
+  for (const client of sseClients) {
+    try {
+      client.write(`event: ${type}\ndata: ${data}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
 
 function notifySystem(from, to, message) {
   if (process.platform === 'win32') {
@@ -24,6 +37,9 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
   if (!isAutoReply) {
     notifySystem(from, to, message);
   }
+
+  // Broadcast to all live SSE consumers
+  broadcastEvent('message', msgObj);
 
   // Instant Auto-Reply
   if (!isAutoReply && AUTO_REPLY_ENABLED && from.toLowerCase() !== to.toLowerCase()) {
@@ -133,7 +149,20 @@ function createServer() {
       return res.end(JSON.stringify(task, null, 2));
     }
 
-    // Standard Intercom REST endpoints
+    // 4. Server-Sent Events (SSE) Multi-Client Real-Time Event Bus
+    if (req.method === 'GET' && (parsedUrl.pathname === '/api/intercom/events' || parsedUrl.pathname === '/api/intercom/stream')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      });
+      res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
+      sseClients.add(res);
+      req.on('close', () => sseClients.delete(res));
+      return;
+    }
+
+    // 5. Standard Intercom REST Send
     if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/send') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -141,15 +170,74 @@ function createServer() {
         try {
           const { from, to, message } = JSON.parse(body);
           if (!from || !to || !message) throw new Error('Missing from, to, or message fields');
-          dispatchMessage(from, to, message);
+          const msgObj = dispatchMessage(from, to, message);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'delivered', to, autoReply: AUTO_REPLY_ENABLED }));
+          res.end(JSON.stringify({ status: 'delivered', to, messageId: msgObj.id, autoReply: AUTO_REPLY_ENABLED }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
       });
-    } else if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/inbox') {
+      return;
+    }
+
+    // 6. Multi-Agent Broadcast (1-to-Many Swarm)
+    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/broadcast') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { from, to, message } = JSON.parse(body);
+          if (!from || !to || !message) throw new Error('Missing from, to, or message fields');
+          const results = broadcastToAgents(from, to, message, dispatchMessage);
+          broadcastEvent('broadcast', { from, targets: to, message, results });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'broadcast_dispatched', count: results.length, results }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // 7. Pub/Sub Channel Send
+    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/channels/send') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { channel, from, message } = JSON.parse(body);
+          if (!channel || !from || !message) throw new Error('Missing channel, from, or message fields');
+          const msg = sendChannelMessage(channel, from, message);
+          broadcastEvent('channel_message', msg);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(msg));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // 8. List Pub/Sub Channels
+    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/channels') {
+      const channels = listChannels();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(channels, null, 2));
+    }
+
+    // 9. Read Pub/Sub Channel
+    if (req.method === 'GET' && parsedUrl.pathname.startsWith('/api/intercom/channels/')) {
+      const channel = parsedUrl.pathname.replace('/api/intercom/channels/', '');
+      const messages = readChannel(channel);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(messages, null, 2));
+    }
+
+    // 10. Read Mailbox
+    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/inbox') {
       const agent = parsedUrl.searchParams.get('agent');
       if (!agent) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -157,11 +245,11 @@ function createServer() {
       }
       const unread = checkAndMarkRead(agent);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(unread));
-    } else {
-      res.writeHead(404);
-      res.end();
+      return res.end(JSON.stringify(unread));
     }
+
+    res.writeHead(404);
+    res.end();
   });
 
   return server;

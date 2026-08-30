@@ -77,7 +77,31 @@ intercom read --agent Pal
 intercom peers
 ```
 
-### 3. Agent2Agent (A2A) Commands
+### 3. Multi-Agent Swarm Broadcast & Topic Channels
+```powershell
+# Broadcast an announcement or synchronized task to multiple agents simultaneously
+intercom broadcast --from Suran --to "pal,keshav,madhav" --msg "Database migration completed"
+
+# Broadcast to ALL active agents on the mesh
+intercom broadcast --from Suran --to all --msg "Please pull latest main branch"
+
+# Publish to a shared topic channel (e.g. #backend, #qa, #devops)
+intercom channel send --channel "#backend" --from Suran --msg "PR #42 is ready for review"
+
+# Read messages in a topic channel
+intercom channel read --channel "#backend"
+
+# List all active topic channels
+intercom channel list
+```
+
+### 4. Self-Healing Health Check (`intercom doctor`)
+```powershell
+# Check connectivity across all agent daemons, ports, named pipes, and mailboxes
+intercom doctor
+```
+
+### 5. Agent2Agent (A2A) Commands
 ```powershell
 # View the local mesh A2A Agent Card
 intercom a2a card
@@ -86,7 +110,7 @@ intercom a2a card
 intercom a2a send --to Pal --msg "Run test verification"
 ```
 
-### 4. Native Pi-Intercom IPC Commands
+### 6. Native Pi-Intercom IPC Commands
 ```powershell
 # List all live Pi sessions connected on this machine
 intercom pi list
@@ -98,17 +122,17 @@ intercom pi send --to Madhav --msg "Here is the updated schema"
 intercom pi ask --to Keshav --question "Which port is active?"
 ```
 
-### 5. Interactive CLI Session Bridge
+### 7. Interactive CLI Session Bridge
 Run any CLI wrapped in an intercom listener that automatically injects tasks into its standard input:
 ```powershell
 intercom bridge --agent suraj -- opencode
 ```
 
-### 6. Start the Background HTTP & A2A Daemon
+### 8. Start the Background HTTP & Real-Time Event Daemon
 ```powershell
 intercom server --auto-reply
 ```
-*(Provides `http://localhost:4150/.well-known/agent.json` and `http://localhost:4150/a2a/sendMessage`)*
+*(Provides `http://127.0.0.1:4150/api/intercom/events` live SSE event stream, `/.well-known/agent.json`, and `/a2a/sendMessage`)*
 
 ---
 

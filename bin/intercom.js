@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // bin/intercom.js - Main CLI Executable
 const { dispatchMessage, createServer } = require('../src/core/server');
-const { checkAndMarkRead, listActiveMailboxes, readInbox, clearInbox, waitForUnread } = require('../src/core/mesh');
+const { checkAndMarkRead, listActiveMailboxes, readInbox, clearInbox, waitForUnread, broadcastToAgents, sendChannelMessage, readChannel, listChannels } = require('../src/core/mesh');
 const { wakeAgent, diagnoseMesh } = require('../src/controllers/autowake');
 const { PiIntercomClient } = require('../src/bridges/pi-intercom');
 const { startSessionBridge } = require('../src/bridges/session-bridge');
@@ -16,7 +16,11 @@ function showHelp() {
 📡 Intercom Global - Universal Multi-Agent Communication & Auto-Wake CLI
 
 USAGE:
-  intercom send --from <name> --to <name> --msg "<message>"    Send a message
+  intercom send --from <name> --to <name> --msg "<message>"    Send a direct message
+  intercom broadcast --from <name> --to <all|a1,a2> --msg ".." Broadcast to multiple agents
+  intercom channel send --channel <name> --from <name> --msg   Publish to topic channel (e.g. #backend)
+  intercom channel read --channel <name>                       Read messages in topic channel
+  intercom channel list                                        List all active topic channels
   intercom wake --to <name> --msg "<message>"                   Interrupt & auto-wake an agent
   intercom watch --agent <name> [--timeout <sec>] [--json]     Wait reactively for incoming messages
   intercom check --agent <name>                                Check & mark inbox as read
@@ -106,6 +110,71 @@ if (command === 'send') {
   dispatchMessage(from, to, msg);
   console.log(`✔ Message delivered to "${to}"`);
   process.exit(0);
+}
+
+if (command === 'broadcast') {
+  const fromIdx = args.indexOf('--from');
+  const toIdx = args.indexOf('--to');
+  const msgIdx = args.indexOf('--msg');
+
+  if (fromIdx === -1 || toIdx === -1 || msgIdx === -1) {
+    console.error('Error: Required arguments: --from <name> --to <all|agent1,agent2> --msg "<text>"');
+    process.exit(1);
+  }
+
+  const from = args[fromIdx + 1];
+  const to = args[toIdx + 1];
+  const msg = args[msgIdx + 1];
+
+  const results = broadcastToAgents(from, to, msg, dispatchMessage);
+  console.log(`\n📢 [BROADCAST COMPLETE]: Dispatched to ${results.length} agents:`);
+  results.forEach(r => console.log(`   - 📬 ${r.to.toUpperCase()} (Message ID: ${r.messageId})`));
+  process.exit(0);
+}
+
+if (command === 'channel') {
+  const subCmd = args[1];
+  if (!subCmd || subCmd === 'list') {
+    const channels = listChannels();
+    console.log('\n💬 [ACTIVE TOPIC CHANNELS]:');
+    if (channels.length === 0) {
+      console.log('   (No topic channels active yet. Create one with: intercom channel send --channel #general --from me --msg "hello")');
+    } else {
+      channels.forEach(c => console.log(`   - 📢 ${c.name} (Messages: ${c.total})`));
+    }
+    process.exit(0);
+  }
+
+  if (subCmd === 'send') {
+    const chanIdx = args.indexOf('--channel');
+    const fromIdx = args.indexOf('--from');
+    const msgIdx = args.indexOf('--msg');
+    if (chanIdx === -1 || fromIdx === -1 || msgIdx === -1) {
+      console.error('Error: Usage: intercom channel send --channel <#name> --from <name> --msg "<text>"');
+      process.exit(1);
+    }
+    const channel = args[chanIdx + 1];
+    const from = args[fromIdx + 1];
+    const msg = args[msgIdx + 1];
+    const msgObj = sendChannelMessage(channel, from, msg);
+    console.log(`✔ Posted message to channel ${msgObj.channel} (ID: ${msgObj.id})`);
+    process.exit(0);
+  }
+
+  if (subCmd === 'read') {
+    const chanIdx = args.indexOf('--channel');
+    if (chanIdx === -1) {
+      console.error('Error: Usage: intercom channel read --channel <#name>');
+      process.exit(1);
+    }
+    const channel = args[chanIdx + 1];
+    const messages = readChannel(channel);
+    console.log(JSON.stringify(messages, null, 2));
+    process.exit(0);
+  }
+
+  console.error('Unknown channel subcommand. Use: list, send, read');
+  process.exit(1);
 }
 
 if (command === 'wake') {

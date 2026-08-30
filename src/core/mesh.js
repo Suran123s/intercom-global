@@ -130,6 +130,90 @@ function waitForUnread(agentName, timeoutMs = 300000) {
   });
 }
 
+const CHANNELS_DIR = path.join(MESH_DIR, 'channels');
+if (!fs.existsSync(CHANNELS_DIR)) {
+  try { fs.mkdirSync(CHANNELS_DIR, { recursive: true }); } catch {}
+}
+
+function getChannelFile(channelName) {
+  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
+  return path.join(CHANNELS_DIR, `${clean}.json`);
+}
+
+function readChannel(channelName) {
+  const file = getChannelFile(channelName);
+  if (!fs.existsSync(file)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+function sendChannelMessage(channelName, from, message) {
+  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
+  const file = getChannelFile(clean);
+  const messages = readChannel(clean);
+  const msgObj = {
+    id: Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+    channel: `#${clean}`,
+    from,
+    message,
+    timestamp: new Date().toISOString()
+  };
+  messages.push(msgObj);
+
+  // Atomic write
+  const tmp = `${file}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(messages, null, 2), 'utf8');
+    fs.renameSync(tmp, file);
+  } catch {
+    try { fs.writeFileSync(file, JSON.stringify(messages, null, 2), 'utf8'); } catch {}
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
+  }
+
+  return msgObj;
+}
+
+function listChannels() {
+  if (!fs.existsSync(CHANNELS_DIR)) return [];
+  const files = fs.readdirSync(CHANNELS_DIR);
+  const channels = [];
+  files.forEach(f => {
+    if (f.endsWith('.json')) {
+      const name = '#' + f.replace('.json', '');
+      try {
+        const content = JSON.parse(fs.readFileSync(path.join(CHANNELS_DIR, f), 'utf8') || '[]');
+        channels.push({ name, total: content.length, lastMessage: content[content.length - 1] || null });
+      } catch {}
+    }
+  });
+  return channels;
+}
+
+function broadcastToAgents(from, targets, message, dispatchFn) {
+  let targetList = [];
+  if (Array.isArray(targets)) {
+    targetList = targets;
+  } else if (typeof targets === 'string') {
+    if (targets.toLowerCase() === 'all' || targets === '*') {
+      targetList = listActiveMailboxes().map(m => m.name);
+    } else {
+      targetList = targets.split(',').map(t => t.trim()).filter(Boolean);
+    }
+  }
+
+  const results = [];
+  targetList.forEach(to => {
+    if (to.toLowerCase() !== from.toLowerCase()) {
+      const res = dispatchFn(from, to, message);
+      results.push({ to, status: 'dispatched', messageId: res.id });
+    }
+  });
+  return results;
+}
+
 module.exports = {
   getInboxFile,
   readInbox,
@@ -137,6 +221,11 @@ module.exports = {
   checkAndMarkRead,
   clearInbox,
   waitForUnread,
-  listActiveMailboxes
+  listActiveMailboxes,
+  getChannelFile,
+  readChannel,
+  sendChannelMessage,
+  listChannels,
+  broadcastToAgents
 };
 
