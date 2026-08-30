@@ -5,6 +5,7 @@ const server = require('./core/server');
 const autowake = require('./controllers/autowake');
 const piIntercom = require('./bridges/pi-intercom');
 const sessionBridge = require('./bridges/session-bridge');
+const a2a = require('./bridges/a2a');
 const mcp = require('./mcp/server');
 
 module.exports = {
@@ -14,5 +15,6 @@ module.exports = {
   ...autowake,
   ...piIntercom,
   ...sessionBridge,
+  ...a2a,
   ...mcp
 };

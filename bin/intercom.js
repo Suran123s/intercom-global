@@ -5,6 +5,7 @@ const { checkAndMarkRead, listActiveMailboxes, readInbox, clearInbox, waitForUnr
 const { wakeAgent } = require('../src/controllers/autowake');
 const { PiIntercomClient } = require('../src/bridges/pi-intercom');
 const { startSessionBridge } = require('../src/bridges/session-bridge');
+const { generateAgentCard, processA2AMessage } = require('../src/bridges/a2a');
 const { PORT } = require('../src/config');
 
 const args = process.argv.slice(2);
@@ -22,6 +23,8 @@ USAGE:
   intercom read --agent <name>                                 View all messages in inbox
   intercom clear --agent <name>                                Clear/empty an agent's inbox
   intercom peers                                               List all active mailboxes
+  intercom a2a card                                            Display A2A v1.0 Agent Card
+  intercom a2a send --to <name> --msg "<message>"              Dispatch via A2A protocol
   intercom pi list                                             List active Pi sessions via IPC
   intercom pi send --to <session> --msg "<message>"            Send directly over Pi Named Pipe
   intercom pi ask --to <session> --question "<question>"       Ask a question and wait for reply
@@ -159,6 +162,30 @@ if (command === 'peers') {
     console.log(`- 📦 [${p.name}] Total: ${p.total} | Unread: ${p.unread}`);
   });
   process.exit(0);
+}
+
+if (command === 'a2a') {
+  const subCmd = args[1];
+  if (!subCmd || subCmd === 'card') {
+    const card = generateAgentCard();
+    console.log(JSON.stringify(card, null, 2));
+    process.exit(0);
+  } else if (subCmd === 'send') {
+    const toIdx = args.indexOf('--to');
+    const msgIdx = args.indexOf('--msg');
+    if (toIdx === -1 || msgIdx === -1) {
+      console.error('Error: Usage: intercom a2a send --to <agent> --msg "<message>"');
+      process.exit(1);
+    }
+    const to = args[toIdx + 1];
+    const msg = args[msgIdx + 1];
+    const task = processA2AMessage({ to, message: msg, from: 'a2a-cli' }, dispatchMessage);
+    console.log(JSON.stringify(task, null, 2));
+    process.exit(0);
+  } else {
+    console.error('Unknown a2a subcommand. Use: card, send');
+    process.exit(1);
+  }
 }
 
 if (command === 'pi') {

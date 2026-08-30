@@ -49,10 +49,52 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
   return msgObj;
 }
 
+const { generateAgentCard, processA2AMessage, getA2ATask } = require('../bridges/a2a');
+
 function createServer() {
   const server = http.createServer((req, res) => {
-    const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
+    const host = req.headers.host ? `http://${req.headers.host}` : `http://localhost:${PORT}`;
+    const parsedUrl = new URL(req.url, host);
 
+    // 1. A2A Agent Card Discovery
+    if (req.method === 'GET' && (parsedUrl.pathname === '/.well-known/agent.json' || parsedUrl.pathname === '/a2a/agent-card' || parsedUrl.pathname === '/a2a/v1/agent-card')) {
+      const card = generateAgentCard(host);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(card, null, 2));
+    }
+
+    // 2. A2A Send Message / Create Task
+    if (req.method === 'POST' && (parsedUrl.pathname === '/a2a/sendMessage' || parsedUrl.pathname === '/a2a/v1/sendMessage' || parsedUrl.pathname === '/a2a/tasks')) {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const task = processA2AMessage(parsed, dispatchMessage);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(task, null, 2));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // 3. A2A Get Task Status
+    if (req.method === 'GET' && (parsedUrl.pathname.startsWith('/a2a/tasks/') || parsedUrl.pathname.startsWith('/a2a/v1/tasks/'))) {
+      const parts = parsedUrl.pathname.split('/');
+      const taskId = parts[parts.length - 1];
+      const task = getA2ATask(taskId);
+      if (!task) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Task not found' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(task, null, 2));
+    }
+
+    // Standard Intercom REST endpoints
     if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/send') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -90,3 +132,4 @@ module.exports = {
   dispatchMessage,
   createServer
 };
+

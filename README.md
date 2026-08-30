@@ -9,6 +9,7 @@
 
 - **⚡ Native Pi-Intercom Bridge**: Connects directly to the Windows Named Pipe / Unix Socket broker used by [`nicobailon/pi-intercom`](https://github.com/nicobailon/pi-intercom).
 - **🔔 Universal Auto-Wake & Interruption**: Interrupts and forces an immediate execution turn in Pi sessions, OpenCode CLIs, Antigravity, or Devin cloud VMs.
+- **🌐 Agent2Agent (A2A) Protocol Bridge**: Implements A2A v1.0 standard with Agent Card discovery (`/.well-known/agent.json`), dynamic skill catalogues, and structured task lifecycle tracking.
 - **🔌 Model Context Protocol (MCP) Server**: Stdio MCP server exposing `intercom_send`, `intercom_wake`, `intercom_watch`, `intercom_read`, `intercom_clear`, and `intercom_list_peers` to Cursor, Antigravity, and Claude Desktop with isolated stderr logging.
 - **👀 Reactive Zero-Polling Watcher (`intercom watch`)**: Asynchronous mailbox monitor that instantly wakes when an unread task arrives.
 - **🧠 Built-in Agent Skill**: Bundled [`skills/intercom-global/SKILL.md`](skills/intercom-global/SKILL.md) for self-discovering AI agents.
@@ -76,7 +77,16 @@ intercom read --agent Pal
 intercom peers
 ```
 
-### 3. Native Pi-Intercom IPC Commands
+### 3. Agent2Agent (A2A) Commands
+```powershell
+# View the local mesh A2A Agent Card
+intercom a2a card
+
+# Send a task formatted as an A2A task
+intercom a2a send --to Pal --msg "Run test verification"
+```
+
+### 4. Native Pi-Intercom IPC Commands
 ```powershell
 # List all live Pi sessions connected on this machine
 intercom pi list
@@ -88,16 +98,17 @@ intercom pi send --to Madhav --msg "Here is the updated schema"
 intercom pi ask --to Keshav --question "Which port is active?"
 ```
 
-### 4. Interactive CLI Session Bridge
+### 5. Interactive CLI Session Bridge
 Run any CLI wrapped in an intercom listener that automatically injects tasks into its standard input:
 ```powershell
 intercom bridge --agent suraj -- opencode
 ```
 
-### 5. Start the Background HTTP Daemon
+### 6. Start the Background HTTP & A2A Daemon
 ```powershell
 intercom server --auto-reply
 ```
+*(Provides `http://localhost:4150/.well-known/agent.json` and `http://localhost:4150/a2a/sendMessage`)*
 
 ---
 
