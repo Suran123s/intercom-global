@@ -105,11 +105,11 @@ function wakeCliAgent(targetName, message) {
 }
 
 function wakeOpenCodeAgent(targetName, message, callback) {
-  const isOpenCode = targetName.toLowerCase().startsWith('opencode');
+  const isOpenCode = targetName.toLowerCase().startsWith('opencode') || targetName.toLowerCase() === 'all';
   const port = process.env.OPENCODE_PORT || 4096;
   const baseUrl = process.env.OPENCODE_URL || `http://127.0.0.1:${port}`;
 
-  if (isOpenCode || process.env.OPENCODE_URL) {
+  if (isOpenCode) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
 
@@ -146,11 +146,11 @@ function wakeOpenCodeAgent(targetName, message, callback) {
 }
 
 function wakeHermesAgent(targetName, message, callback) {
-  const isHermes = targetName.toLowerCase().startsWith('hermes');
+  const isHermes = targetName.toLowerCase().startsWith('hermes') || targetName.toLowerCase() === 'all';
   const port = process.env.HERMES_PORT || 8000;
   const baseUrl = process.env.HERMES_URL || `http://127.0.0.1:${port}`;
 
-  if (isHermes || process.env.HERMES_URL) {
+  if (isHermes) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
 
