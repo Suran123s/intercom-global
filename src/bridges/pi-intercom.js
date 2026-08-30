@@ -60,6 +60,13 @@ function createFrameReader(onMessage, onError) {
   };
 }
 
+function connectSocket(target, connectListener) {
+  if (typeof target === 'object' && target !== null && target.host && target.port) {
+    return net.connect({ host: target.host, port: target.port }, connectListener);
+  }
+  return net.connect(target, connectListener);
+}
+
 class PiIntercomClient {
   constructor(options = {}) {
     this.name = options.name || 'antigravity';
@@ -73,8 +80,9 @@ class PiIntercomClient {
   }
 
   connect(onReady) {
-    console.log(`\n🔌 [PI INTERCOM BRIDGE] Connecting to pipe: ${PI_PIPE_NAME}`);
-    this.socket = net.connect(PI_PIPE_NAME, () => {
+    const targetDesc = typeof PI_PIPE_NAME === 'object' ? `${PI_PIPE_NAME.host}:${PI_PIPE_NAME.port}` : PI_PIPE_NAME;
+    console.log(`\n🔌 [PI INTERCOM BRIDGE] Connecting to broker target: ${targetDesc}`);
+    this.socket = connectSocket(PI_PIPE_NAME, () => {
       this.connected = true;
       console.log(`✅ [PI INTERCOM BRIDGE] Connected to Pi Intercom Broker!`);
       this.register();

@@ -81,7 +81,12 @@ intercom send --from <yourName> --to <recipientName> --msg "<message text>"
 intercom check --agent <yourName>
 ```
 
-#### 4. Native Pi-Intercom Direct Commands
+#### 4. Wait Reactively for Incoming Tasks (Zero-Polling)
+```bash
+intercom watch --agent <yourName> --timeout 300
+```
+
+#### 5. Native Pi-Intercom Direct Commands
 ```bash
 # List all active Pi sessions connected via local IPC pipe
 intercom pi list

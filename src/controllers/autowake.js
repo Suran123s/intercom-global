@@ -6,8 +6,22 @@ const { exec } = require('child_process');
 const { PI_PIPE_NAME, MESH_DIR } = require('../config');
 const { writeFrame } = require('../bridges/pi-intercom');
 
+function connectSocket(target, connectListener) {
+  if (typeof target === 'object' && target !== null && target.host && target.port) {
+    return net.connect({ host: target.host, port: target.port }, connectListener);
+  }
+  return net.connect(target, connectListener);
+}
+
 function wakePiAgent(targetName, message, callback) {
-  const socket = net.connect(PI_PIPE_NAME, () => {
+  let finished = false;
+  const done = (success) => {
+    if (finished) return;
+    finished = true;
+    if (callback) callback(success);
+  };
+
+  const socket = connectSocket(PI_PIPE_NAME, () => {
     const senderId = 'wake-' + Date.now();
     writeFrame(socket, {
       type: 'register',
@@ -38,14 +52,26 @@ function wakePiAgent(targetName, message, callback) {
       console.log(`⚡ [AUTOWAKE] Sent direct interrupting turn trigger to Pi session: "${targetName.toUpperCase()}"`);
       setTimeout(() => {
         socket.end();
-        if (callback) callback(true);
+        done(true);
       }, 400);
     }, 150);
   });
 
+  // Safety timeout in case pipe hangs
+  const socketTimeout = setTimeout(() => {
+    try { socket.destroy(); } catch {}
+    done(false);
+  }, 3000);
+
   socket.on('error', (err) => {
+    clearTimeout(socketTimeout);
     console.log(`[Pi Intercom Pipe Notice]: ${err.message}`);
-    if (callback) callback(false);
+    done(false);
+  });
+
+  socket.on('close', () => {
+    clearTimeout(socketTimeout);
+    done(false);
   });
 }
 

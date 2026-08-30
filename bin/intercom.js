@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // bin/intercom.js - Main CLI Executable
 const { dispatchMessage, createServer } = require('../src/core/server');
-const { checkAndMarkRead, listActiveMailboxes, readInbox } = require('../src/core/mesh');
+const { checkAndMarkRead, listActiveMailboxes, readInbox, clearInbox, waitForUnread } = require('../src/core/mesh');
 const { wakeAgent } = require('../src/controllers/autowake');
 const { PiIntercomClient } = require('../src/bridges/pi-intercom');
 const { startSessionBridge } = require('../src/bridges/session-bridge');
@@ -17,8 +17,10 @@ function showHelp() {
 USAGE:
   intercom send --from <name> --to <name> --msg "<message>"    Send a message
   intercom wake --to <name> --msg "<message>"                   Interrupt & auto-wake an agent
+  intercom watch --agent <name> [--timeout <sec>] [--json]     Wait reactively for incoming messages
   intercom check --agent <name>                                Check & mark inbox as read
   intercom read --agent <name>                                 View all messages in inbox
+  intercom clear --agent <name>                                Clear/empty an agent's inbox
   intercom peers                                               List all active mailboxes
   intercom pi list                                             List active Pi sessions via IPC
   intercom pi send --to <session> --msg "<message>"            Send directly over Pi Named Pipe
@@ -30,6 +32,56 @@ USAGE:
 
 if (!command || command === '--help' || command === '-h' || command === 'help') {
   showHelp();
+  process.exit(0);
+}
+
+if (command === 'watch') {
+  const agentIdx = args.indexOf('--agent');
+  if (agentIdx === -1) {
+    console.error('Error: Required argument: --agent <name>');
+    process.exit(1);
+  }
+  const agent = args[agentIdx + 1];
+  const timeoutIdx = args.indexOf('--timeout');
+  const timeoutSec = timeoutIdx !== -1 ? parseInt(args[timeoutIdx + 1], 10) : 300;
+  const timeoutMs = (isNaN(timeoutSec) ? 300 : timeoutSec) * 1000;
+  const isJson = args.includes('--json');
+
+  if (!isJson) {
+    console.log(`👀 [INTERCOM WATCH] Waiting for incoming messages for agent "${agent}" (timeout: ${timeoutSec}s)...`);
+  }
+
+  waitForUnread(agent, timeoutMs).then((messages) => {
+    if (messages.length === 0) {
+      if (isJson) {
+        console.log(JSON.stringify([]));
+      } else {
+        console.log(`⏱️ [TIMEOUT] No new messages received for "${agent}".`);
+      }
+      process.exit(0);
+    }
+
+    if (isJson) {
+      console.log(JSON.stringify(messages, null, 2));
+    } else {
+      console.log(`\n📬 [${messages.length} NEW MESSAGE(S) RECEIVED FOR ${agent.toUpperCase()}]:`);
+      messages.forEach(m => {
+        console.log(`\n⚡ [From ${m.from.toUpperCase()}] (${m.timestamp}):\n${m.message}`);
+      });
+    }
+    process.exit(0);
+  });
+}
+
+if (command === 'clear' || command === 'clean') {
+  const agentIdx = args.indexOf('--agent');
+  if (agentIdx === -1) {
+    console.error('Error: Required argument: --agent <name>');
+    process.exit(1);
+  }
+  const agent = args[agentIdx + 1];
+  clearInbox(agent);
+  console.log(`✔ Cleared inbox for agent "${agent}".`);
   process.exit(0);
 }
 

@@ -51,10 +51,80 @@ function listActiveMailboxes() {
   return mailboxes;
 }
 
+function clearInbox(agentName) {
+  const file = getInboxFile(agentName);
+  if (fs.existsSync(file)) {
+    fs.writeFileSync(file, '[]', 'utf8');
+  }
+}
+
+function waitForUnread(agentName, timeoutMs = 300000) {
+  return new Promise((resolve) => {
+    // 1. Check immediately
+    const immediate = checkAndMarkRead(agentName);
+    if (immediate.length > 0) {
+      return resolve(immediate);
+    }
+
+    const inboxFile = getInboxFile(agentName);
+    let resolved = false;
+    let timer = null;
+    let pollInterval = null;
+    let watcher = null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (pollInterval) clearInterval(pollInterval);
+      if (watcher) {
+        try { watcher.close(); } catch {}
+      }
+    };
+
+    const checkNow = () => {
+      if (resolved) return;
+      const unread = checkAndMarkRead(agentName);
+      if (unread.length > 0) {
+        resolved = true;
+        cleanup();
+        resolve(unread);
+      }
+    };
+
+    // Timeout
+    timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve([]);
+      }
+    }, timeoutMs);
+
+    // Poll fallback
+    pollInterval = setInterval(checkNow, 500);
+
+    // fs watcher on MESH_DIR
+    try {
+      watcher = fs.watch(MESH_DIR, (eventType, filename) => {
+        if (!filename) {
+          checkNow();
+          return;
+        }
+        const targetFilename = path.basename(inboxFile).toLowerCase();
+        if (filename.toLowerCase() === targetFilename || filename.toLowerCase().startsWith(agentName.toLowerCase())) {
+          checkNow();
+        }
+      });
+    } catch {}
+  });
+}
+
 module.exports = {
   getInboxFile,
   readInbox,
   writeInbox,
   checkAndMarkRead,
+  clearInbox,
+  waitForUnread,
   listActiveMailboxes
 };
+
