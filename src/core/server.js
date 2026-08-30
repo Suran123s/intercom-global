@@ -51,8 +51,21 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
 
 const { generateAgentCard, processA2AMessage, getA2ATask } = require('../bridges/a2a');
 
+function setCorsHeaders(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+}
+
 function createServer() {
   const server = http.createServer((req, res) => {
+    setCorsHeaders(res);
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      return res.end();
+    }
+
     const host = req.headers.host ? `http://${req.headers.host}` : `http://localhost:${PORT}`;
     const parsedUrl = new URL(req.url, host);
 

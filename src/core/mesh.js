@@ -23,7 +23,19 @@ function readInbox(agentName) {
 }
 
 function writeInbox(agentName, messages) {
-  fs.writeFileSync(getInboxFile(agentName), JSON.stringify(messages, null, 2), 'utf8');
+  const target = getInboxFile(agentName);
+  const tmp = `${target}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(messages, null, 2), 'utf8');
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      fs.writeFileSync(target, JSON.stringify(messages, null, 2), 'utf8');
+    } catch {}
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch {}
+  }
 }
 
 function checkAndMarkRead(agentName) {

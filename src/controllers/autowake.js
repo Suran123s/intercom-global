@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const { PI_PIPE_NAME, MESH_DIR } = require('../config');
-const { writeFrame } = require('../bridges/pi-intercom');
+const { writeFrame, tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
 
 function connectSocket(target, connectListener) {
   if (typeof target === 'object' && target !== null && target.host && target.port) {
@@ -13,7 +13,7 @@ function connectSocket(target, connectListener) {
   return net.connect(target, connectListener);
 }
 
-function wakePiAgent(targetName, message, callback) {
+function wakePiAgent(targetName, message, callback, isRetry = false) {
   let finished = false;
   const done = (success) => {
     if (finished) return;
@@ -65,6 +65,14 @@ function wakePiAgent(targetName, message, callback) {
 
   socket.on('error', (err) => {
     clearTimeout(socketTimeout);
+    if (!isRetry) {
+      const spawned = tryAutoSpawnPiBroker();
+      if (spawned) {
+        console.log(`🚀 [AUTOWAKE] Auto-spawning background Pi Intercom Broker for "${targetName.toUpperCase()}"...`);
+        setTimeout(() => wakePiAgent(targetName, message, callback, true), 1000);
+        return;
+      }
+    }
     console.log(`[Pi Intercom Pipe Notice]: ${err.message}`);
     done(false);
   });

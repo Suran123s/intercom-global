@@ -3,7 +3,36 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { PI_PIPE_NAME, MESH_DIR } = require('../config');
+const { PI_PIPE_NAME, MESH_DIR, getAgentDirPath } = require('../config');
+
+function tryAutoSpawnPiBroker() {
+  const agentDir = getAgentDirPath();
+  const extensionDir = path.join(agentDir, 'npm', 'node_modules', 'pi-intercom');
+  const brokerPath = path.join(extensionDir, 'broker', 'broker.ts');
+  if (!fs.existsSync(brokerPath)) return false;
+
+  try {
+    const tsxCli = path.join(extensionDir, '..', '..', 'node_modules', 'tsx', 'dist', 'cli.mjs');
+    const tsxLocal = path.join(extensionDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+    const targetTsx = fs.existsSync(tsxCli) ? tsxCli : (fs.existsSync(tsxLocal) ? tsxLocal : null);
+    if (!targetTsx) return false;
+
+    const child = require('child_process').spawn(
+      process.execPath,
+      [targetTsx, brokerPath],
+      {
+        detached: true,
+        stdio: 'ignore',
+        cwd: extensionDir,
+        windowsHide: true
+      }
+    );
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function writeFrame(socket, payload) {
   try {
@@ -77,6 +106,7 @@ class PiIntercomClient {
     this.connected = false;
     this.activeSessions = [];
     this.pendingReplies = new Map();
+    this.spawnAttempted = false;
   }
 
   connect(onReady) {
@@ -98,6 +128,15 @@ class PiIntercomClient {
     this.socket.on('data', reader);
     this.socket.on('error', (err) => {
       console.error(`[Pi Intercom Socket Notice]:`, err.message);
+      if (!this.connected && !this.spawnAttempted) {
+        this.spawnAttempted = true;
+        const spawned = tryAutoSpawnPiBroker();
+        if (spawned) {
+          console.log(`🚀 [PI INTERCOM BRIDGE] Auto-spawning background Pi Intercom Broker... Retrying in 1s`);
+          setTimeout(() => this.connect(onReady), 1000);
+          return;
+        }
+      }
       if (!this.isDaemon && !this.connected) {
         console.log(`💡 Note: Pi Intercom broker is currently offline. Start Pi or run 'pi' in a terminal to launch the broker.`);
         if (this.onFail) this.onFail();
@@ -246,7 +285,8 @@ class PiIntercomClient {
 module.exports = {
   PiIntercomClient,
   writeFrame,
-  createFrameReader
+  createFrameReader,
+  tryAutoSpawnPiBroker
 };
 
 // Direct script execution
