@@ -43,10 +43,14 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
     }
   }
 
+  const processedMessageIds = new Set();
+
   const pollInterval = setInterval(() => {
     // 1. Session specific
     const sessionMessages = checkInbox(sessionInboxFile);
     sessionMessages.forEach(msg => {
+      if (msg.id && processedMessageIds.has(msg.id)) return;
+      if (msg.id) processedMessageIds.add(msg.id);
       console.log(`\n⚡ [INJECTING TASK FROM ${msg.from.toUpperCase()}] ──► ${fullAgentTag}`);
       child.stdin.write(msg.message + '\n');
     });
@@ -59,8 +63,11 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
         allMsgs.forEach(m => {
           if (!m.read && (m.to.toLowerCase() === fullAgentTag || m.to.toLowerCase() === agentName.toLowerCase())) {
             if (m.to.toLowerCase() === fullAgentTag || !m.to.includes('#')) {
-              console.log(`\n⚡ [INJECTING TASK FROM ${m.from.toUpperCase()}] ──► ${fullAgentTag}`);
-              child.stdin.write(m.message + '\n');
+              if (!m.id || !processedMessageIds.has(m.id)) {
+                if (m.id) processedMessageIds.add(m.id);
+                console.log(`\n⚡ [INJECTING TASK FROM ${m.from.toUpperCase()}] ──► ${fullAgentTag}`);
+                child.stdin.write(m.message + '\n');
+              }
               m.read = true;
               modified = true;
             }

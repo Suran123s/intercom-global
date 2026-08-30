@@ -3,8 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const fs = require('fs');
-const path = require('path');
-const { wakeAgent, wakeCliAgent, wakeOpenCodeAgent, wakeHermesAgent } = require('../src/controllers/autowake');
+const { wakeCliAgent, wakeOpenCodeAgent, wakeHermesAgent } = require('../src/controllers/autowake');
 const { getInboxFile, readInbox } = require('../src/core/mesh');
 
 test('wakeCliAgent writes to mailbox with beep and unread status', () => {
@@ -24,8 +23,6 @@ test('wakeCliAgent writes to mailbox with beep and unread status', () => {
 });
 
 test('wakeOpenCodeAgent connects to OpenCode API server when present', async () => {
-  const mockPort = 4198;
-  process.env.OPENCODE_URL = `http://127.0.0.1:${mockPort}`;
   let receivedPrompt = false;
 
   const mockOpenCodeServer = http.createServer((req, res) => {
@@ -42,23 +39,24 @@ test('wakeOpenCodeAgent connects to OpenCode API server when present', async () 
     res.end();
   });
 
-  await new Promise(r => mockOpenCodeServer.listen(mockPort, r));
+  await new Promise(r => mockOpenCodeServer.listen(0, '127.0.0.1', r));
+  const port = mockOpenCodeServer.address().port;
+  process.env.OPENCODE_URL = `http://127.0.0.1:${port}`;
 
   await new Promise(resolve => {
-    wakeOpenCodeAgent('opencode', 'Test wake task', (success) => {
-      assert.strictEqual(success, true);
+    wakeOpenCodeAgent('opencode', 'Test wake task', (result) => {
+      assert.strictEqual(result.delivered, true);
+      assert.strictEqual(result.session, 'sess-123');
       assert.strictEqual(receivedPrompt, true);
       resolve();
     });
   });
 
-  mockOpenCodeServer.close();
+  await new Promise(r => mockOpenCodeServer.close(r));
   delete process.env.OPENCODE_URL;
 });
 
 test('wakeHermesAgent connects to Hermes Gateway API when present', async () => {
-  const mockPort = 4197;
-  process.env.HERMES_URL = `http://127.0.0.1:${mockPort}`;
   let receivedChat = false;
 
   const mockHermesServer = http.createServer((req, res) => {
@@ -71,16 +69,18 @@ test('wakeHermesAgent connects to Hermes Gateway API when present', async () => 
     res.end();
   });
 
-  await new Promise(r => mockHermesServer.listen(mockPort, r));
+  await new Promise(r => mockHermesServer.listen(0, '127.0.0.1', r));
+  const port = mockHermesServer.address().port;
+  process.env.HERMES_URL = `http://127.0.0.1:${port}`;
 
   await new Promise(resolve => {
-    wakeHermesAgent('hermes', 'Test hermes task', (success) => {
-      assert.strictEqual(success, true);
+    wakeHermesAgent('hermes', 'Test hermes task', (result) => {
+      assert.strictEqual(result.delivered, true);
       assert.strictEqual(receivedChat, true);
       resolve();
     });
   });
 
-  mockHermesServer.close();
+  await new Promise(r => mockHermesServer.close(r));
   delete process.env.HERMES_URL;
 });

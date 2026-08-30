@@ -2,7 +2,7 @@
 // bin/intercom.js - Main CLI Executable
 const { dispatchMessage, createServer } = require('../src/core/server');
 const { checkAndMarkRead, listActiveMailboxes, readInbox, clearInbox, waitForUnread } = require('../src/core/mesh');
-const { wakeAgent } = require('../src/controllers/autowake');
+const { wakeAgent, diagnoseMesh } = require('../src/controllers/autowake');
 const { PiIntercomClient } = require('../src/bridges/pi-intercom');
 const { startSessionBridge } = require('../src/bridges/session-bridge');
 const { generateAgentCard, processA2AMessage } = require('../src/bridges/a2a');
@@ -23,6 +23,7 @@ USAGE:
   intercom read --agent <name>                                 View all messages in inbox
   intercom clear --agent <name>                                Clear/empty an agent's inbox
   intercom peers                                               List all active mailboxes
+  intercom doctor / status                                     Diagnose connectivity to all agent runtimes
   intercom a2a card                                            Display A2A v1.0 Agent Card
   intercom a2a send --to <name> --msg "<message>"              Dispatch via A2A protocol
   intercom pi list                                             List active Pi sessions via IPC
@@ -164,6 +165,61 @@ if (command === 'peers') {
   process.exit(0);
 }
 
+if (command === 'doctor' || command === 'status') {
+  diagnoseMesh().then((diag) => {
+    console.log('\n🩺 [INTERCOM GLOBAL MESH HEALTH & CONNECTIVITY REPORT]');
+    console.log(`⏰ Timestamp: ${diag.timestamp}\n`);
+
+    // Pi Broker
+    const pi = diag.services.piBroker;
+    if (pi.status === 'ONLINE') {
+      console.log(`🟢 Pi Intercom Broker  : ONLINE (Target: ${pi.target})`);
+    } else {
+      console.log(`🔴 Pi Intercom Broker  : OFFLINE (${pi.reason})`);
+      console.log(`   💡 Remediation      : ${pi.remediation}`);
+    }
+
+    // OpenCode API
+    const opencode = diag.services.opencodeApi;
+    if (opencode.status === 'ONLINE') {
+      console.log(`🟢 OpenCode REST API   : ONLINE (${opencode.url}) - Active Sessions: ${opencode.activeSessions}`);
+    } else {
+      console.log(`🔴 OpenCode REST API   : OFFLINE (${opencode.url})`);
+      console.log(`   💡 Remediation      : ${opencode.remediation}`);
+    }
+
+    // Hermes Gateway
+    const hermes = diag.services.hermesGateway;
+    if (hermes.status === 'ONLINE') {
+      console.log(`🟢 Hermes Gateway API  : ONLINE (${hermes.url})`);
+    } else {
+      console.log(`🔴 Hermes Gateway API  : OFFLINE (${hermes.url})`);
+      console.log(`   💡 Remediation      : ${hermes.remediation}`);
+    }
+
+    // Intercom HTTP Daemon
+    const daemon = diag.services.intercomDaemon;
+    if (daemon.status === 'ONLINE') {
+      console.log(`🟢 Intercom HTTP Daemon: ONLINE (${daemon.url}) - Agent Card: "${daemon.agentCard}"`);
+    } else {
+      console.log(`🔴 Intercom HTTP Daemon: OFFLINE (${daemon.url})`);
+      console.log(`   💡 Remediation      : ${daemon.remediation}`);
+    }
+
+    // Mailboxes
+    console.log('\n📦 [DURABLE MAILBOX DISCOVERY]:');
+    if (diag.mailboxes.length === 0) {
+      console.log('   (No companion mailboxes initialized yet)');
+    } else {
+      diag.mailboxes.forEach(m => {
+        console.log(`   - 📬 ${m.name.toUpperCase()} (Total: ${m.total}, Unread: ${m.unread})`);
+      });
+    }
+    console.log('\n===========================================================');
+    process.exit(0);
+  });
+}
+
 if (command === 'a2a') {
   const subCmd = args[1];
   if (!subCmd || subCmd === 'card') {
@@ -251,10 +307,10 @@ if (command === 'bridge') {
 
 if (command === 'server') {
   const server = createServer();
-  server.listen(PORT, () => {
+  server.listen(PORT, '127.0.0.1', () => {
     console.log(`\n=============================================================`);
     console.log(`📡 [INTERCOM GLOBAL DAEMON RUNNING]`);
-    console.log(`🌐 Port          : http://localhost:${PORT}`);
+    console.log(`🌐 Host          : http://127.0.0.1:${PORT}`);
     console.log(`🤖 Auto-Reply   : ${process.argv.includes('--auto-reply') ? 'ENABLED' : 'DISABLED'}`);
     console.log(`=============================================================\n`);
   });
