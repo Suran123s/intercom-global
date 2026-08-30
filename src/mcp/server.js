@@ -3,6 +3,8 @@ const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontextprotocol/sdk/types.js");
 const { readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes, sendChannelMessage, readChannel, listChannels, broadcastToAgents } = require("../core/mesh");
+const { updateMessageStatus, getDlq } = require("../core/dlq");
+const { spawnAgent } = require("../controllers/spawner");
 const { wakeAgent } = require("../controllers/autowake");
 
 function startMcpServer() {
@@ -128,6 +130,40 @@ function startMcpServer() {
           type: "object",
           properties: {}
         }
+      },
+      {
+        name: "intercom_spawn",
+        description: "Auto-spawn an agent process on-demand (e.g. 'opencode', 'hermes', 'pi')",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agent: { type: "string", description: "Agent profile name (e.g. opencode, hermes, pi)" },
+            visible: { type: "boolean", description: "Show terminal window (default: false)" }
+          },
+          required: ["agent"]
+        }
+      },
+      {
+        name: "intercom_ack",
+        description: "Acknowledge task completion, updating status and returning execution result back to the mesh",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agent: { type: "string", description: "Your agent name" },
+            messageId: { type: "string", description: "The message/task ID to acknowledge" },
+            status: { type: "string", enum: ["COMPLETED", "PROCESSING", "FAILED"], description: "Task status" },
+            result: { type: "string", description: "Optional execution result summary or payload" }
+          },
+          required: ["agent", "messageId"]
+        }
+      },
+      {
+        name: "intercom_dlq_list",
+        description: "List failed or unacknowledged messages stored in the Dead Letter Queue",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        }
       }
     ]
   }));
@@ -235,6 +271,30 @@ function startMcpServer() {
       if (name === "intercom_list_peers") {
         const peers = listActiveMailboxes();
         return { content: [{ type: "text", text: JSON.stringify(peers, null, 2) }] };
+      }
+
+      if (name === "intercom_spawn") {
+        if (!args.agent) {
+          return { content: [{ type: "text", text: "Missing required field: agent" }], isError: true };
+        }
+        const result = await spawnAgent(args.agent, { visible: args.visible });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      if (name === "intercom_ack") {
+        if (!args.agent || !args.messageId) {
+          return { content: [{ type: "text", text: "Missing required fields: agent, messageId" }], isError: true };
+        }
+        const updated = updateMessageStatus(args.agent, args.messageId, args.status || "COMPLETED", args.result);
+        if (!updated) {
+          return { content: [{ type: "text", text: `Message #${args.messageId} not found for agent ${args.agent}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `[Intercom ACK] Task #${args.messageId} marked as ${args.status || "COMPLETED"}` }] };
+      }
+
+      if (name === "intercom_dlq_list") {
+        const dlq = getDlq();
+        return { content: [{ type: "text", text: JSON.stringify(dlq, null, 2) }] };
       }
 
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };

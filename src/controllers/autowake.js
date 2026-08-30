@@ -203,49 +203,65 @@ function wakeCloudAgent(targetName, message) {
   return { delivered: false, skipped: true };
 }
 
-function wakeAgent(to, message, callback) {
+const { showDesktopNotification } = require('../core/notifications');
+const { spawnAgent } = require('./spawner');
+
+function wakeAgent(to, message, callback, options = {}) {
   console.log(`\n===========================================================`);
   console.log(`🔔 [UNIVERSAL AUTOWAKE TRIGGER INITIATED]`);
   console.log(`🎯 Recipient : ${to.toUpperCase()}`);
   console.log(`💬 Message   : "${message}"`);
+  if (options.autoSpawn) console.log(`🚀 Auto-Spawn: ENABLED (Will attempt launch if offline)`);
   console.log(`===========================================================\n`);
 
-  const report = {
-    target: to,
-    timestamp: new Date().toISOString(),
-    channels: {}
-  };
+  const runWake = () => {
+    const report = {
+      target: to,
+      timestamp: new Date().toISOString(),
+      channels: {}
+    };
 
-  wakePiAgent(to, message, (piRes) => {
-    report.channels.pi = piRes;
-    wakeOpenCodeAgent(to, message, (opencodeRes) => {
-      report.channels.opencode = opencodeRes;
-      wakeHermesAgent(to, message, (hermesRes) => {
-        report.channels.hermes = hermesRes;
-        report.channels.mailbox = wakeCliAgent(to, message);
-        report.channels.cloud = wakeCloudAgent(to, message);
+    wakePiAgent(to, message, (piRes) => {
+      report.channels.pi = piRes;
+      wakeOpenCodeAgent(to, message, (opencodeRes) => {
+        report.channels.opencode = opencodeRes;
+        wakeHermesAgent(to, message, (hermesRes) => {
+          report.channels.hermes = hermesRes;
+          report.channels.mailbox = wakeCliAgent(to, message);
+          report.channels.cloud = wakeCloudAgent(to, message);
 
-        // Summary details
-        console.log(`\n📋 [DELIVERY DIAGNOSTICS FOR ${to.toUpperCase()}]:`);
-        console.log(`- 📬 Durable Mailbox : ✅ DELIVERED (${report.channels.mailbox.file})`);
-        if (report.channels.pi?.delivered) console.log(`- 🥧 Pi IPC Pipe     : ✅ DELIVERED`);
-        else if (report.channels.pi?.reason) console.log(`- 🥧 Pi IPC Pipe     : ℹ️ NOT CONNECTED (${report.channels.pi.reason})`);
+          // Show OS desktop toast notification if offline or on wake
+          showDesktopNotification(`Intercom Task for ${to.toUpperCase()}`, message.slice(0, 100));
 
-        if (report.channels.opencode?.delivered) console.log(`- 💻 OpenCode REST   : ✅ PROMPT INJECTED (Session: ${report.channels.opencode.session})`);
-        else if (report.channels.opencode?.reason) console.log(`- 💻 OpenCode REST   : ℹ️ OFFLINE (${report.channels.opencode.reason})`);
+          // Summary details
+          console.log(`\n📋 [DELIVERY DIAGNOSTICS FOR ${to.toUpperCase()}]:`);
+          console.log(`- 📬 Durable Mailbox : ✅ DELIVERED (${report.channels.mailbox.file})`);
+          if (report.channels.pi?.delivered) console.log(`- 🥧 Pi IPC Pipe     : ✅ DELIVERED`);
+          else if (report.channels.pi?.reason) console.log(`- 🥧 Pi IPC Pipe     : ℹ️ NOT CONNECTED (${report.channels.pi.reason})`);
 
-        if (report.channels.hermes?.delivered) console.log(`- 🦙 Hermes Gateway  : ✅ DISPATCHED (${report.channels.hermes.url})`);
-        else if (report.channels.hermes?.reason) console.log(`- 🦙 Hermes Gateway  : ℹ️ OFFLINE (${report.channels.hermes.reason})`);
+          if (report.channels.opencode?.delivered) console.log(`- 💻 OpenCode REST   : ✅ PROMPT INJECTED (Session: ${report.channels.opencode.session})`);
+          else if (report.channels.opencode?.reason) console.log(`- 💻 OpenCode REST   : ℹ️ OFFLINE (${report.channels.opencode.reason})`);
 
-        if (report.channels.cloud?.delivered) console.log(`- ☁️ Devin Cloud     : ✅ SESSION TRIGGERED`);
-        else if (report.channels.cloud?.reason) console.log(`- ☁️ Devin Cloud     : ℹ️ SKIPPED (${report.channels.cloud.reason})`);
+          if (report.channels.hermes?.delivered) console.log(`- 🦙 Hermes Gateway  : ✅ DISPATCHED (${report.channels.hermes.url})`);
+          else if (report.channels.hermes?.reason) console.log(`- 🦙 Hermes Gateway  : ℹ️ OFFLINE (${report.channels.hermes.reason})`);
 
-        console.log(`===========================================================\n`);
+          if (report.channels.cloud?.delivered) console.log(`- ☁️ Devin Cloud     : ✅ SESSION TRIGGERED`);
+          else if (report.channels.cloud?.reason) console.log(`- ☁️ Devin Cloud     : ℹ️ SKIPPED (${report.channels.cloud.reason})`);
 
-        if (callback) callback(report);
+          console.log(`- 🔔 Desktop Toast   : ✅ OS NOTIFICATION SENT`);
+          console.log(`===========================================================\n`);
+
+          if (callback) callback(report);
+        });
       });
     });
-  });
+  };
+
+  if (options.autoSpawn) {
+    spawnAgent(to).then(() => runWake()).catch(() => runWake());
+  } else {
+    runWake();
+  }
 }
 
 async function diagnoseMesh() {

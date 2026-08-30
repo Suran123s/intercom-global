@@ -3,6 +3,8 @@ const http = require('http');
 const { exec } = require('child_process');
 const { PORT, MESH_DIR } = require('../config');
 const { readInbox, writeInbox, checkAndMarkRead, sendChannelMessage, readChannel, listChannels, broadcastToAgents } = require('./mesh');
+const { updateMessageStatus, getMessageStatus, getDlq, clearDlq } = require('./dlq');
+const { spawnAgent } = require('../controllers/spawner');
 
 const AUTO_REPLY_ENABLED = process.argv.includes('--auto-reply') || process.env.INTERCOM_AUTO_REPLY === 'true';
 
@@ -246,6 +248,79 @@ function createServer() {
       const unread = checkAndMarkRead(agent);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(unread));
+    }
+
+    // 11. Task Acknowledgment (ACK/NACK)
+    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/ack') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { agent, messageId, status, result } = JSON.parse(body);
+          if (!agent || !messageId) throw new Error('Missing agent or messageId');
+          const updated = updateMessageStatus(agent, messageId, status || 'COMPLETED', result);
+          if (!updated) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: `Message #${messageId} not found for agent ${agent}` }));
+          }
+          broadcastEvent('task_ack', updated);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(updated));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // 12. Task Status Check
+    if (req.method === 'GET' && parsedUrl.pathname.startsWith('/api/intercom/status/')) {
+      const parts = parsedUrl.pathname.replace('/api/intercom/status/', '').split('/');
+      const [agent, messageId] = parts;
+      if (!agent || !messageId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Usage: /api/intercom/status/:agent/:messageId' }));
+      }
+      const status = getMessageStatus(agent, messageId);
+      if (!status) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Message not found' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(status, null, 2));
+    }
+
+    // 13. Dead Letter Queue (DLQ)
+    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/dlq') {
+      const dlq = getDlq();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(dlq, null, 2));
+    }
+
+    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/dlq/clear') {
+      clearDlq();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ status: 'cleared' }));
+    }
+
+    // 14. Auto-Spawn Agent
+    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/spawn') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', async () => {
+        try {
+          const { agent, visible, timeoutMs } = JSON.parse(body);
+          if (!agent) throw new Error('Missing agent field');
+          const result = await spawnAgent(agent, { visible, timeoutMs });
+          res.writeHead(result.success ? 200 : 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
     }
 
     res.writeHead(404);

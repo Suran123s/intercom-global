@@ -3,6 +3,8 @@
 const { dispatchMessage, createServer } = require('../src/core/server');
 const { checkAndMarkRead, listActiveMailboxes, readInbox, clearInbox, waitForUnread, broadcastToAgents, sendChannelMessage, readChannel, listChannels } = require('../src/core/mesh');
 const { wakeAgent, diagnoseMesh } = require('../src/controllers/autowake');
+const { updateMessageStatus, getMessageStatus, getDlq, clearDlq } = require('../src/core/dlq');
+const { spawnAgent } = require('../src/controllers/spawner');
 const { PiIntercomClient } = require('../src/bridges/pi-intercom');
 const { startSessionBridge } = require('../src/bridges/session-bridge');
 const { generateAgentCard, processA2AMessage } = require('../src/bridges/a2a');
@@ -21,7 +23,11 @@ USAGE:
   intercom channel send --channel <name> --from <name> --msg   Publish to topic channel (e.g. #backend)
   intercom channel read --channel <name>                       Read messages in topic channel
   intercom channel list                                        List all active topic channels
-  intercom wake --to <name> --msg "<message>"                   Interrupt & auto-wake an agent
+  intercom wake --to <name> --msg "<message>" [--autospawn]    Interrupt & auto-wake an agent (with auto-spawn fallback)
+  intercom spawn --agent <name> [--visible]                    Auto-spawn an agent on-demand (e.g. opencode, hermes, pi)
+  intercom ack --agent <name> --id <id> [--status COMPLETED]   Acknowledge task completion and report result
+  intercom status-task --agent <name> --id <id>                Check execution status of a task
+  intercom dlq [list|clear]                                    Inspect or clear the Dead Letter Queue
   intercom watch --agent <name> [--timeout <sec>] [--json]     Wait reactively for incoming messages
   intercom check --agent <name>                                Check & mark inbox as read
   intercom read --agent <name>                                 View all messages in inbox
@@ -180,9 +186,10 @@ if (command === 'channel') {
 if (command === 'wake') {
   const toIdx = args.indexOf('--to');
   const msgIdx = args.indexOf('--msg');
+  const autoSpawn = args.includes('--autospawn');
 
   if (toIdx === -1 || msgIdx === -1) {
-    console.error('Error: Required arguments: --to <name> --msg "<text>"');
+    console.error('Error: Required arguments: --to <name> --msg "<text>" [--autospawn]');
     process.exit(1);
   }
 
@@ -191,7 +198,95 @@ if (command === 'wake') {
 
   wakeAgent(to, msg, () => {
     setTimeout(() => process.exit(0), 400);
+  }, { autoSpawn });
+}
+
+if (command === 'spawn') {
+  const agentIdx = args.indexOf('--agent');
+  if (agentIdx === -1) {
+    console.error('Error: Required argument: --agent <name> [--visible]');
+    process.exit(1);
+  }
+  const agent = args[agentIdx + 1];
+  const visible = args.includes('--visible');
+
+  spawnAgent(agent, { visible }).then(result => {
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.success ? 0 : 1);
   });
+}
+
+if (command === 'ack') {
+  const agentIdx = args.indexOf('--agent');
+  const idIdx = args.indexOf('--id');
+  const statusIdx = args.indexOf('--status');
+  const resultIdx = args.indexOf('--result');
+
+  if (agentIdx === -1 || idIdx === -1) {
+    console.error('Error: Required arguments: --agent <name> --id <messageId> [--status COMPLETED] [--result "..."]');
+    process.exit(1);
+  }
+
+  const agent = args[agentIdx + 1];
+  const msgId = args[idIdx + 1];
+  const status = statusIdx !== -1 ? args[statusIdx + 1] : 'COMPLETED';
+  const result = resultIdx !== -1 ? args[resultIdx + 1] : null;
+
+  const updated = updateMessageStatus(agent, msgId, status, result);
+  if (!updated) {
+    console.error(`Error: Message #${msgId} not found for agent "${agent}".`);
+    process.exit(1);
+  }
+  console.log(`✔ Acknowledged task #${msgId} for agent "${agent}" (Status: ${status})`);
+  process.exit(0);
+}
+
+if (command === 'status-task') {
+  const agentIdx = args.indexOf('--agent');
+  const idIdx = args.indexOf('--id');
+
+  if (agentIdx === -1 || idIdx === -1) {
+    console.error('Error: Required arguments: --agent <name> --id <messageId>');
+    process.exit(1);
+  }
+
+  const agent = args[agentIdx + 1];
+  const msgId = args[idIdx + 1];
+  const status = getMessageStatus(agent, msgId);
+  if (!status) {
+    console.error(`Error: Task #${msgId} not found.`);
+    process.exit(1);
+  }
+  console.log(JSON.stringify(status, null, 2));
+  process.exit(0);
+}
+
+if (command === 'dlq') {
+  const subCmd = args[1];
+  if (!subCmd || subCmd === 'list') {
+    const dlq = getDlq();
+    console.log('\n⚰️ [DEAD LETTER QUEUE (DLQ) INSPECTOR]:');
+    if (dlq.length === 0) {
+      console.log('   (DLQ is clean. No failed messages.)');
+    } else {
+      dlq.forEach((item, idx) => {
+        console.log(`\n   ${idx + 1}. [ID: ${item.id}] Target: ${item.to.toUpperCase()} (Enqueued: ${item.enqueuedAt})`);
+        console.log(`      Reason : ${item.failureReason}`);
+        console.log(`      Message: "${item.message}"`);
+      });
+    }
+    console.log('\n===========================================================');
+    process.exit(0);
+  }
+
+  if (subCmd === 'clear') {
+    clearDlq();
+    console.log('✔ Cleared Dead Letter Queue.');
+    process.exit(0);
+  }
+
+  console.error('Unknown dlq subcommand. Use: list, clear');
+  process.exit(1);
 }
 
 if (command === 'check') {
