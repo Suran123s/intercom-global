@@ -33,6 +33,32 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
     }, 200);
   }
 
+  // OpenCode API Trigger
+  if (to.toLowerCase().startsWith('opencode') && !isAutoReply) {
+    const port = process.env.OPENCODE_PORT || 4096;
+    const url = process.env.OPENCODE_URL || `http://127.0.0.1:${port}`;
+    fetch(`${url}/session/default/prompt_async`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: `[Intercom from ${from}]: ${message}` })
+    }).catch(() => {});
+  }
+
+  // Hermes Gateway Trigger
+  if (to.toLowerCase().startsWith('hermes') && !isAutoReply) {
+    const port = process.env.HERMES_PORT || 8000;
+    const url = process.env.HERMES_URL || `http://127.0.0.1:${port}`;
+    fetch(`${url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'hermes',
+        messages: [{ role: 'user', content: `[Intercom from ${from}]: ${message}` }],
+        stream: false
+      })
+    }).catch(() => {});
+  }
+
   // Devin Cloud Trigger
   if (to.toLowerCase().startsWith('devin') && process.env.DEVIN_API_KEY) {
     console.log(`🚀 [DEVIN CLOUD] Waking up Devin API session...`);

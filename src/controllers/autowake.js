@@ -103,6 +103,75 @@ function wakeCliAgent(targetName, message) {
   }
 }
 
+function wakeOpenCodeAgent(targetName, message, callback) {
+  const isOpenCode = targetName.toLowerCase().startsWith('opencode');
+  const port = process.env.OPENCODE_PORT || 4096;
+  const baseUrl = process.env.OPENCODE_URL || `http://127.0.0.1:${port}`;
+
+  if (isOpenCode || process.env.OPENCODE_URL) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+
+    fetch(`${baseUrl}/session`, {
+      method: 'GET',
+      signal: controller.signal
+    })
+      .then(res => res.json())
+      .then(sessions => {
+        clearTimeout(timeout);
+        const activeSession = Array.isArray(sessions) && sessions.length > 0 ? sessions[0].id || sessions[0] : 'default';
+        return fetch(`${baseUrl}/session/${activeSession}/prompt_async`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: `[Intercom AutoWake]: ${message}` })
+        });
+      })
+      .then(() => {
+        console.log(`⚡ [AUTOWAKE OPENCODE] Triggered prompt in active OpenCode session.`);
+        if (callback) callback(true);
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        if (callback) callback(false);
+      });
+  } else {
+    if (callback) callback(false);
+  }
+}
+
+function wakeHermesAgent(targetName, message, callback) {
+  const isHermes = targetName.toLowerCase().startsWith('hermes');
+  const port = process.env.HERMES_PORT || 8000;
+  const baseUrl = process.env.HERMES_URL || `http://127.0.0.1:${port}`;
+
+  if (isHermes || process.env.HERMES_URL) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+
+    fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'hermes',
+        messages: [{ role: 'user', content: `[Intercom AutoWake]: ${message}` }],
+        stream: false
+      }),
+      signal: controller.signal
+    })
+      .then(() => {
+        clearTimeout(timeout);
+        console.log(`⚡ [AUTOWAKE HERMES] Dispatched prompt to Hermes Gateway API.`);
+        if (callback) callback(true);
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        if (callback) callback(false);
+      });
+  } else {
+    if (callback) callback(false);
+  }
+}
+
 function wakeCloudAgent(targetName, message) {
   if (targetName.toLowerCase().startsWith('devin') && process.env.DEVIN_API_KEY) {
     console.log(`🚀 [AUTOWAKE CLOUD] Triggering Devin API session...`);
@@ -125,15 +194,21 @@ function wakeAgent(to, message, callback) {
   console.log(`===========================================================\n`);
 
   wakePiAgent(to, message, () => {
-    wakeCliAgent(to, message);
-    wakeCloudAgent(to, message);
-    if (callback) callback();
+    wakeOpenCodeAgent(to, message, () => {
+      wakeHermesAgent(to, message, () => {
+        wakeCliAgent(to, message);
+        wakeCloudAgent(to, message);
+        if (callback) callback();
+      });
+    });
   });
 }
 
 module.exports = {
   wakeAgent,
   wakePiAgent,
+  wakeOpenCodeAgent,
+  wakeHermesAgent,
   wakeCliAgent,
   wakeCloudAgent
 };

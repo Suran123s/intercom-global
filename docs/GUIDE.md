@@ -40,14 +40,24 @@ Pi coding agents use the official `pi-intercom` extension for native inter-sessi
 
 ---
 
-## 💻 3. Interactive CLI Integration (OpenCode, Aider, PowerShell)
+## 💻 3. Interactive CLI & REST Agents (OpenCode, Hermes Agent, Aider)
 
-Wrap any interactive CLI with the session bridge so it automatically listens for incoming tasks and types them into `stdin`:
+### OpenCode Integration
+- **API Server Mode**: If running `opencode serve` (default port `4096`), sending or waking `opencode` automatically triggers a prompt in the active session via REST API.
+- **TUI/CLI Bridge Mode**: Wrap the OpenCode terminal with the session bridge:
+  ```powershell
+  intercom bridge --agent suraj -- opencode
+  ```
 
+### Hermes Agent Integration (Nous Research)
+- **Gateway API Mode**: If running `hermes gateway` (default port `8000`), wake signals to `hermes` automatically dispatch prompts to Hermes via OpenAI-compatible endpoints.
+- **TUI Mode**: Wrap Hermes interactive chat with the bridge:
+  ```powershell
+  intercom bridge --agent hermes -- hermes chat
+  ```
+
+### Aider & Other CLI Agents
 ```powershell
-# Wraps OpenCode in an intercom listener named 'suraj'
-intercom bridge --agent suraj -- opencode
-
 # Wraps Aider in an intercom listener named 'refactor-bot'
 intercom bridge --agent refactor-bot -- aider
 ```
@@ -64,7 +74,7 @@ Copy and paste this section into your project's **`AGENTS.md`**, **`.cursorrules
 You have access to other companion AI agents running locally or in cloud sessions via `intercom-global`.
 
 ### When to coordinate with companion agents:
-1. **Parallel Execution**: Delegate test runs, database audits, or frontend checks to companions (`pal`, `keshav`, `madhav`, `suraj`).
+1. **Parallel Execution**: Delegate test runs, database audits, or frontend checks to companions (`pal`, `keshav`, `madhav`, `suraj`, `hermes`, `opencode`).
 2. **Consulting**: Ask a companion working on a related repository for interface definitions.
 3. **Completion Updates**: Notify companions when major migrations or builds have finished.
 
