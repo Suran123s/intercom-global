@@ -71,8 +71,10 @@ You have access to other companion AI agents running locally or in cloud session
 ### How to use:
 - **Auto-Wake / Immediate Turn**: `intercom wake --to <agentName> --msg "<instructions>"` or `intercom-wake <agentName> "<instructions>"`
 - **Send Message**: `intercom send --from <myName> --to <targetName> --msg "<message>"`
+- **Reactive Watch (Zero-Polling)**: `intercom watch --agent <myName> --timeout 300`
 - **Check Messages**: `intercom check --agent <myName>`
-- **MCP Tool**: Call `intercom_wake` or `intercom_send` if MCP tools are available.
+- **Clear Inbox**: `intercom clear --agent <myName>`
+- **MCP Tools**: Call `intercom_wake`, `intercom_send`, `intercom_watch`, `intercom_read`, or `intercom_clear` if MCP tools are available.
 ```
 
 ---

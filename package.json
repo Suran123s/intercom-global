@@ -8,12 +8,34 @@
     "intercom-wake": "./bin/intercom-wake.js",
     "intercom-mcp": "./bin/intercom-mcp.js"
   },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "docs",
+    "install.ps1",
+    "install.sh",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
+    "test": "node --test test/*.test.js",
     "start": "node bin/intercom.js server",
     "server": "node bin/intercom.js server",
     "bridge": "node src/bridges/pi-intercom.js",
     "mcp": "node bin/intercom-mcp.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Suran123s/intercom-global.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Suran123s/intercom-global/issues"
+  },
+  "homepage": "https://github.com/Suran123s/intercom-global#readme",
   "keywords": [
     "ai-agents",
     "intercom",
@@ -22,7 +44,8 @@
     "antigravity",
     "opencode",
     "multi-agent",
-    "mcp"
+    "mcp",
+    "model-context-protocol"
   ],
   "author": "Suran",
   "license": "MIT",
@@ -30,3 +53,4 @@
     "@modelcontextprotocol/sdk": "^1.29.1"
   }
 }
+

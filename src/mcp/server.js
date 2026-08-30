@@ -2,10 +2,14 @@
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontextprotocol/sdk/types.js");
-const { readInbox, writeInbox, checkAndMarkRead, listActiveMailboxes } = require("../core/mesh");
+const { readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes } = require("../core/mesh");
 const { wakeAgent } = require("../controllers/autowake");
 
 function startMcpServer() {
+  // Isolate stdout for MCP JSON-RPC protocol exclusively
+  console.log = (...args) => console.error(...args);
+  console.info = (...args) => console.error(...args);
+
   const server = new Server(
     { name: "intercom-global", version: "1.0.0" },
     { capabilities: { tools: {} } }
@@ -39,6 +43,18 @@ function startMcpServer() {
         }
       },
       {
+        name: "intercom_watch",
+        description: "Wait reactively for incoming unread messages or delegated tasks (zero CPU polling)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            forAgent: { type: "string", description: "Your companion name" },
+            timeoutSeconds: { type: "number", description: "Maximum seconds to wait (default: 300)" }
+          },
+          required: ["forAgent"]
+        }
+      },
+      {
         name: "intercom_read",
         description: "Check for unread messages sent to you from companion AIs",
         inputSchema: {
@@ -47,6 +63,17 @@ function startMcpServer() {
             forAgent: { type: "string", description: "Your companion name" }
           },
           required: ["forAgent"]
+        }
+      },
+      {
+        name: "intercom_clear",
+        description: "Clear/empty an agent's inbox after completing processing",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agent: { type: "string", description: "Agent name to clear inbox for" }
+          },
+          required: ["agent"]
         }
       },
       {
@@ -63,46 +90,88 @@ function startMcpServer() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    if (name === "intercom_send") {
-      const inbox = readInbox(args.to);
-      const msgObj = {
-        id: Date.now(),
-        from: args.from,
-        to: args.to,
-        message: args.message,
-        timestamp: new Date().toISOString(),
-        read: false
-      };
-      inbox.push(msgObj);
-      writeInbox(args.to, inbox);
-      return { content: [{ type: "text", text: `[Intercom] Delivered message from ${args.from} to ${args.to}` }] };
-    }
+    try {
+      if (name === "intercom_send") {
+        if (!args.from || !args.to || !args.message) {
+          return { content: [{ type: "text", text: "Missing required fields: from, to, message" }], isError: true };
+        }
+        const inbox = readInbox(args.to);
+        const msgObj = {
+          id: Date.now(),
+          from: args.from,
+          to: args.to,
+          message: args.message,
+          timestamp: new Date().toISOString(),
+          read: false
+        };
+        inbox.push(msgObj);
+        writeInbox(args.to, inbox);
+        return { content: [{ type: "text", text: `[Intercom] Delivered message from ${args.from} to ${args.to}` }] };
+      }
 
-    if (name === "intercom_wake") {
-      wakeAgent(args.to, args.message);
-      return { content: [{ type: "text", text: `[Intercom] Sent interrupting auto-wake signal to ${args.to}` }] };
-    }
+      if (name === "intercom_wake") {
+        if (!args.to || !args.message) {
+          return { content: [{ type: "text", text: "Missing required fields: to, message" }], isError: true };
+        }
+        wakeAgent(args.to, args.message);
+        return { content: [{ type: "text", text: `[Intercom] Sent interrupting auto-wake signal to ${args.to}` }] };
+      }
 
-    if (name === "intercom_read") {
-      const unread = checkAndMarkRead(args.forAgent);
-      return {
-        content: [{
-          type: "text",
-          text: unread.length ? JSON.stringify(unread, null, 2) : "No new unread messages in inbox."
-        }]
-      };
-    }
+      if (name === "intercom_watch") {
+        if (!args.forAgent) {
+          return { content: [{ type: "text", text: "Missing required field: forAgent" }], isError: true };
+        }
+        const timeoutMs = (args.timeoutSeconds ? Math.max(1, Number(args.timeoutSeconds)) : 300) * 1000;
+        const unread = await waitForUnread(args.forAgent, timeoutMs);
+        return {
+          content: [{
+            type: "text",
+            text: unread.length ? JSON.stringify(unread, null, 2) : "No new messages received within timeout window."
+          }]
+        };
+      }
 
-    if (name === "intercom_list_peers") {
-      const peers = listActiveMailboxes();
-      return { content: [{ type: "text", text: JSON.stringify(peers, null, 2) }] };
-    }
+      if (name === "intercom_read") {
+        if (!args.forAgent) {
+          return { content: [{ type: "text", text: "Missing required field: forAgent" }], isError: true };
+        }
+        const unread = checkAndMarkRead(args.forAgent);
+        return {
+          content: [{
+            type: "text",
+            text: unread.length ? JSON.stringify(unread, null, 2) : "No new unread messages in inbox."
+          }]
+        };
+      }
 
-    throw new Error(`Unknown tool: ${name}`);
+      if (name === "intercom_clear") {
+        if (!args.agent) {
+          return { content: [{ type: "text", text: "Missing required field: agent" }], isError: true };
+        }
+        clearInbox(args.agent);
+        return { content: [{ type: "text", text: `[Intercom] Cleared inbox for agent ${args.agent}` }] };
+      }
+
+      if (name === "intercom_list_peers") {
+        const peers = listActiveMailboxes();
+        return { content: [{ type: "text", text: JSON.stringify(peers, null, 2) }] };
+      }
+
+      return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error executing ${name}: ${err.message}` }], isError: true };
+    }
   });
 
   const transport = new StdioServerTransport();
   server.connect(transport);
+
+  process.on("SIGINT", () => {
+    try { server.close(); } catch {}
+  });
+  process.on("SIGTERM", () => {
+    try { server.close(); } catch {}
+  });
 }
 
 module.exports = { startMcpServer };
@@ -110,3 +179,4 @@ module.exports = { startMcpServer };
 if (require.main === module) {
   startMcpServer();
 }
+

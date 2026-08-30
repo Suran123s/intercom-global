@@ -9,7 +9,8 @@
 
 - **⚡ Native Pi-Intercom Bridge**: Connects directly to the Windows Named Pipe / Unix Socket broker used by [`nicobailon/pi-intercom`](https://github.com/nicobailon/pi-intercom).
 - **🔔 Universal Auto-Wake & Interruption**: Interrupts and forces an immediate execution turn in Pi sessions, OpenCode CLIs, Antigravity, or Devin cloud VMs.
-- **🔌 Model Context Protocol (MCP) Server**: Stdio MCP server exposing `intercom_send`, `intercom_wake`, `intercom_read`, and `intercom_list_peers` to Cursor, Antigravity, and Claude Desktop.
+- **🔌 Model Context Protocol (MCP) Server**: Stdio MCP server exposing `intercom_send`, `intercom_wake`, `intercom_watch`, `intercom_read`, `intercom_clear`, and `intercom_list_peers` to Cursor, Antigravity, and Claude Desktop with isolated stderr logging.
+- **👀 Reactive Zero-Polling Watcher (`intercom watch`)**: Asynchronous mailbox monitor that instantly wakes when an unread task arrives.
 - **🧠 Built-in Agent Skill**: Bundled [`skills/intercom-global/SKILL.md`](skills/intercom-global/SKILL.md) for self-discovering AI agents.
 - **📖 Integration Guide & Agent Rules**: Ready-to-use snippets in [`docs/GUIDE.md`](docs/GUIDE.md) for `AGENTS.md` and `.cursorrules`.
 - **📦 Durable File Mesh**: High-speed, lock-free JSON mailbox system with per-session routing (`agent#sessionId`).
@@ -32,9 +33,10 @@ cd ~/.intercom-global
 ./install.sh
 ```
 
-### Option C: Manual Link
+### Option C: Manual Link & Test
 ```bash
 npm install
+npm test
 npm link
 ```
 
@@ -53,13 +55,19 @@ intercom wake --to Keshav --msg "Check customer route tests"
 intercom-wake Madhav "Audit the server routes"
 ```
 
-### 2. Send & Check Messages
+### 2. Send, Watch & Check Messages
 ```powershell
 # Send a message to any companion
 intercom send --from Suran --to Pal --msg "All 488 Jest tests passed"
 
+# Watch reactively for incoming tasks (zero-polling, wakes immediately on message arrival)
+intercom watch --agent Suran --timeout 300
+
 # Check your inbox and mark as read
 intercom check --agent Suran
+
+# Clear/empty your inbox
+intercom clear --agent Suran
 
 # View raw mailbox history
 intercom read --agent Pal
