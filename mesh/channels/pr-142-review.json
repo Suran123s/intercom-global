@@ -1,0 +1,23 @@
+[
+  {
+    "id": "1788094898836-0qzj",
+    "channel": "#pr-142-review",
+    "from": "github-bot",
+    "message": "PR #142 submitted for multi-agent review.",
+    "timestamp": "2026-08-30T13:01:38.836Z"
+  },
+  {
+    "id": "1788094899463-sd1q",
+    "channel": "#pr-142-review",
+    "from": "hermes",
+    "message": "Security Review: APPROVED. Algorithm is explicitly pinned to HS256, preventing header-injection vulnerabilities.",
+    "timestamp": "2026-08-30T13:01:39.463Z"
+  },
+  {
+    "id": "1788094900057-0118",
+    "channel": "#pr-142-review",
+    "from": "opencode",
+    "message": "API Review: COMMENT. Recommendation: Add token.replace(/^Bearer\\s+/, \"\") to support standard Authorization header formats.",
+    "timestamp": "2026-08-30T13:01:40.057Z"
+  }
+]

@@ -1,0 +1,231 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Global Intercom Mesh - Live Real-Time Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --accent: #58a6ff;
+      --green: #2ea043;
+      --purple: #bc8cff;
+      --orange: #f0883e;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 24px;
+    }
+    h1, h2, h3 { color: #f0f6fc; margin-top: 0; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .badge-online { background: rgba(46, 160, 67, 0.2); color: #3fb950; border: 1px solid #238636; }
+    .badge-offline { background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid #da3633; }
+    .grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 24px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .feed {
+      height: 480px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .event-item {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      animation: fadeIn 0.3s ease-in-out;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .event-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #8b949e;
+      margin-bottom: 6px;
+    }
+    .event-from-to { font-weight: bold; color: var(--accent); }
+    .input-group { margin-bottom: 16px; }
+    label { display: block; margin-bottom: 6px; font-size: 13px; color: #8b949e; }
+    input, textarea, select {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    button {
+      background: #238636;
+      color: #ffffff;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-weight: bold;
+      cursor: pointer;
+      width: 100%;
+      transition: 0.2s;
+    }
+    button:hover { background: #2ea043; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>📡 Intercom Global Real-Time Mesh</h1>
+      <p style="margin: 0; color: #8b949e;">Live Multi-Agent Communication Bus (SSE: <code id="daemon-url">http://127.0.0.1:4150</code>)</p>
+    </div>
+    <div id="connection-status" class="badge badge-offline">Connecting...</div>
+  </div>
+
+  <div class="grid">
+    <!-- Live Stream Card -->
+    <div class="card">
+      <h2>⚡ Live Multi-Agent Event Feed</h2>
+      <div class="feed" id="events-feed">
+        <div class="event-item" style="color: #8b949e; text-align: center;">Listening for real-time mesh activity...</div>
+      </div>
+    </div>
+
+    <!-- Quick Message / Swarm Dispatcher -->
+    <div class="card">
+      <h2>🚀 Dispatch Message / Task</h2>
+      <div class="input-group">
+        <label>From (Identity)</label>
+        <input type="text" id="sender-input" value="dashboard-user" />
+      </div>
+      <div class="input-group">
+        <label>Target Agent(s) (e.g. opencode, hermes, pal, all)</label>
+        <input type="text" id="target-input" value="opencode" />
+      </div>
+      <div class="input-group">
+        <label>Message / Task</label>
+        <textarea id="message-input" rows="4" placeholder="Enter task instructions or questions..."></textarea>
+      </div>
+      <button id="send-btn" onclick="sendMessage()">Dispatch to Mesh</button>
+      <p id="send-status" style="margin-top: 10px; font-size: 12px; color: #8b949e; text-align: center;"></p>
+    </div>
+  </div>
+
+  <script>
+    const statusBadge = document.getElementById('connection-status');
+    const feed = document.getElementById('events-feed');
+    const daemonUrl = 'http://127.0.0.1:4150';
+
+    // Connect to Server-Sent Events stream
+    const eventSource = new EventSource(`${daemonUrl}/api/intercom/events`);
+
+    eventSource.onopen = () => {
+      statusBadge.className = 'badge badge-online';
+      statusBadge.textContent = '🟢 Mesh Online';
+    };
+
+    eventSource.onerror = () => {
+      statusBadge.className = 'badge badge-offline';
+      statusBadge.textContent = '🔴 Daemon Offline (Run: intercom server)';
+    };
+
+    eventSource.addEventListener('message', (e) => {
+      const data = JSON.parse(e.data);
+      appendEvent('Direct Message', data.payload.from, data.payload.to, data.payload.message, data.timestamp);
+    });
+
+    eventSource.addEventListener('broadcast', (e) => {
+      const data = JSON.parse(e.data);
+      appendEvent('Swarm Broadcast', data.payload.from, data.payload.targets, data.payload.message, data.timestamp);
+    });
+
+    eventSource.addEventListener('channel_message', (e) => {
+      const data = JSON.parse(e.data);
+      appendEvent('Channel PubSub', data.from, data.channel, data.message, data.timestamp);
+    });
+
+    function appendEvent(type, from, to, message, timestamp) {
+      if (feed.children.length === 1 && feed.children[0].textContent.includes('Listening')) {
+        feed.innerHTML = '';
+      }
+      const item = document.createElement('div');
+      item.className = 'event-item';
+      const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+      item.innerHTML = `
+        <div class="event-meta">
+          <span class="event-from-to">⚡ [${type}] ${from.toUpperCase()} ──► ${to.toUpperCase()}</span>
+          <span>${timeStr}</span>
+        </div>
+        <div style="color: #e6edf3;">${escapeHtml(message)}</div>
+      `;
+      feed.prepend(item);
+    }
+
+    async function sendMessage() {
+      const from = document.getElementById('sender-input').value.trim();
+      const to = document.getElementById('target-input').value.trim();
+      const message = document.getElementById('message-input').value.trim();
+      const statusEl = document.getElementById('send-status');
+
+      if (!from || !to || !message) {
+        statusEl.textContent = 'Please fill out all fields.';
+        statusEl.style.color = '#f85149';
+        return;
+      }
+
+      try {
+        const isBroadcast = to.includes(',') || to.toLowerCase() === 'all';
+        const endpoint = isBroadcast ? `${daemonUrl}/api/intercom/broadcast` : `${daemonUrl}/api/intercom/send`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from, to, message })
+        });
+        if (res.ok) {
+          statusEl.textContent = `✔ Dispatched to ${to}`;
+          statusEl.style.color = '#3fb950';
+          document.getElementById('message-input').value = '';
+        } else {
+          statusEl.textContent = 'Error dispatching message';
+          statusEl.style.color = '#f85149';
+        }
+      } catch (err) {
+        statusEl.textContent = `Failed: ${err.message}`;
+        statusEl.style.color = '#f85149';
+      }
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>
