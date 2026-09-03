@@ -40,7 +40,9 @@ USAGE:
   intercom pi send --to <session> --msg "<message>"            Send directly over Pi Named Pipe
   intercom pi ask --to <session> --question "<question>"       Ask a question and wait for reply
   intercom bridge --agent <name> [--session <id>] -- <cli>     Wrap an interactive CLI session
-  intercom server [--port 4150] [--auto-reply]                 Start the background HTTP daemon
+  intercom server [--port 4150] [--auto-reply]                 Start the background HTTP daemon (foreground)
+  intercom daemon [start|stop|status] [--port 4150]            Manage daemon as a persistent background process
+  intercom tui                                                 Open live split-pane terminal dashboard (TUI)
 `);
 }
 
@@ -478,4 +480,50 @@ if (command === 'server') {
     console.log(`🤖 Auto-Reply   : ${process.argv.includes('--auto-reply') ? 'ENABLED' : 'DISABLED'}`);
     console.log(`=============================================================\n`);
   });
+}
+
+// intercom daemon start|stop|status — persistent background daemon
+if (command === 'daemon') {
+  const { startDaemon, stopDaemon, daemonStatus } = require('../src/core/daemon-manager');
+  const sub = args[1];
+  const portArg = args.indexOf('--port') !== -1 ? parseInt(args[args.indexOf('--port') + 1]) : 4150;
+
+  if (!sub || sub === 'status') {
+    const s = daemonStatus();
+    if (s.status === 'online') {
+      console.log(`✅ Intercom daemon ONLINE (PID: ${s.pid}, http://127.0.0.1:${portArg})`);
+    } else {
+      console.log(`🔴 Intercom daemon OFFLINE. Start with: intercom daemon start`);
+    }
+    process.exit(0);
+  }
+
+  if (sub === 'start') {
+    const r = startDaemon(portArg);
+    if (r.status === 'already_running') {
+      console.log(`✅ Daemon already running (PID: ${r.pid})`);
+    } else {
+      console.log(`🚀 Daemon started (PID: ${r.pid}) on http://127.0.0.1:${r.port}`);
+    }
+    process.exit(0);
+  }
+
+  if (sub === 'stop') {
+    const r = stopDaemon();
+    if (r.status === 'stopped') {
+      console.log(`🛑 Daemon stopped (PID: ${r.pid})`);
+    } else {
+      console.log(`ℹ️ Daemon was not running.`);
+    }
+    process.exit(0);
+  }
+
+  console.error('Usage: intercom daemon [start|stop|status] [--port 4150]');
+  process.exit(1);
+}
+
+// intercom tui — open live blessed TUI dashboard
+if (command === 'tui') {
+  const tuiPath = require('path').join(__dirname, 'intercom-tui.js');
+  require(tuiPath);
 }

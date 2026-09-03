@@ -2,7 +2,7 @@
 const http = require('http');
 const { exec } = require('child_process');
 const { PORT, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, checkAndMarkRead, sendChannelMessage, readChannel, listChannels, broadcastToAgents } = require('./mesh');
+const { readInbox, writeInbox, checkAndMarkRead, sendChannelMessage, readChannel, listChannels, broadcastToAgents, listActiveMailboxes } = require('./mesh');
 const { updateMessageStatus, getMessageStatus, getDlq, clearDlq } = require('./dlq');
 const { spawnAgent } = require('../controllers/spawner');
 
@@ -149,6 +149,26 @@ function createServer() {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(task, null, 2));
+    }
+
+    // 3b. Peers list — all active mailboxes (used by web dashboard)
+    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/peers') {
+      const peers = listActiveMailboxes();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(peers, null, 2));
+    }
+
+    // 3c. Doctor — full mesh health probe (used by web dashboard)
+    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/doctor') {
+      const { diagnoseMesh } = require('../controllers/autowake');
+      diagnoseMesh().then(health => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(health, null, 2));
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
     }
 
     // 4. Server-Sent Events (SSE) Multi-Client Real-Time Event Bus

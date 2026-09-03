@@ -25,6 +25,10 @@
     "test": "node --test test/*.test.js",
     "start": "node bin/intercom.js server",
     "server": "node bin/intercom.js server",
+    "daemon": "node bin/intercom.js daemon start",
+    "tui": "node bin/intercom-tui.js",
+    "dashboard": "start examples/live-mesh-dashboard.html",
+    "doctor": "node bin/intercom.js doctor",
     "bridge": "node src/bridges/pi-intercom.js",
     "mcp": "node bin/intercom-mcp.js"
   },
@@ -50,7 +54,8 @@
   "author": "Suran",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.1"
+    "@modelcontextprotocol/sdk": "^1.29.1",
+    "blessed": "^0.1.81",
+    "chokidar": "^5.0.0"
   }
 }
-

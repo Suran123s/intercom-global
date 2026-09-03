@@ -1,166 +1,199 @@
-# 📡 Intercom Global (`.intercom-global`)
+# 📡 Intercom Global
 
-> **Universal Multi-Agent Intercom, Auto-Wake & Cross-IDE Communication Mesh**  
-> Connects **Pi (`pi-intercom`)**, **Antigravity**, **Cursor / VS Code**, **OpenCode / CLI**, and **Cloud Agents (Devin)** on the same machine.
+**Universal Multi-Agent Communication Mesh** — send, broadcast, wake, watch, and coordinate AI agents (OpenCode, Hermes, Pi, Cursor, Antigravity, and more) across terminals, IDEs, and APIs in real time.
 
----
-
-## 🌟 Features
-
-- **⚡ Native Pi-Intercom Bridge**: Connects directly to the Windows Named Pipe / Unix Socket broker used by [`nicobailon/pi-intercom`](https://github.com/nicobailon/pi-intercom).
-- **🔔 Universal Auto-Wake & Interruption**: Interrupts and forces an immediate execution turn in Pi sessions, OpenCode CLIs, Antigravity, or Devin cloud VMs.
-- **🌐 Agent2Agent (A2A) Protocol Bridge**: Implements A2A v1.0 standard with Agent Card discovery (`/.well-known/agent.json`), dynamic skill catalogues, and structured task lifecycle tracking.
-- **🔌 Model Context Protocol (MCP) Server**: Stdio MCP server exposing `intercom_send`, `intercom_wake`, `intercom_watch`, `intercom_read`, `intercom_clear`, and `intercom_list_peers` to Cursor, Antigravity, and Claude Desktop with isolated stderr logging.
-- **👀 Reactive Zero-Polling Watcher (`intercom watch`)**: Asynchronous mailbox monitor that instantly wakes when an unread task arrives.
-- **🧠 Built-in Agent Skill**: Bundled [`skills/intercom-global/SKILL.md`](skills/intercom-global/SKILL.md) for self-discovering AI agents.
-- **📖 Integration Guide & Agent Rules**: Ready-to-use snippets in [`docs/GUIDE.md`](docs/GUIDE.md) for `AGENTS.md` and `.cursorrules`.
-- **📦 Durable File Mesh**: High-speed, lock-free JSON mailbox system with per-session routing (`agent#sessionId`).
-- **💻 Interactive Session Bridge**: Stdin/Stdout terminal wrapper that injects autonomous tasks into running CLIs (OpenCode, Aider, Pi).
-- **🌐 Standalone & Portable**: Completely isolated outside of individual project repositories.
+[![Node.js](https://img.shields.io/badge/Node.js-%3E=18-brightgreen)](https://nodejs.org) [![Tests](https://img.shields.io/badge/tests-20%20passing-brightgreen)](#) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ---
 
-## 🚀 Quick Install
+## ✨ Features
 
-### Option A: One-Click PowerShell (Windows)
-```powershell
-cd C:\Users\Suran\.intercom-global
-.\install.ps1
-```
+| Feature | Description |
+|---|---|
+| **Direct Messaging** | Agent-to-agent messages via durable file mailboxes |
+| **Multi-Channel Pub/Sub** | Topic channels (`#backend`, `#frontend`) with pub/sub |
+| **Broadcast / Swarm** | 1-to-N delivery to any subset of agents simultaneously |
+| **Auto-Wake** | Interrupt OpenCode (REST), Hermes (HTTP), Pi (IPC), or Cloud agents |
+| **Dead Letter Queue** | Failed deliveries saved with reason + exponential backoff retry |
+| **Daemon Manager** | Persistent background HTTP daemon with PID file start/stop/status |
+| **Live TUI Dashboard** | `intercom tui` — blessed split-pane terminal dashboard with file watcher |
+| **Web Dashboard** | `examples/live-mesh-dashboard.html` — GitHub-dark SSE-powered UI |
+| **MCP Server** | 14 tools for Cursor / Claude Desktop / Antigravity via stdio |
+| **A2A Protocol** | Google A2A v1.0 agent card + task dispatch (`/.well-known/agent.json`) |
+| **OS Notifications** | Desktop toast (Windows/macOS/Linux) on new messages |
+| **Auto-Spawn** | On-demand agent process spawning with health-check polling |
 
-### Option B: One-Click Bash (Linux / macOS / WSL)
+---
+
+## 🚀 Quick Start
+
+### Install
 ```bash
-cd ~/.intercom-global
-./install.sh
-```
-
-### Option C: Manual Link & Test
-```bash
+git clone https://github.com/Suran123s/intercom-global.git
+cd intercom-global
 npm install
-npm test
-npm link
+npm link   # makes `intercom` available globally
 ```
 
----
-
-## 🎮 CLI Usage
-
-After installation, the `intercom` and `intercom-wake` CLI commands are available globally anywhere in your terminal:
-
-### 1. Auto-Wake & Interrupt an AI Companion
-```powershell
-# Instantly interrupt and trigger an autonomous turn in Keshav's Pi session
-intercom wake --to Keshav --msg "Check customer route tests"
-
-# Shortcut command
-intercom-wake Madhav "Audit the server routes"
+### 1. Start the daemon
+```bash
+intercom daemon start          # persistent background process
+intercom daemon status         # check PID and port
+intercom daemon stop           # graceful shutdown
 ```
 
-### 2. Send, Watch & Check Messages
-```powershell
-# Send a message to any companion
-intercom send --from Suran --to Pal --msg "All 488 Jest tests passed"
-
-# Watch reactively for incoming tasks (zero-polling, wakes immediately on message arrival)
-intercom watch --agent Suran --timeout 300
-
-# Check your inbox and mark as read
-intercom check --agent Suran
-
-# Clear/empty your inbox
-intercom clear --agent Suran
-
-# View raw mailbox history
-intercom read --agent Pal
-
-# List all active companions and mailbox sizes
-intercom peers
+### 2. Send a message
+```bash
+intercom send --from antigravity --to opencode --msg "Review auth.ts and add JWT validation"
+intercom send --from me --to hermes --msg "Explain this codebase"
 ```
 
-### 3. Multi-Agent Swarm Broadcast & Topic Channels
-```powershell
-# Broadcast an announcement or synchronized task to multiple agents simultaneously
-intercom broadcast --from Suran --to "pal,keshav,madhav" --msg "Database migration completed"
+### 3. Broadcast to multiple agents
+```bash
+intercom broadcast --from boss --to opencode,hermes,pal --msg "Sprint planning: build Stripe checkout"
+intercom broadcast --from boss --to all --msg "New task dropped"
+```
 
-# Broadcast to ALL active agents on the mesh
-intercom broadcast --from Suran --to all --msg "Please pull latest main branch"
+### 4. Read & watch inbox
+```bash
+intercom read --agent opencode                        # read all messages
+intercom watch --agent opencode --timeout 60          # block until message arrives
+intercom watch --agent opencode --json                # pipe-friendly JSON output
+```
 
-# Publish to a shared topic channel (e.g. #backend, #qa, #devops)
-intercom channel send --channel "#backend" --from Suran --msg "PR #42 is ready for review"
-
-# Read messages in a topic channel
-intercom channel read --channel "#backend"
-
-# List all active topic channels
+### 5. Topic channels
+```bash
+intercom channel send --channel '#backend' --from antigravity --msg "API is ready for review"
+intercom channel read --channel '#backend'
 intercom channel list
 ```
 
-### 4. Self-Healing Health Check (`intercom doctor`)
-```powershell
-# Check connectivity across all agent daemons, ports, named pipes, and mailboxes
-intercom doctor
+### 6. Auto-wake an agent
+```bash
+intercom wake --to opencode --msg "Implement /api/payments endpoint"
+intercom wake --to hermes --msg "Debug this error" --autospawn   # spawns Hermes if offline
 ```
 
-### 5. Agent2Agent (A2A) Commands
-```powershell
-# View the local mesh A2A Agent Card
-intercom a2a card
+### 7. Open the live TUI dashboard
+```bash
+intercom tui        # blessed split-pane dashboard (keyboard-driven)
+npm run tui         # same via npm
+```
+**TUI keybindings:** `↑↓` select agent · `Enter` open inbox · `s` send · `c` clear · `r` refresh · `Tab` focus panel · `q` quit
 
-# Send a task formatted as an A2A task
-intercom a2a send --to Pal --msg "Run test verification"
+### 8. Open the web dashboard
+```bash
+start examples\live-mesh-dashboard.html   # Windows
+open examples/live-mesh-dashboard.html    # macOS
+# Requires: intercom daemon start first
 ```
 
-### 6. Native Pi-Intercom IPC Commands
-```powershell
-# List all live Pi sessions connected on this machine
-intercom pi list
-
-# Send a native message directly into a Pi terminal
-intercom pi send --to Madhav --msg "Here is the updated schema"
-
-# Ask a question to a Pi session and wait for its reply
-intercom pi ask --to Keshav --question "Which port is active?"
+### 9. Spawn an offline agent on demand
+```bash
+intercom spawn --agent opencode           # start OpenCode in background
+intercom spawn --agent hermes --visible   # start Hermes in visible window
 ```
 
-### 7. Interactive CLI Session Bridge
-Run any CLI wrapped in an intercom listener that automatically injects tasks into its standard input:
-```powershell
-intercom bridge --agent suraj -- opencode
+### 10. Task lifecycle & DLQ
+```bash
+# Mark task completed
+intercom ack --agent opencode --id <msgId> --status COMPLETED
+
+# Check task status
+intercom status-task --agent opencode --id <msgId>
+
+# View failed deliveries
+intercom dlq list
+intercom dlq clear
 ```
 
-### 8. Start the Background HTTP & Real-Time Event Daemon
-```powershell
-intercom server --auto-reply
+### 11. Diagnose mesh connectivity
+```bash
+intercom doctor   # probes all runtimes: Pi, OpenCode, Hermes, daemon
 ```
-*(Provides `http://127.0.0.1:4150/api/intercom/events` live SSE event stream, `/.well-known/agent.json`, and `/a2a/sendMessage`)*
 
 ---
 
-## 🧩 Cursor / Antigravity MCP Configuration
+## 🛠️ HTTP API Reference
 
-Add this entry to your `mcpServers` configuration (e.g. `cursor_config.json` or `.gemini/antigravity/mcp/`):
+Start the daemon first: `intercom daemon start`
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/intercom/peers` | List all agent mailboxes with unread counts |
+| `POST` | `/api/intercom/send` | Send direct message `{from, to, message}` |
+| `POST` | `/api/intercom/broadcast` | Broadcast `{from, to:"a,b,c", message}` |
+| `GET` | `/api/intercom/inbox?agent=<n>` | Read all messages for an agent |
+| `GET` | `/api/intercom/channels` | List all topic channels |
+| `POST` | `/api/intercom/channels/send` | Publish `{channel, from, message}` |
+| `GET` | `/api/intercom/channels/<name>` | Read channel messages |
+| `GET` | `/api/intercom/events` | SSE stream (real-time events) |
+| `GET` | `/api/intercom/dlq` | List failed deliveries |
+| `POST` | `/api/intercom/dlq/clear` | Clear DLQ |
+| `POST` | `/api/intercom/spawn` | Spawn agent `{agent: "opencode"}` |
+| `POST` | `/api/intercom/ack` | ACK task `{agent, msgId, status, result}` |
+| `GET` | `/api/intercom/status/<agent>/<msgId>` | Query task status |
+| `GET` | `/api/intercom/doctor` | Full mesh health probe |
+| `GET` | `/.well-known/agent.json` | A2A v1.0 agent card |
+
+---
+
+## 🤖 MCP Integration (Cursor / Claude Desktop / Antigravity)
+
+Add to your MCP config (`claude_desktop_config.json` / `.cursor/mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "intercom-global": {
+    "intercom": {
       "command": "node",
-      "args": ["C:/Users/Suran/.intercom-global/bin/intercom-mcp.js"]
+      "args": ["C:/path/to/intercom-global/bin/intercom-mcp.js"]
     }
   }
 }
 ```
 
+**Available MCP tools:** `intercom_send`, `intercom_broadcast`, `intercom_channel_send`, `intercom_channel_read`, `intercom_channel_list`, `intercom_wake`, `intercom_watch`, `intercom_read`, `intercom_clear`, `intercom_list_peers`, `intercom_spawn`, `intercom_ack`, `intercom_dlq_list`
+
 ---
 
-## 📜 License & Legal Information
+## 📋 Architecture
 
-This project is open-source software licensed under the [MIT License](LICENSE).
+```
+Primary Channel (≤5ms):   Direct IPC / REST API
+Fallback Channel:         Durable File Mailbox (mesh/<agent>.json)
+Dead Letter Queue:        mesh/dlq.json — retried with exponential backoff
+```
 
-### Third-Party Acknowledgements
-- **[nicobailon/pi-intercom](https://github.com/nicobailon/pi-intercom)**: Created by Nico Bailon under the MIT License. `intercom-global` connects to the local IPC protocol designed for Pi coding agents.
-- **[@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol)**: Licensed under the MIT License.
+**Agent runtime compatibility:**
+- `opencode` — REST API on `http://127.0.0.1:4096`
+- `hermes` — HTTP Gateway on `http://127.0.0.1:8000`  
+- `pi` — Named Pipe / Unix domain socket
+- `cursor` / `claude` / `antigravity` — MCP stdio or file watcher
+- Any agent — durable file mailbox (zero-install fallback)
 
-### Trademark & Non-Affiliation Disclaimer
-All product names, logos, and brands (including **Pi**, **Google Antigravity**, **Cursor**, **Devin**, **OpenCode**, and others) are trademarks or registered trademarks of their respective owners. Their mention in this repository is solely for compatibility, interoperability, and nominative identification, and does not imply any official endorsement, sponsorship, or affiliation.
+---
 
+## 🧪 Tests
+
+```bash
+npm test                             # 20 unit + integration tests
+node test/e2e-opencode-hermes.js     # live E2E with mock servers
+```
+
+---
+
+## 📂 Real-World Examples
+
+| File | Description |
+|---|---|
+| `examples/fullstack-feature-swarm.js` | Stripe Checkout Integration swarm |
+| `examples/github-pr-review-swarm.js` | Multi-agent GitHub PR review pipeline |
+| `examples/live-mesh-dashboard.html` | Real-time SSE web dashboard |
+| `docs/REAL_WORLD_EXAMPLES.md` | Supervisor-Worker, Peer Review patterns |
+
+---
+
+## License
+
+MIT © Suran

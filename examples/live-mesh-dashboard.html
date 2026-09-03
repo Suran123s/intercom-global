@@ -1,231 +1,555 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Global Intercom Mesh - Live Real-Time Dashboard</title>
-  <style>
-    :root {
-      --bg: #0d1117;
-      --card-bg: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --accent: #58a6ff;
-      --green: #2ea043;
-      --purple: #bc8cff;
-      --orange: #f0883e;
-    }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: var(--bg);
-      color: var(--text);
-      margin: 0;
-      padding: 24px;
-    }
-    h1, h2, h3 { color: #f0f6fc; margin-top: 0; }
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 16px;
-      margin-bottom: 24px;
-    }
-    .badge {
-      display: inline-block;
-      padding: 4px 10px;
-      border-radius: 20px;
-      font-size: 12px;
-      font-weight: bold;
-    }
-    .badge-online { background: rgba(46, 160, 67, 0.2); color: #3fb950; border: 1px solid #238636; }
-    .badge-offline { background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid #da3633; }
-    .grid {
-      display: grid;
-      grid-template-columns: 2fr 1fr;
-      gap: 24px;
-    }
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 20px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    }
-    .feed {
-      height: 480px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .event-item {
-      background: #0d1117;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 12px;
-      animation: fadeIn 0.3s ease-in-out;
-    }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-    .event-meta {
-      display: flex;
-      justify-content: space-between;
-      font-size: 12px;
-      color: #8b949e;
-      margin-bottom: 6px;
-    }
-    .event-from-to { font-weight: bold; color: var(--accent); }
-    .input-group { margin-bottom: 16px; }
-    label { display: block; margin-bottom: 6px; font-size: 13px; color: #8b949e; }
-    input, textarea, select {
-      width: 100%;
-      background: #0d1117;
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 10px;
-      border-radius: 6px;
-      font-size: 14px;
-      box-sizing: border-box;
-    }
-    button {
-      background: #238636;
-      color: #ffffff;
-      border: none;
-      padding: 10px 20px;
-      border-radius: 6px;
-      font-weight: bold;
-      cursor: pointer;
-      width: 100%;
-      transition: 0.2s;
-    }
-    button:hover { background: #2ea043; }
-  </style>
+<meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Intercom Global — Live Mesh Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--purple:#bc8cff;--orange:#f0883e}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;min-height:100vh}
+header{background:#161b22;border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+header h1{font-size:18px;font-weight:700;color:#f0f6fc}
+.badge{padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600}
+.badge-online{background:rgba(63,185,80,.15);color:var(--green);border:1px solid #238636}
+.badge-offline{background:rgba(248,81,73,.15);color:var(--red);border:1px solid #da3633}
+.badge-warn{background:rgba(210,153,34,.15);color:var(--yellow);border:1px solid #9e6a03}
+.grid{display:grid;grid-template-columns:260px 1fr 280px;gap:16px;padding:16px;height:calc(100vh - 57px)}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}
+.panel-header{padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:space-between;background:#0d1117;flex-shrink:0}
+.panel-body{overflow-y:auto;flex:1;padding:8px}
+/* Agent list */
+.agent-item{padding:8px 10px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;margin-bottom:2px;transition:.15s}
+.agent-item:hover{background:rgba(88,166,255,.08)}
+.agent-item.selected{background:rgba(88,166,255,.15);border:1px solid rgba(88,166,255,.3)}
+.agent-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.agent-dot.has-unread{background:var(--red)}
+.agent-name{font-weight:600;flex:1;color:#f0f6fc}
+.unread-badge{background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px}
+/* Messages */
+.msg-card{background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:8px;animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.msg-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:5px}
+.msg-from{font-weight:700;color:var(--accent)}
+.msg-text{color:#e6edf3;line-height:1.5;word-break:break-word}
+.msg-status{display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600}
+.status-COMPLETED{background:rgba(63,185,80,.2);color:var(--green)}
+.status-PROCESSING{background:rgba(210,153,34,.2);color:var(--yellow)}
+.status-FAILED{background:rgba(248,81,73,.2);color:var(--red)}
+.status-QUEUED{background:rgba(88,166,255,.2);color:var(--accent)}
+.msg-unread{border-left:3px solid var(--accent)}
+/* Right panel sections */
+.section{margin-bottom:16px}
+.section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:8px;padding:0 2px}
+.health-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;margin-bottom:4px;background:#0d1117;border:1px solid var(--border)}
+.health-indicator{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.health-online{background:var(--green)}
+.health-offline{background:var(--red)}
+.health-label{flex:1;font-size:13px}
+.health-action{font-size:11px;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+/* Channel & DLQ */
+.channel-card{background:#0d1117;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;overflow:hidden}
+.channel-header-row{padding:7px 10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border)}
+.channel-msgs{padding:6px 10px;font-size:12px;color:var(--muted);max-height:80px;overflow-y:auto}
+.channel-msg-line{padding:2px 0;border-bottom:1px solid rgba(48,54,61,.5)}
+.dlq-item{background:#0d1117;border:1px solid rgba(248,81,73,.3);border-radius:6px;padding:8px 10px;margin-bottom:6px}
+.dlq-target{font-weight:700;color:var(--red)}
+.dlq-reason{font-size:11px;color:var(--muted);margin-top:3px}
+/* Activity log */
+.activity-line{font-size:12px;padding:3px 0;border-bottom:1px solid rgba(48,54,61,.4);color:var(--muted)}
+.activity-line .ts{color:#484f58;margin-right:6px}
+/* Send form */
+.send-form{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px}
+.send-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+.send-label{font-size:12px;color:var(--muted);width:52px;flex-shrink:0;text-align:right}
+input,textarea,select{background:#161b22;border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:6px;font-size:13px;width:100%;outline:none;font-family:inherit}
+input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+textarea{resize:vertical;min-height:56px}
+.btn{padding:7px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:.15s}
+.btn-primary{background:#238636;color:#fff}.btn-primary:hover{background:#2ea043}
+.btn-secondary{background:#21262d;color:var(--text);border:1px solid var(--border)}.btn-secondary:hover{background:#30363d}
+.btn-danger{background:#b62324;color:#fff}.btn-danger:hover{background:#d1242f}
+.btn-sm{padding:4px 10px;font-size:12px}
+.empty-state{text-align:center;color:var(--muted);padding:32px 16px;font-size:13px}
+.empty-state .icon{font-size:32px;margin-bottom:8px}
+.center-panel{display:flex;flex-direction:column;gap:0}
+.tabs{display:flex;border-bottom:1px solid var(--border);background:#0d1117;flex-shrink:0}
+.tab{padding:9px 16px;font-size:13px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:.15s}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-content{display:none;flex:1;overflow-y:auto;padding:12px}
+.tab-content.active{display:block}
+.toast{position:fixed;bottom:20px;right:20px;background:#238636;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;font-weight:600;z-index:999;animation:fadeIn .2s ease;box-shadow:0 4px 12px rgba(0,0,0,.5)}
+.toast.error{background:#b62324}
+.spinner{display:inline-block;width:10px;height:10px;border:2px solid transparent;border-top-color:currentColor;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
 </head>
 <body>
-  <div class="header">
-    <div>
-      <h1>📡 Intercom Global Real-Time Mesh</h1>
-      <p style="margin: 0; color: #8b949e;">Live Multi-Agent Communication Bus (SSE: <code id="daemon-url">http://127.0.0.1:4150</code>)</p>
-    </div>
-    <div id="connection-status" class="badge badge-offline">Connecting...</div>
-  </div>
 
-  <div class="grid">
-    <!-- Live Stream Card -->
-    <div class="card">
-      <h2>⚡ Live Multi-Agent Event Feed</h2>
-      <div class="feed" id="events-feed">
-        <div class="event-item" style="color: #8b949e; text-align: center;">Listening for real-time mesh activity...</div>
-      </div>
-    </div>
+<header>
+  <h1>📡 Intercom Global</h1>
+  <span id="conn-badge" class="badge badge-offline">● Connecting...</span>
+  <span style="color:var(--muted);font-size:12px">SSE: <code>http://127.0.0.1:4150</code></span>
+  <span style="flex:1"></span>
+  <button class="btn btn-secondary btn-sm" onclick="refreshAll()">↺ Refresh</button>
+  <button class="btn btn-primary btn-sm" onclick="openSendModal()">+ Send Message</button>
+</header>
 
-    <!-- Quick Message / Swarm Dispatcher -->
-    <div class="card">
-      <h2>🚀 Dispatch Message / Task</h2>
-      <div class="input-group">
-        <label>From (Identity)</label>
-        <input type="text" id="sender-input" value="dashboard-user" />
-      </div>
-      <div class="input-group">
-        <label>Target Agent(s) (e.g. opencode, hermes, pal, all)</label>
-        <input type="text" id="target-input" value="opencode" />
-      </div>
-      <div class="input-group">
-        <label>Message / Task</label>
-        <textarea id="message-input" rows="4" placeholder="Enter task instructions or questions..."></textarea>
-      </div>
-      <button id="send-btn" onclick="sendMessage()">Dispatch to Mesh</button>
-      <p id="send-status" style="margin-top: 10px; font-size: 12px; color: #8b949e; text-align: center;"></p>
+<div class="grid">
+  <!-- LEFT: Agent list -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>👥 Agents</span>
+      <span id="agent-count" style="color:var(--muted);font-size:12px">0 online</span>
+    </div>
+    <div class="panel-body" id="agent-list">
+      <div class="empty-state"><div class="icon">📭</div>No agents yet</div>
     </div>
   </div>
 
-  <script>
-    const statusBadge = document.getElementById('connection-status');
-    const feed = document.getElementById('events-feed');
-    const daemonUrl = 'http://127.0.0.1:4150';
+  <!-- CENTER: Inbox + Channels tabs -->
+  <div class="panel center-panel">
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('inbox')">📬 Inbox</div>
+      <div class="tab" onclick="switchTab('channels')">💬 Channels</div>
+      <div class="tab" onclick="switchTab('send')">✉️ Send</div>
+    </div>
 
-    // Connect to Server-Sent Events stream
-    const eventSource = new EventSource(`${daemonUrl}/api/intercom/events`);
+    <!-- Inbox tab -->
+    <div id="tab-inbox" class="tab-content active">
+      <div id="inbox-header" style="margin-bottom:10px;display:flex;align-items:center;gap:8px">
+        <span id="inbox-title" style="font-weight:600;color:#f0f6fc">Select an agent →</span>
+        <span style="flex:1"></span>
+        <button class="btn btn-secondary btn-sm" id="clear-btn" onclick="clearSelectedInbox()" style="display:none">Clear Inbox</button>
+        <button class="btn btn-secondary btn-sm" id="read-btn" onclick="markAllRead()" style="display:none">Mark Read</button>
+      </div>
+      <div id="message-list">
+        <div class="empty-state"><div class="icon">👈</div>Select an agent from the left panel</div>
+      </div>
+    </div>
 
-    eventSource.onopen = () => {
-      statusBadge.className = 'badge badge-online';
-      statusBadge.textContent = '🟢 Mesh Online';
-    };
+    <!-- Channels tab -->
+    <div id="tab-channels" class="tab-content">
+      <div id="channels-list">
+        <div class="empty-state"><div class="icon">💬</div>Loading channels...</div>
+      </div>
+    </div>
 
-    eventSource.onerror = () => {
-      statusBadge.className = 'badge badge-offline';
-      statusBadge.textContent = '🔴 Daemon Offline (Run: intercom server)';
-    };
-
-    eventSource.addEventListener('message', (e) => {
-      const data = JSON.parse(e.data);
-      appendEvent('Direct Message', data.payload.from, data.payload.to, data.payload.message, data.timestamp);
-    });
-
-    eventSource.addEventListener('broadcast', (e) => {
-      const data = JSON.parse(e.data);
-      appendEvent('Swarm Broadcast', data.payload.from, data.payload.targets, data.payload.message, data.timestamp);
-    });
-
-    eventSource.addEventListener('channel_message', (e) => {
-      const data = JSON.parse(e.data);
-      appendEvent('Channel PubSub', data.from, data.channel, data.message, data.timestamp);
-    });
-
-    function appendEvent(type, from, to, message, timestamp) {
-      if (feed.children.length === 1 && feed.children[0].textContent.includes('Listening')) {
-        feed.innerHTML = '';
-      }
-      const item = document.createElement('div');
-      item.className = 'event-item';
-      const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
-      item.innerHTML = `
-        <div class="event-meta">
-          <span class="event-from-to">⚡ [${type}] ${from.toUpperCase()} ──► ${to.toUpperCase()}</span>
-          <span>${timeStr}</span>
+    <!-- Send tab -->
+    <div id="tab-send" class="tab-content">
+      <div class="send-form">
+        <div style="font-weight:600;color:#f0f6fc;margin-bottom:12px">✉️ Send Direct Message</div>
+        <div class="send-row"><span class="send-label">From</span><input id="s-from" placeholder="your-name" /></div>
+        <div class="send-row"><span class="send-label">To</span><input id="s-to" placeholder="opencode, hermes, pal, all..." /></div>
+        <div class="send-row" style="align-items:flex-start"><span class="send-label" style="margin-top:8px">Message</span><textarea id="s-msg" placeholder="Task instructions, questions..."></textarea></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+          <button class="btn btn-secondary" onclick="clearSendForm()">Clear</button>
+          <button class="btn btn-primary" onclick="sendMsg()">Send →</button>
         </div>
-        <div style="color: #e6edf3;">${escapeHtml(message)}</div>
-      `;
-      feed.prepend(item);
+      </div>
+
+      <div class="send-form">
+        <div style="font-weight:600;color:#f0f6fc;margin-bottom:12px">📢 Broadcast to Channel</div>
+        <div class="send-row"><span class="send-label">From</span><input id="c-from" placeholder="your-name" /></div>
+        <div class="send-row"><span class="send-label">Channel</span><input id="c-chan" placeholder="#general, #backend..." /></div>
+        <div class="send-row" style="align-items:flex-start"><span class="send-label" style="margin-top:8px">Message</span><textarea id="c-msg" placeholder="Announcement or update..."></textarea></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+          <button class="btn btn-primary" onclick="sendChannel()">Publish →</button>
+        </div>
+      </div>
+
+      <div class="send-form">
+        <div style="font-weight:600;color:#f0f6fc;margin-bottom:12px">🚀 Wake Agent</div>
+        <div class="send-row"><span class="send-label">Target</span><input id="w-to" placeholder="opencode, hermes, pi..." /></div>
+        <div class="send-row" style="align-items:flex-start"><span class="send-label" style="margin-top:8px">Task</span><textarea id="w-msg" placeholder="Task to inject..." style="min-height:40px"></textarea></div>
+        <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;margin-top:4px">
+          <label style="color:var(--muted);font-size:12px"><input type="checkbox" id="w-autospawn" style="width:auto;margin-right:4px">Auto-spawn if offline</label>
+          <button class="btn btn-primary" onclick="wakeAgent()">Wake →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Health + DLQ + Activity -->
+  <div class="panel" style="overflow-y:auto">
+    <div class="panel-header">
+      <span>🩺 Status</span>
+      <button class="btn btn-secondary btn-sm" onclick="loadHealth()">↺</button>
+    </div>
+    <div class="panel-body">
+      <div class="section">
+        <div class="section-title">Agent Runtimes</div>
+        <div id="health-list"><div style="color:var(--muted);font-size:12px">Checking...</div></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title" style="display:flex;justify-content:space-between">
+          <span>⚰️ Dead Letter Queue</span>
+          <button class="btn btn-danger btn-sm" onclick="clearDLQ()" style="padding:2px 8px;font-size:11px">Clear</button>
+        </div>
+        <div id="dlq-list"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">⚡ Live Activity</div>
+        <div id="activity-log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = 'http://127.0.0.1:4150';
+let selectedAgent = null;
+const activityLog = [];
+
+// SSE connection
+function connectSSE() {
+  const es = new EventSource(`${BASE}/api/intercom/events`);
+  es.onopen = () => {
+    document.getElementById('conn-badge').className = 'badge badge-online';
+    document.getElementById('conn-badge').textContent = '● Mesh Online';
+  };
+  es.onerror = () => {
+    document.getElementById('conn-badge').className = 'badge badge-offline';
+    document.getElementById('conn-badge').textContent = '● Daemon Offline';
+  };
+  ['message','broadcast','channel_message','task_ack'].forEach(evt => {
+    es.addEventListener(evt, e => {
+      const data = JSON.parse(e.data);
+      const p = data.payload || data;
+      addActivity(`${(p.from||'?').toUpperCase()} → ${(p.to||p.channel||'?').toUpperCase()}: ${(p.message||'').slice(0,50)}`);
+      refreshAll();
+    });
+  });
+}
+
+function addActivity(msg) {
+  activityLog.unshift({ msg, ts: new Date().toLocaleTimeString() });
+  if (activityLog.length > 30) activityLog.pop();
+  renderActivity();
+}
+
+function renderActivity() {
+  const el = document.getElementById('activity-log');
+  if (activityLog.length === 0) { el.innerHTML = '<div style="color:var(--muted);font-size:12px">No events yet</div>'; return; }
+  el.innerHTML = activityLog.slice(0,10).map(a =>
+    `<div class="activity-line"><span class="ts">${a.ts}</span>${escHtml(a.msg)}</div>`
+  ).join('');
+}
+
+// Agents
+async function loadAgents() {
+  try {
+    const res = await fetch(`${BASE}/api/intercom/inbox?agent=_list_all`);
+    // Agent list from peers endpoint
+    const peersRes = await fetch(`${BASE}/api/intercom/send`, { method: 'OPTIONS' });
+  } catch {}
+  // Always use doctor + manual
+  loadAgentsFromDoctor();
+}
+
+async function loadAgentsFromDoctor() {
+  try {
+    // Use mailbox endpoint
+    const res = await fetch(`${BASE}/api/intercom/inbox?agent=suran`);
+    // We'll get the list from a GET to inbox listing
+  } catch {}
+  // Fallback: load from known peer names via fetch
+  loadPeersDirect();
+}
+
+async function loadPeersDirect() {
+  // intercom server exposes GET /api/intercom/peers
+  try {
+    const res = await fetch(`${BASE}/api/intercom/peers`);
+    if (res.ok) {
+      const peers = await res.json();
+      renderAgents(peers);
+      return;
     }
+  } catch {}
+  // Hardcode common known agents as fallback
+  renderAgents([
+    { name: 'opencode', total: 0, unread: 0 },
+    { name: 'hermes', total: 0, unread: 0 }
+  ]);
+}
 
-    async function sendMessage() {
-      const from = document.getElementById('sender-input').value.trim();
-      const to = document.getElementById('target-input').value.trim();
-      const message = document.getElementById('message-input').value.trim();
-      const statusEl = document.getElementById('send-status');
+function renderAgents(peers) {
+  const el = document.getElementById('agent-list');
+  document.getElementById('agent-count').textContent = `${peers.length} agent${peers.length !== 1 ? 's' : ''}`;
+  if (peers.length === 0) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">📭</div>No agent mailboxes found.<br>Send a message to create one.</div>';
+    return;
+  }
+  el.innerHTML = peers.map(p => `
+    <div class="agent-item ${p.name === selectedAgent ? 'selected' : ''}" onclick="selectAgent('${p.name}')">
+      <div class="agent-dot ${p.unread > 0 ? 'has-unread' : ''}"></div>
+      <span class="agent-name">${p.name.toUpperCase()}</span>
+      ${p.unread > 0 ? `<span class="unread-badge">${p.unread}</span>` : ''}
+    </div>
+  `).join('');
+}
 
-      if (!from || !to || !message) {
-        statusEl.textContent = 'Please fill out all fields.';
-        statusEl.style.color = '#f85149';
-        return;
-      }
+function selectAgent(name) {
+  selectedAgent = name;
+  switchTab('inbox');
+  document.querySelectorAll('.agent-item').forEach(el => {
+    el.classList.toggle('selected', el.textContent.trim().startsWith(name.toUpperCase()));
+  });
+  document.getElementById('inbox-title').textContent = `${name.toUpperCase()}'s Inbox`;
+  document.getElementById('clear-btn').style.display = '';
+  document.getElementById('read-btn').style.display = '';
+  document.getElementById('s-to').value = name;
+  document.getElementById('w-to').value = name;
+  loadMessages(name);
+}
 
+async function loadMessages(agent) {
+  const el = document.getElementById('message-list');
+  if (!agent) { el.innerHTML = '<div class="empty-state"><div class="icon">👈</div>Select an agent</div>'; return; }
+  el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px"><span class="spinner"></span>Loading...</div>';
+  try {
+    const res = await fetch(`${BASE}/api/intercom/inbox?agent=${encodeURIComponent(agent)}`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const msgs = await res.json();
+    if (msgs.length === 0) {
+      el.innerHTML = '<div class="empty-state"><div class="icon">📭</div>Empty inbox</div>';
+      return;
+    }
+    el.innerHTML = [...msgs].reverse().map(m => {
+      const statusHtml = m.status ? `<span class="msg-status status-${m.status}">${m.status}</span>` : '';
+      return `
+        <div class="msg-card ${!m.read ? 'msg-unread' : ''}">
+          <div class="msg-meta">
+            <span class="msg-from">From: ${escHtml((m.from||'?').toUpperCase())}${statusHtml}</span>
+            <span>${m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : ''}</span>
+          </div>
+          <div class="msg-text">${escHtml(m.message||'')}</div>
+          ${m.result ? `<div style="font-size:11px;color:var(--green);margin-top:5px">Result: ${escHtml(m.result)}</div>` : ''}
+        </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = `<div class="empty-state"><div class="icon">🔴</div>Error: ${escHtml(e.message)}<br><small>Is the daemon running? <code>intercom daemon start</code></small></div>`;
+  }
+}
+
+// Health
+async function loadHealth() {
+  const el = document.getElementById('health-list');
+  el.innerHTML = '<div style="color:var(--muted);font-size:12px"><span class="spinner"></span>Probing...</div>';
+  try {
+    const res = await fetch(`${BASE}/api/intercom/doctor`);
+    if (res.ok) {
+      const h = await res.json();
+      renderHealth(h);
+      return;
+    }
+  } catch {}
+  // Daemon offline — show all offline
+  renderHealth(null);
+}
+
+function renderHealth(h) {
+  const svcs = h && h.services ? h.services : {};
+  const rows = [
+    { key:'piBroker', label:'Pi Broker', hint:'pi-intercom extension' },
+    { key:'opencodeApi', label:'OpenCode :4096', hint:'opencode serve --port 4096' },
+    { key:'hermesGateway', label:'Hermes :8000', hint:'hermes gateway' },
+    { key:'intercomDaemon', label:'Daemon :4150', hint:'intercom daemon start' },
+  ];
+  document.getElementById('health-list').innerHTML = rows.map(r => {
+    const svc = svcs[r.key];
+    const online = svc && svc.status === 'ONLINE';
+    return `
+      <div class="health-row">
+        <div class="health-indicator ${online ? 'health-online' : 'health-offline'}"></div>
+        <span class="health-label">${r.label}</span>
+        ${!online ? `<span class="health-action" title="${escHtml(r.hint)}" onclick="copyHint('${escHtml(r.hint)}')">Fix</span>` : '<span style="color:var(--green);font-size:12px">●</span>'}
+      </div>`;
+  }).join('');
+}
+
+function copyHint(hint) {
+  navigator.clipboard.writeText(hint).catch(() => {});
+  showToast('Copied: ' + hint);
+}
+
+// Channels
+async function loadChannels() {
+  try {
+    const res = await fetch(`${BASE}/api/intercom/channels`);
+    if (!res.ok) throw new Error();
+    const channels = await res.json();
+    const el = document.getElementById('channels-list');
+    if (channels.length === 0) {
+      el.innerHTML = '<div class="empty-state"><div class="icon">💬</div>No channels yet.<br>Use the Send tab to publish to a channel.</div>';
+      return;
+    }
+    // Load each channel's messages
+    const chansWithMsgs = await Promise.all(channels.map(async c => {
       try {
-        const isBroadcast = to.includes(',') || to.toLowerCase() === 'all';
-        const endpoint = isBroadcast ? `${daemonUrl}/api/intercom/broadcast` : `${daemonUrl}/api/intercom/send`;
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from, to, message })
-        });
-        if (res.ok) {
-          statusEl.textContent = `✔ Dispatched to ${to}`;
-          statusEl.style.color = '#3fb950';
-          document.getElementById('message-input').value = '';
-        } else {
-          statusEl.textContent = 'Error dispatching message';
-          statusEl.style.color = '#f85149';
-        }
-      } catch (err) {
-        statusEl.textContent = `Failed: ${err.message}`;
-        statusEl.style.color = '#f85149';
-      }
-    }
+        const r = await fetch(`${BASE}/api/intercom/channels/${encodeURIComponent(c.name)}`);
+        const msgs = r.ok ? await r.json() : [];
+        return { ...c, msgs };
+      } catch { return { ...c, msgs: [] }; }
+    }));
+    el.innerHTML = chansWithMsgs.map(c => `
+      <div class="channel-card">
+        <div class="channel-header-row">
+          <span style="color:var(--purple);font-weight:700">#${escHtml(c.name)}</span>
+          <span style="color:var(--muted);font-size:11px;margin-left:auto">${c.total} messages</span>
+        </div>
+        <div class="channel-msgs">
+          ${c.msgs.length === 0 ? '<span style="color:var(--muted)">Empty</span>' :
+            c.msgs.slice(-5).map(m =>
+              `<div class="channel-msg-line"><span style="color:var(--accent);font-size:11px">${escHtml((m.from||'?').toUpperCase())}</span>: ${escHtml((m.message||'').slice(0,80))}</div>`
+            ).join('')}
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    document.getElementById('channels-list').innerHTML = `<div class="empty-state"><div class="icon">🔴</div>Cannot load channels<br><small>Start daemon: <code>intercom daemon start</code></small></div>`;
+  }
+}
 
-    function escapeHtml(str) {
-      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+// DLQ
+async function loadDLQ() {
+  try {
+    const res = await fetch(`${BASE}/api/intercom/dlq`);
+    if (!res.ok) throw new Error();
+    const dlq = await res.json();
+    const el = document.getElementById('dlq-list');
+    if (dlq.length === 0) {
+      el.innerHTML = '<div style="color:var(--green);font-size:12px">✓ Clean — no failed messages</div>';
+      return;
     }
-  </script>
+    el.innerHTML = dlq.slice(0,5).map(d => `
+      <div class="dlq-item">
+        <div><span class="dlq-target">${escHtml((d.to||'?').toUpperCase())}</span>: ${escHtml((d.message||'').slice(0,60))}</div>
+        <div class="dlq-reason">↳ ${escHtml(d.failureReason||'Unknown')} (${d.enqueuedAt ? new Date(d.enqueuedAt).toLocaleTimeString() : ''})</div>
+      </div>`).join('');
+    if (dlq.length > 5) {
+      document.getElementById('dlq-list').innerHTML += `<div style="color:var(--muted);font-size:11px;padding:4px">...and ${dlq.length-5} more</div>`;
+    }
+  } catch {
+    document.getElementById('dlq-list').innerHTML = '<div style="color:var(--muted);font-size:12px">DLQ unavailable</div>';
+  }
+}
+
+async function clearDLQ() {
+  try {
+    await fetch(`${BASE}/api/intercom/dlq/clear`, { method:'POST' });
+    showToast('DLQ cleared');
+    loadDLQ();
+  } catch { showToast('Failed — daemon offline?', true); }
+}
+
+// Send
+async function sendMsg() {
+  const from = document.getElementById('s-from').value.trim() || 'dashboard';
+  const to = document.getElementById('s-to').value.trim();
+  const msg = document.getElementById('s-msg').value.trim();
+  if (!to || !msg) { showToast('Fill in To and Message fields', true); return; }
+  try {
+    const isBroadcast = to.includes(',') || to === 'all';
+    const url = isBroadcast ? `${BASE}/api/intercom/broadcast` : `${BASE}/api/intercom/send`;
+    const res = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ from, to, message: msg }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    showToast(`✔ Sent to ${to.toUpperCase()}`);
+    document.getElementById('s-msg').value = '';
+    addActivity(`Sent → ${to.toUpperCase()}: ${msg.slice(0,40)}`);
+    setTimeout(refreshAll, 400);
+  } catch(e) { showToast('Send failed: ' + e.message, true); }
+}
+
+async function sendChannel() {
+  const from = document.getElementById('c-from').value.trim() || 'dashboard';
+  const channel = document.getElementById('c-chan').value.trim().replace(/^#/, '');
+  const msg = document.getElementById('c-msg').value.trim();
+  if (!channel || !msg) { showToast('Fill in Channel and Message', true); return; }
+  try {
+    const res = await fetch(`${BASE}/api/intercom/channels/send`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ channel, from, message: msg })
+    });
+    if (!res.ok) throw new Error();
+    showToast(`✔ Published to #${channel}`);
+    document.getElementById('c-msg').value = '';
+    setTimeout(loadChannels, 400);
+  } catch(e) { showToast('Failed: ' + e.message, true); }
+}
+
+async function wakeAgent() {
+  const to = document.getElementById('w-to').value.trim();
+  const msg = document.getElementById('w-msg').value.trim();
+  const autoSpawn = document.getElementById('w-autospawn').checked;
+  if (!to || !msg) { showToast('Fill in Target and Task', true); return; }
+  try {
+    const res = await fetch(`${BASE}/api/intercom/send`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ from: 'dashboard', to, message: `[AutoWake] ${msg}` })
+    });
+    if (autoSpawn) {
+      fetch(`${BASE}/api/intercom/spawn`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ agent: to }) }).catch(() => {});
+    }
+    showToast(`✔ Wake signal dispatched to ${to.toUpperCase()}`);
+    document.getElementById('w-msg').value = '';
+    addActivity(`Wake → ${to.toUpperCase()}: ${msg.slice(0,40)}`);
+  } catch(e) { showToast('Failed: ' + e.message, true); }
+}
+
+async function clearSelectedInbox() {
+  if (!selectedAgent) return;
+  try {
+    await fetch(`${BASE}/api/intercom/send`, { method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ agent: selectedAgent }) });
+  } catch {}
+  // Fall back to CLI approach — just reload
+  showToast(`Run: intercom clear --agent ${selectedAgent}`);
+}
+
+async function markAllRead() {
+  if (!selectedAgent) return;
+  await loadMessages(selectedAgent);
+  showToast(`Inbox for ${selectedAgent.toUpperCase()} refreshed`);
+}
+
+function clearSendForm() {
+  ['s-from','s-to','s-msg'].forEach(id => document.getElementById(id).value = '');
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', ['inbox','channels','send'][i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById(`tab-${name}`).classList.add('active');
+  if (name === 'channels') loadChannels();
+}
+
+function refreshAll() {
+  loadPeersDirect();
+  if (selectedAgent) loadMessages(selectedAgent);
+  loadDLQ();
+  loadHealth();
+}
+
+function showToast(msg, isError = false) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (isError ? ' error' : '');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Boot
+connectSSE();
+refreshAll();
+renderActivity();
+setInterval(refreshAll, 10000);
+</script>
 </body>
 </html>
