@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { PI_PIPE_NAME, MESH_DIR, getAgentDirPath } = require('../config');
+const { readInbox, writeInbox, sanitizeName, getInboxFile } = require('../core/mesh');
 
 function tryAutoSpawnPiBroker() {
   const agentDir = getAgentDirPath();
@@ -98,7 +99,7 @@ function connectSocket(target, connectListener) {
 
 class PiIntercomClient {
   constructor(options = {}) {
-    this.name = options.name || 'antigravity';
+    this.name = sanitizeName(options.name || 'antigravity');
     this.sessionId = 'ag-' + crypto.randomUUID().slice(0, 8);
     this.isDaemon = options.isDaemon || false;
     this.onFail = options.onFail || null;
@@ -216,7 +217,8 @@ class PiIntercomClient {
         this.onceSessionList = null;
       }
     } else if (msg.type === 'message') {
-      const fromName = msg.from?.name || msg.from?.id || 'Unknown';
+      const rawFromName = msg.from?.name || msg.from?.id || 'Unknown';
+      const fromName = sanitizeName(rawFromName);
       const text = msg.message?.content?.text || '';
       const replyTo = msg.message?.replyTo;
 
@@ -230,9 +232,7 @@ class PiIntercomClient {
       }
 
       // Write to durable global mesh inbox
-      const inboxFile = path.join(MESH_DIR, `${this.name.toLowerCase()}.json`);
-      let inbox = [];
-      try { inbox = JSON.parse(fs.readFileSync(inboxFile, 'utf8')); } catch {}
+      let inbox = readInbox(this.name);
       inbox.push({
         id: Date.now(),
         from: `pi:${fromName}`,
@@ -241,7 +241,7 @@ class PiIntercomClient {
         timestamp: new Date().toISOString(),
         read: false
       });
-      fs.writeFileSync(inboxFile, JSON.stringify(inbox, null, 2), 'utf8');
+      writeInbox(this.name, inbox);
 
       // Send instant native ack back over the pipe
       const ackText = `[Antigravity]: Received task "${text}". Logged to active mesh queue.`;
@@ -260,20 +260,19 @@ class PiIntercomClient {
       const files = fs.readdirSync(MESH_DIR);
       files.forEach((fileName) => {
         if (fileName.endsWith('.json')) {
-          const filePath = path.join(MESH_DIR, fileName);
+          const targetAgent = fileName.replace('.json', '');
           try {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            const data = readInbox(targetAgent);
             let updated = false;
             data.forEach((m) => {
               if (!m.read && m.from !== this.name && !m.from.startsWith('pi:')) {
-                const target = fileName.replace('.json', '');
-                this.sendMessage(target, `[From ${m.from.toUpperCase()}]: ${m.message}`);
+                this.sendMessage(targetAgent, `[From ${m.from.toUpperCase()}]: ${m.message}`);
                 m.read = true;
                 updated = true;
               }
             });
             if (updated) {
-              fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+              writeInbox(targetAgent, data);
             }
           } catch {}
         }

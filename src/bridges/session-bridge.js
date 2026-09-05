@@ -1,14 +1,16 @@
 // src/bridges/session-bridge.js - Live Stdin/Stdout Bridge for Interactive CLI Sessions
 const { spawn } = require('child_process');
 const fs = require('fs');
+const fsPromises = fs.promises;
 const path = require('path');
 const readline = require('readline');
 const { MESH_DIR } = require('../config');
+const { getInboxFile, readInbox, writeInbox } = require('../core/mesh');
 
 function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.random().toString(36).substring(2, 8), command = 'powershell', cmdArgs = []) {
   const fullAgentTag = `${agentName.toLowerCase()}#${sessionId}`;
-  const inboxFile = path.join(MESH_DIR, `${agentName.toLowerCase()}.json`);
-  const sessionInboxFile = path.join(MESH_DIR, `${agentName.toLowerCase()}-${sessionId}.json`);
+  const inboxFile = getInboxFile(agentName);
+  const sessionInboxFile = getInboxFile(`${agentName}#${sessionId}`);
 
   console.log(`\n=============================================================`);
   console.log(`🚀 [GLOBAL INTERCOM SESSION BRIDGE ACTIVE]`);
@@ -28,14 +30,14 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
     child.stdin.write(line + '\n');
   });
 
-  function checkInbox(filePath) {
-    if (!fs.existsSync(filePath)) return [];
+  async function checkInbox(filePath) {
     try {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const dataStr = await fsPromises.readFile(filePath, 'utf8');
+      const data = JSON.parse(dataStr);
       const unread = data.filter(m => !m.read);
       if (unread.length > 0) {
         data.forEach(m => (m.read = true));
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+        await fsPromises.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
       }
       return unread;
     } catch {
@@ -44,21 +46,26 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
   }
 
   const processedMessageIds = new Set();
+  let isPolling = false;
 
-  const pollInterval = setInterval(() => {
-    // 1. Session specific
-    const sessionMessages = checkInbox(sessionInboxFile);
-    sessionMessages.forEach(msg => {
-      if (msg.id && processedMessageIds.has(msg.id)) return;
-      if (msg.id) processedMessageIds.add(msg.id);
-      console.log(`\n⚡ [INJECTING TASK FROM ${msg.from.toUpperCase()}] ──► ${fullAgentTag}`);
-      child.stdin.write(msg.message + '\n');
-    });
+  const pollInterval = setInterval(async () => {
+    if (isPolling) return;
+    isPolling = true;
 
-    // 2. Targeted general
-    if (fs.existsSync(inboxFile)) {
+    try {
+      // 1. Session specific
+      const sessionMessages = await checkInbox(sessionInboxFile);
+      sessionMessages.forEach(msg => {
+        if (msg.id && processedMessageIds.has(msg.id)) return;
+        if (msg.id) processedMessageIds.add(msg.id);
+        console.log(`\n⚡ [INJECTING TASK FROM ${msg.from.toUpperCase()}] ──► ${fullAgentTag}`);
+        child.stdin.write(msg.message + '\n');
+      });
+
+      // 2. Targeted general
       try {
-        const allMsgs = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+        const allMsgsStr = await fsPromises.readFile(inboxFile, 'utf8');
+        const allMsgs = JSON.parse(allMsgsStr);
         let modified = false;
         allMsgs.forEach(m => {
           if (!m.read && (m.to.toLowerCase() === fullAgentTag || m.to.toLowerCase() === agentName.toLowerCase())) {
@@ -74,9 +81,11 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
           }
         });
         if (modified) {
-          fs.writeFileSync(inboxFile, JSON.stringify(allMsgs, null, 2), 'utf8');
+          await fsPromises.writeFile(inboxFile, JSON.stringify(allMsgs, null, 2), 'utf8');
         }
       } catch {}
+    } finally {
+      isPolling = false;
     }
   }, 1000);
 

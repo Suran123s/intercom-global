@@ -1,29 +1,35 @@
-﻿// src/core/notifications.js - Cross-Platform OS Desktop Toast Notifications & Audio Alerts
-const { exec } = require('child_process');
+// src/core/notifications.js - Cross-Platform OS Desktop Toast Notifications & Audio Alerts
+const { execFile } = require('child_process');
 
 function showDesktopNotification(title, message, options = {}) {
-  const cleanTitle = (title || 'Intercom Global').replace(/"/g, '`"');
-  const cleanMessage = (message || '').replace(/"/g, '`"');
+  const rawTitle = title || 'Intercom Global';
+  const rawMessage = message || '';
 
   if (process.platform === 'win32') {
     // Windows PowerShell Toast / Balloon Notification
+    const psTitle = rawTitle.replace(/'/g, "''");
+    const psMessage = rawMessage.replace(/'/g, "''");
+
     const psScript = `
       [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms");
       $notify = New-Object System.Windows.Forms.NotifyIcon;
       $notify.Icon = [System.Drawing.SystemIcons]::Information;
       $notify.Visible = $true;
-      $notify.ShowBalloonTip(5000, "${cleanTitle}", "${cleanMessage}", [System.Windows.Forms.ToolTipIcon]::Info);
+      $notify.ShowBalloonTip(5000, '${psTitle}', '${psMessage}', [System.Windows.Forms.ToolTipIcon]::Info);
       [console]::beep(900, 180);
     `.trim().replace(/\r?\n/g, ' ');
 
-    exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript}"`, { windowsHide: true }, () => {});
+    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], { windowsHide: true }, () => {});
   } else if (process.platform === 'darwin') {
     // macOS AppleScript Notification
-    const macScript = `display notification "${cleanMessage}" with title "${cleanTitle}" sound name "Glass"`;
-    exec(`osascript -e '${macScript}'`, () => {});
+    const safeTitle = rawTitle.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const safeMessage = rawMessage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const macScript = `display notification "${safeMessage}" with title "${safeTitle}" sound name "Glass"`;
+
+    execFile('osascript', ['-e', macScript], () => {});
   } else {
     // Linux notify-send
-    exec(`notify-send "${cleanTitle}" "${cleanMessage}"`, () => {});
+    execFile('notify-send', [rawTitle, rawMessage], () => {});
   }
 }
 

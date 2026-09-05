@@ -3,13 +3,34 @@ const fs = require('fs');
 const path = require('path');
 const { MESH_DIR } = require('../config');
 
-function getInboxFile(agentName) {
-  const clean = agentName.toLowerCase().trim();
-  if (clean.includes('#')) {
-    const [agent, session] = clean.split('#');
-    return path.join(MESH_DIR, `${agent}-${session}.json`);
+function sanitizeName(name) {
+  if (typeof name !== 'string') return 'unknown';
+  const base = path.basename(name.replace(/\0/g, '').replace(/\\/g, '/'));
+  const clean = base.replace(/[^a-zA-Z0-9_\-#.]/g, '_').replace(/^\.+/, '');
+  return clean || 'unknown';
+}
+
+function ensureInDirectory(dir, targetPath) {
+  const resolvedDir = path.resolve(dir);
+  const resolvedTarget = path.resolve(targetPath);
+  if (!resolvedTarget.startsWith(resolvedDir + path.sep) && resolvedTarget !== resolvedDir) {
+    throw new Error(`Path traversal attempt blocked: ${targetPath}`);
   }
-  return path.join(MESH_DIR, `${clean}.json`);
+  return resolvedTarget;
+}
+
+function getInboxFile(agentName) {
+  const raw = (agentName || 'unknown').toString().toLowerCase().trim();
+  if (raw.includes('#')) {
+    const parts = raw.split('#');
+    const agent = sanitizeName(parts[0]);
+    const session = sanitizeName(parts.slice(1).join('-'));
+    const target = path.join(MESH_DIR, `${agent}-${session}.json`);
+    return ensureInDirectory(MESH_DIR, target);
+  }
+  const clean = sanitizeName(raw);
+  const target = path.join(MESH_DIR, `${clean}.json`);
+  return ensureInDirectory(MESH_DIR, target);
 }
 
 function readInbox(agentName) {
@@ -41,8 +62,10 @@ function writeInbox(agentName, messages) {
 function checkAndMarkRead(agentName) {
   const inbox = readInbox(agentName);
   const unread = inbox.filter(m => !m.read);
-  inbox.forEach(m => (m.read = true));
-  writeInbox(agentName, inbox);
+  if (unread.length > 0) {
+    inbox.forEach(m => (m.read = true));
+    writeInbox(agentName, inbox);
+  }
   return unread;
 }
 
@@ -136,8 +159,10 @@ if (!fs.existsSync(CHANNELS_DIR)) {
 }
 
 function getChannelFile(channelName) {
-  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
-  return path.join(CHANNELS_DIR, `${clean}.json`);
+  const raw = (channelName || 'general').toString().toLowerCase().replace(/^#/, '').trim();
+  const clean = sanitizeName(raw);
+  const target = path.join(CHANNELS_DIR, `${clean}.json`);
+  return ensureInDirectory(CHANNELS_DIR, target);
 }
 
 function readChannel(channelName) {
@@ -176,19 +201,41 @@ function sendChannelMessage(channelName, from, message) {
   return msgObj;
 }
 
+const channelListCache = new Map();
+
 function listChannels() {
   if (!fs.existsSync(CHANNELS_DIR)) return [];
   const files = fs.readdirSync(CHANNELS_DIR);
   const channels = [];
+  const currentFiles = new Set();
+
   files.forEach(f => {
     if (f.endsWith('.json')) {
+      currentFiles.add(f);
+      const filePath = path.join(CHANNELS_DIR, f);
       const name = '#' + f.replace('.json', '');
       try {
-        const content = JSON.parse(fs.readFileSync(path.join(CHANNELS_DIR, f), 'utf8') || '[]');
-        channels.push({ name, total: content.length, lastMessage: content[content.length - 1] || null });
+        const stat = fs.statSync(filePath);
+        const cached = channelListCache.get(f);
+        if (cached && cached.mtimeMs === stat.mtimeMs) {
+          channels.push(cached.data);
+        } else {
+          const fileContent = fs.readFileSync(filePath, 'utf8');
+          const content = JSON.parse(fileContent || '[]');
+          const channelData = { name, total: content.length, lastMessage: content[content.length - 1] || null };
+          channelListCache.set(f, { mtimeMs: stat.mtimeMs, data: channelData });
+          channels.push(channelData);
+        }
       } catch {}
     }
   });
+
+  for (const key of channelListCache.keys()) {
+    if (!currentFiles.has(key)) {
+      channelListCache.delete(key);
+    }
+  }
+
   return channels;
 }
 
@@ -215,6 +262,7 @@ function broadcastToAgents(from, targets, message, dispatchFn) {
 }
 
 module.exports = {
+  sanitizeName,
   getInboxFile,
   readInbox,
   writeInbox,
@@ -228,4 +276,3 @@ module.exports = {
   listChannels,
   broadcastToAgents
 };
-

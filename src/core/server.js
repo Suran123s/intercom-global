@@ -95,15 +95,41 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
 
 const { generateAgentCard, processA2AMessage, getA2ATask } = require('../bridges/a2a');
 
-function setCorsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+function setCorsHeaders(req, res) {
+  const requestOrigin = req.headers.origin;
+  const configuredOrigins = process.env.ALLOWED_ORIGINS || process.env.INTERCOM_ALLOWED_ORIGINS;
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Vary', 'Origin');
+
+  if (configuredOrigins) {
+    if (configuredOrigins === "*") {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return;
+    }
+
+    const allowedList = configuredOrigins.split(",").map(o => o.trim()).filter(Boolean);
+    if (requestOrigin && allowedList.includes(requestOrigin)) {
+      res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    }
+  } else if (requestOrigin) {
+    try {
+      if (requestOrigin === "null") {
+        res.setHeader('Access-Control-Allow-Origin', "null");
+      } else {
+        const originUrl = new URL(requestOrigin);
+        if (originUrl.hostname === "localhost" || originUrl.hostname === "127.0.0.1" || originUrl.hostname === "[::1]") {
+          res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+        }
+      }
+    } catch {}
+  }
 }
 
 function createServer() {
   const server = http.createServer((req, res) => {
-    setCorsHeaders(res);
+    setCorsHeaders(req, res);
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
