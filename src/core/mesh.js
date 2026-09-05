@@ -178,19 +178,41 @@ function sendChannelMessage(channelName, from, message) {
   return msgObj;
 }
 
+const channelListCache = new Map();
+
 function listChannels() {
   if (!fs.existsSync(CHANNELS_DIR)) return [];
   const files = fs.readdirSync(CHANNELS_DIR);
   const channels = [];
+  const currentFiles = new Set();
+
   files.forEach(f => {
     if (f.endsWith('.json')) {
+      currentFiles.add(f);
+      const filePath = path.join(CHANNELS_DIR, f);
       const name = '#' + f.replace('.json', '');
       try {
-        const content = JSON.parse(fs.readFileSync(path.join(CHANNELS_DIR, f), 'utf8') || '[]');
-        channels.push({ name, total: content.length, lastMessage: content[content.length - 1] || null });
+        const stat = fs.statSync(filePath);
+        const cached = channelListCache.get(f);
+        if (cached && cached.mtimeMs === stat.mtimeMs) {
+          channels.push(cached.data);
+        } else {
+          const fileContent = fs.readFileSync(filePath, 'utf8');
+          const content = JSON.parse(fileContent || '[]');
+          const channelData = { name, total: content.length, lastMessage: content[content.length - 1] || null };
+          channelListCache.set(f, { mtimeMs: stat.mtimeMs, data: channelData });
+          channels.push(channelData);
+        }
       } catch {}
     }
   });
+
+  for (const key of channelListCache.keys()) {
+    if (!currentFiles.has(key)) {
+      channelListCache.delete(key);
+    }
+  }
+
   return channels;
 }
 
@@ -230,4 +252,3 @@ module.exports = {
   listChannels,
   broadcastToAgents
 };
-
