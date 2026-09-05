@@ -206,7 +206,10 @@ function createServer() {
       });
       res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
       sseClients.add(res);
-      req.on('close', () => sseClients.delete(res));
+      req.on('close', () => {
+        sseClients.delete(res);
+        try { res.end(); } catch {}
+      });
       return;
     }
 
@@ -279,9 +282,14 @@ function createServer() {
     // 9. Read Pub/Sub Channel
     if (req.method === 'GET' && parsedUrl.pathname.startsWith('/api/intercom/channels/')) {
       const channel = parsedUrl.pathname.replace('/api/intercom/channels/', '');
-      const messages = readChannel(channel);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(messages, null, 2));
+      try {
+        const messages = readChannel(channel);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(messages, null, 2));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
     }
 
     // 10. Read Mailbox
@@ -291,9 +299,14 @@ function createServer() {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'agent query param required' }));
       }
-      const unread = checkAndMarkRead(agent);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(unread));
+      try {
+        const unread = checkAndMarkRead(agent);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(unread));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
     }
 
     // 11. Task Acknowledgment (ACK/NACK)
@@ -380,4 +393,3 @@ module.exports = {
   dispatchMessage,
   createServer
 };
-

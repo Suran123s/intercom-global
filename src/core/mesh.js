@@ -3,13 +3,45 @@ const fs = require('fs');
 const path = require('path');
 const { MESH_DIR } = require('../config');
 
-function getInboxFile(agentName) {
-  const clean = agentName.toLowerCase().trim();
-  if (clean.includes('#')) {
-    const [agent, session] = clean.split('#');
-    return path.join(MESH_DIR, `${agent}-${session}.json`);
+function sanitizeName(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/^#/, '')
+    .replace(/[\/\\]/g, '')
+    .replace(/\.\.+/g, '')
+    .replace(/\0/g, '')
+    .trim();
+}
+
+function ensureInDir(baseDir, targetFile) {
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(targetFile);
+
+  if (!resolvedTarget.startsWith(resolvedBase + path.sep)) {
+    throw new Error(`Path traversal detected: '${targetFile}' is outside '${baseDir}'`);
   }
-  return path.join(MESH_DIR, `${clean}.json`);
+  return resolvedTarget;
+}
+
+function getInboxFile(agentName) {
+  const raw = String(agentName || '').toLowerCase().trim();
+  let clean;
+  if (raw.includes('#')) {
+    const [agent, session] = raw.split('#');
+    const cleanAgent = sanitizeName(agent);
+    const cleanSession = sanitizeName(session);
+    if (!cleanAgent) {
+      throw new Error(`Invalid agent name: '${agentName}'`);
+    }
+    clean = cleanSession ? `${cleanAgent}-${cleanSession}` : cleanAgent;
+  } else {
+    clean = sanitizeName(raw);
+  }
+  if (!clean) {
+    throw new Error(`Invalid agent name: '${agentName}'`);
+  }
+  const file = path.join(MESH_DIR, `${clean}.json`);
+  return ensureInDir(MESH_DIR, file);
 }
 
 function readInbox(agentName) {
@@ -138,8 +170,13 @@ if (!fs.existsSync(CHANNELS_DIR)) {
 }
 
 function getChannelFile(channelName) {
-  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
-  return path.join(CHANNELS_DIR, `${clean}.json`);
+  const raw = String(channelName || '').toLowerCase().trim();
+  const clean = sanitizeName(raw);
+  if (!clean) {
+    throw new Error(`Invalid channel name: '${channelName}'`);
+  }
+  const file = path.join(CHANNELS_DIR, `${clean}.json`);
+  return ensureInDir(CHANNELS_DIR, file);
 }
 
 function readChannel(channelName) {
@@ -153,9 +190,9 @@ function readChannel(channelName) {
 }
 
 function sendChannelMessage(channelName, from, message) {
-  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
-  const file = getChannelFile(clean);
-  const messages = readChannel(clean);
+  const file = getChannelFile(channelName);
+  const clean = path.basename(file, '.json');
+  const messages = readChannel(channelName);
   const msgObj = {
     id: Date.now() + '-' + Math.random().toString(36).substring(2, 6),
     channel: `#${clean}`,
