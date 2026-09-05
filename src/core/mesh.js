@@ -41,6 +41,7 @@ function writeInbox(agentName, messages) {
 function checkAndMarkRead(agentName) {
   const inbox = readInbox(agentName);
   const unread = inbox.filter(m => !m.read);
+  if (unread.length === 0) return [];
   inbox.forEach(m => (m.read = true));
   writeInbox(agentName, inbox);
   return unread;

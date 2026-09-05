@@ -1,4 +1,4 @@
-﻿// test/reliability.test.js - Reliability, Auto-Spawn, DLQ, and Task Acknowledgment Tests
+// test/reliability.test.js - Reliability, Auto-Spawn, DLQ, and Task Acknowledgment Tests
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
