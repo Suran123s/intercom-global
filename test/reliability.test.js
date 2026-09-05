@@ -1,4 +1,4 @@
-﻿// test/reliability.test.js - Reliability, Auto-Spawn, DLQ, and Task Acknowledgment Tests
+// test/reliability.test.js - Reliability, Auto-Spawn, DLQ, and Task Acknowledgment Tests
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -85,4 +85,29 @@ test('retryWithBackoff succeeds on transient failure', async () => {
   assert.strictEqual(result.success, true);
   assert.strictEqual(result.calls, 2);
   assert.strictEqual(calls, 2);
+});
+
+
+test('spawnAgent executes process with shell set to false to prevent shell command injection', async () => {
+  const childProcess = require('child_process');
+  let spawnOptions = null;
+  const originalSpawn = childProcess.spawn;
+
+  const EventEmitter = require('events');
+  childProcess.spawn = (command, args, options) => {
+    spawnOptions = options;
+    const child = new EventEmitter();
+    child.unref = () => {};
+    child.pid = 12345;
+    return child;
+  };
+
+  try {
+    const { spawnAgent } = require('../src/controllers/spawner');
+    await spawnAgent('opencode', { timeoutMs: 100 });
+    assert.ok(spawnOptions, 'spawn should have been called');
+    assert.strictEqual(spawnOptions.shell, false, 'shell option must be false');
+  } finally {
+    childProcess.spawn = originalSpawn;
+  }
 });

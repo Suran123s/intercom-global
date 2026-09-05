@@ -108,10 +108,11 @@ function waitForUnread(agentName, timeoutMs = 300000) {
     let watcher = null;
 
     const cleanup = () => {
-      if (timer) clearTimeout(timer);
-      if (pollInterval) clearInterval(pollInterval);
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
       if (watcher) {
         try { watcher.close(); } catch {}
+        watcher = null;
       }
     };
 
@@ -136,6 +137,7 @@ function waitForUnread(agentName, timeoutMs = 300000) {
 
     // Poll fallback
     pollInterval = setInterval(checkNow, 500);
+    if (pollInterval && pollInterval.unref) pollInterval.unref();
 
     // fs watcher on MESH_DIR
     try {
@@ -149,6 +151,7 @@ function waitForUnread(agentName, timeoutMs = 300000) {
           checkNow();
         }
       });
+      if (watcher && typeof watcher.unref === "function") watcher.unref();
     } catch {}
   });
 }
