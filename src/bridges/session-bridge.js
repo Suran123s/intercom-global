@@ -20,7 +20,7 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
 
   const child = spawn(command, cmdArgs, {
     stdio: ['pipe', process.stdout, process.stderr],
-    shell: true
+    shell: false
   });
 
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
