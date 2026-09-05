@@ -89,3 +89,28 @@ test('A2A HTTP endpoints: /.well-known/agent.json and /a2a/sendMessage', async (
     fs.unlinkSync(file);
   }
 });
+
+test('sendError helper correctly formats error responses', () => {
+  const { sendError } = require('../src/core/server');
+  let status = null;
+  let contentType = null;
+  let body = null;
+  const res = {
+    writeHead(s, h) {
+      status = s;
+      contentType = h['Content-Type'];
+    },
+    end(b) {
+      body = b;
+    }
+  };
+
+  sendError(res, new Error('Invalid parameter'), 400);
+  assert.strictEqual(status, 400);
+  assert.strictEqual(contentType, 'application/json');
+  assert.deepStrictEqual(JSON.parse(body), { error: 'Invalid parameter' });
+
+  sendError(res, 'Not found error', 404);
+  assert.strictEqual(status, 404);
+  assert.deepStrictEqual(JSON.parse(body), { error: 'Not found error' });
+});

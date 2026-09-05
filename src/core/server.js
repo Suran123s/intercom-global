@@ -95,6 +95,12 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
 
 const { generateAgentCard, processA2AMessage, getA2ATask } = require('../bridges/a2a');
 
+function sendError(res, err, statusCode = 400) {
+  const message = typeof err === 'string' ? err : (err && err.message ? err.message : 'Unknown error');
+  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+  return res.end(JSON.stringify({ error: message }));
+}
+
 function setCorsHeaders(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -131,8 +137,7 @@ function createServer() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(task, null, 2));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          sendError(res, err, 400);
         }
       });
       return;
@@ -144,8 +149,7 @@ function createServer() {
       const taskId = parts[parts.length - 1];
       const task = getA2ATask(taskId);
       if (!task) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Task not found' }));
+        return sendError(res, 'Task not found', 404);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(task, null, 2));
@@ -165,8 +169,7 @@ function createServer() {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(health, null, 2));
       }).catch(err => {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
+        sendError(res, err, 500);
       });
       return;
     }
@@ -196,8 +199,7 @@ function createServer() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: 'delivered', to, messageId: msgObj.id, autoReply: AUTO_REPLY_ENABLED }));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          sendError(res, err, 400);
         }
       });
       return;
@@ -216,8 +218,7 @@ function createServer() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: 'broadcast_dispatched', count: results.length, results }));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          sendError(res, err, 400);
         }
       });
       return;
@@ -236,8 +237,7 @@ function createServer() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(msg));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          sendError(res, err, 400);
         }
       });
       return;
@@ -262,8 +262,7 @@ function createServer() {
     if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/inbox') {
       const agent = parsedUrl.searchParams.get('agent');
       if (!agent) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'agent query param required' }));
+        return sendError(res, 'agent query param required', 400);
       }
       const unread = checkAndMarkRead(agent);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -280,15 +279,13 @@ function createServer() {
           if (!agent || !messageId) throw new Error('Missing agent or messageId');
           const updated = updateMessageStatus(agent, messageId, status || 'COMPLETED', result);
           if (!updated) {
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: `Message #${messageId} not found for agent ${agent}` }));
+            return sendError(res, `Message #${messageId} not found for agent ${agent}`, 404);
           }
           broadcastEvent('task_ack', updated);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(updated));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          sendError(res, err, 400);
         }
       });
       return;
@@ -299,13 +296,11 @@ function createServer() {
       const parts = parsedUrl.pathname.replace('/api/intercom/status/', '').split('/');
       const [agent, messageId] = parts;
       if (!agent || !messageId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Usage: /api/intercom/status/:agent/:messageId' }));
+        return sendError(res, 'Usage: /api/intercom/status/:agent/:messageId', 400);
       }
       const status = getMessageStatus(agent, messageId);
       if (!status) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Message not found' }));
+        return sendError(res, 'Message not found', 404);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(status, null, 2));
@@ -336,8 +331,7 @@ function createServer() {
           res.writeHead(result.success ? 200 : 500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          sendError(res, err, 400);
         }
       });
       return;
@@ -352,6 +346,7 @@ function createServer() {
 
 module.exports = {
   dispatchMessage,
-  createServer
+  createServer,
+  sendError
 };
 
