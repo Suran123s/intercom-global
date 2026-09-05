@@ -3,13 +3,34 @@ const fs = require('fs');
 const path = require('path');
 const { MESH_DIR } = require('../config');
 
-function getInboxFile(agentName) {
-  const clean = agentName.toLowerCase().trim();
-  if (clean.includes('#')) {
-    const [agent, session] = clean.split('#');
-    return path.join(MESH_DIR, `${agent}-${session}.json`);
+function sanitizeName(name) {
+  if (typeof name !== 'string') return 'unknown';
+  const base = path.basename(name.replace(/\0/g, '').replace(/\\/g, '/'));
+  const clean = base.replace(/[^a-zA-Z0-9_\-#.]/g, '_').replace(/^\.+/, '');
+  return clean || 'unknown';
+}
+
+function ensureInDirectory(dir, targetPath) {
+  const resolvedDir = path.resolve(dir);
+  const resolvedTarget = path.resolve(targetPath);
+  if (!resolvedTarget.startsWith(resolvedDir + path.sep) && resolvedTarget !== resolvedDir) {
+    throw new Error(`Path traversal attempt blocked: ${targetPath}`);
   }
-  return path.join(MESH_DIR, `${clean}.json`);
+  return resolvedTarget;
+}
+
+function getInboxFile(agentName) {
+  const raw = (agentName || 'unknown').toString().toLowerCase().trim();
+  if (raw.includes('#')) {
+    const parts = raw.split('#');
+    const agent = sanitizeName(parts[0]);
+    const session = sanitizeName(parts.slice(1).join('-'));
+    const target = path.join(MESH_DIR, `${agent}-${session}.json`);
+    return ensureInDirectory(MESH_DIR, target);
+  }
+  const clean = sanitizeName(raw);
+  const target = path.join(MESH_DIR, `${clean}.json`);
+  return ensureInDirectory(MESH_DIR, target);
 }
 
 function readInbox(agentName) {
@@ -138,8 +159,10 @@ if (!fs.existsSync(CHANNELS_DIR)) {
 }
 
 function getChannelFile(channelName) {
-  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
-  return path.join(CHANNELS_DIR, `${clean}.json`);
+  const raw = (channelName || 'general').toString().toLowerCase().replace(/^#/, '').trim();
+  const clean = sanitizeName(raw);
+  const target = path.join(CHANNELS_DIR, `${clean}.json`);
+  return ensureInDirectory(CHANNELS_DIR, target);
 }
 
 function readChannel(channelName) {
@@ -239,6 +262,7 @@ function broadcastToAgents(from, targets, message, dispatchFn) {
 }
 
 module.exports = {
+  sanitizeName,
   getInboxFile,
   readInbox,
   writeInbox,

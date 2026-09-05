@@ -5,11 +5,12 @@ const fsPromises = fs.promises;
 const path = require('path');
 const readline = require('readline');
 const { MESH_DIR } = require('../config');
+const { getInboxFile, readInbox, writeInbox } = require('../core/mesh');
 
 function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.random().toString(36).substring(2, 8), command = 'powershell', cmdArgs = []) {
   const fullAgentTag = `${agentName.toLowerCase()}#${sessionId}`;
-  const inboxFile = path.join(MESH_DIR, `${agentName.toLowerCase()}.json`);
-  const sessionInboxFile = path.join(MESH_DIR, `${agentName.toLowerCase()}-${sessionId}.json`);
+  const inboxFile = getInboxFile(agentName);
+  const sessionInboxFile = getInboxFile(`${agentName}#${sessionId}`);
 
   console.log(`\n=============================================================`);
   console.log(`🚀 [GLOBAL INTERCOM SESSION BRIDGE ACTIVE]`);
