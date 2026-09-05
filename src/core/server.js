@@ -1,10 +1,9 @@
 // src/core/server.js - HTTP Intercom Daemon
 const http = require('http');
 const { exec } = require('child_process');
-const { PORT, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, checkAndMarkRead, sendChannelMessage, readChannel, listChannels, broadcastToAgents, listActiveMailboxes } = require('./mesh');
-const { updateMessageStatus, getMessageStatus, getDlq, clearDlq } = require('./dlq');
-const { spawnAgent } = require('../controllers/spawner');
+const { PORT } = require('../config');
+const { readInbox, writeInbox } = require('./mesh');
+const { handleRequest } = require('../routes/router');
 
 const AUTO_REPLY_ENABLED = process.argv.includes('--auto-reply') || process.env.INTERCOM_AUTO_REPLY === 'true';
 
@@ -93,258 +92,14 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
   return msgObj;
 }
 
-const { generateAgentCard, processA2AMessage, getA2ATask } = require('../bridges/a2a');
-
-function setCorsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-}
-
 function createServer() {
   const server = http.createServer((req, res) => {
-    setCorsHeaders(res);
-
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      return res.end();
-    }
-
-    const host = req.headers.host ? `http://${req.headers.host}` : `http://localhost:${PORT}`;
-    const parsedUrl = new URL(req.url, host);
-
-    // 1. A2A Agent Card Discovery
-    if (req.method === 'GET' && (parsedUrl.pathname === '/.well-known/agent.json' || parsedUrl.pathname === '/a2a/agent-card' || parsedUrl.pathname === '/a2a/v1/agent-card')) {
-      const card = generateAgentCard(host);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(card, null, 2));
-    }
-
-    // 2. A2A Send Message / Create Task
-    if (req.method === 'POST' && (parsedUrl.pathname === '/a2a/sendMessage' || parsedUrl.pathname === '/a2a/v1/sendMessage' || parsedUrl.pathname === '/a2a/tasks')) {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body || '{}');
-          const task = processA2AMessage(parsed, dispatchMessage);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(task, null, 2));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    // 3. A2A Get Task Status
-    if (req.method === 'GET' && (parsedUrl.pathname.startsWith('/a2a/tasks/') || parsedUrl.pathname.startsWith('/a2a/v1/tasks/'))) {
-      const parts = parsedUrl.pathname.split('/');
-      const taskId = parts[parts.length - 1];
-      const task = getA2ATask(taskId);
-      if (!task) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Task not found' }));
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(task, null, 2));
-    }
-
-    // 3b. Peers list — all active mailboxes (used by web dashboard)
-    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/peers') {
-      const peers = listActiveMailboxes();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(peers, null, 2));
-    }
-
-    // 3c. Doctor — full mesh health probe (used by web dashboard)
-    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/doctor') {
-      const { diagnoseMesh } = require('../controllers/autowake');
-      diagnoseMesh().then(health => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(health, null, 2));
-      }).catch(err => {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
-      });
-      return;
-    }
-
-    // 4. Server-Sent Events (SSE) Multi-Client Real-Time Event Bus
-    if (req.method === 'GET' && (parsedUrl.pathname === '/api/intercom/events' || parsedUrl.pathname === '/api/intercom/stream')) {
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-      });
-      res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
-      sseClients.add(res);
-      req.on('close', () => sseClients.delete(res));
-      return;
-    }
-
-    // 5. Standard Intercom REST Send
-    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/send') {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        try {
-          const { from, to, message } = JSON.parse(body);
-          if (!from || !to || !message) throw new Error('Missing from, to, or message fields');
-          const msgObj = dispatchMessage(from, to, message);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'delivered', to, messageId: msgObj.id, autoReply: AUTO_REPLY_ENABLED }));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    // 6. Multi-Agent Broadcast (1-to-Many Swarm)
-    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/broadcast') {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        try {
-          const { from, to, message } = JSON.parse(body);
-          if (!from || !to || !message) throw new Error('Missing from, to, or message fields');
-          const results = broadcastToAgents(from, to, message, dispatchMessage);
-          broadcastEvent('broadcast', { from, targets: to, message, results });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'broadcast_dispatched', count: results.length, results }));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    // 7. Pub/Sub Channel Send
-    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/channels/send') {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        try {
-          const { channel, from, message } = JSON.parse(body);
-          if (!channel || !from || !message) throw new Error('Missing channel, from, or message fields');
-          const msg = sendChannelMessage(channel, from, message);
-          broadcastEvent('channel_message', msg);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(msg));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    // 8. List Pub/Sub Channels
-    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/channels') {
-      const channels = listChannels();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(channels, null, 2));
-    }
-
-    // 9. Read Pub/Sub Channel
-    if (req.method === 'GET' && parsedUrl.pathname.startsWith('/api/intercom/channels/')) {
-      const channel = parsedUrl.pathname.replace('/api/intercom/channels/', '');
-      const messages = readChannel(channel);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(messages, null, 2));
-    }
-
-    // 10. Read Mailbox
-    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/inbox') {
-      const agent = parsedUrl.searchParams.get('agent');
-      if (!agent) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'agent query param required' }));
-      }
-      const unread = checkAndMarkRead(agent);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(unread));
-    }
-
-    // 11. Task Acknowledgment (ACK/NACK)
-    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/ack') {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        try {
-          const { agent, messageId, status, result } = JSON.parse(body);
-          if (!agent || !messageId) throw new Error('Missing agent or messageId');
-          const updated = updateMessageStatus(agent, messageId, status || 'COMPLETED', result);
-          if (!updated) {
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: `Message #${messageId} not found for agent ${agent}` }));
-          }
-          broadcastEvent('task_ack', updated);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(updated));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    // 12. Task Status Check
-    if (req.method === 'GET' && parsedUrl.pathname.startsWith('/api/intercom/status/')) {
-      const parts = parsedUrl.pathname.replace('/api/intercom/status/', '').split('/');
-      const [agent, messageId] = parts;
-      if (!agent || !messageId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Usage: /api/intercom/status/:agent/:messageId' }));
-      }
-      const status = getMessageStatus(agent, messageId);
-      if (!status) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Message not found' }));
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(status, null, 2));
-    }
-
-    // 13. Dead Letter Queue (DLQ)
-    if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/dlq') {
-      const dlq = getDlq();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(dlq, null, 2));
-    }
-
-    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/dlq/clear') {
-      clearDlq();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ status: 'cleared' }));
-    }
-
-    // 14. Auto-Spawn Agent
-    if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/spawn') {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', async () => {
-        try {
-          const { agent, visible, timeoutMs } = JSON.parse(body);
-          if (!agent) throw new Error('Missing agent field');
-          const result = await spawnAgent(agent, { visible, timeoutMs });
-          res.writeHead(result.success ? 200 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    res.writeHead(404);
-    res.end();
+    handleRequest(req, res, {
+      dispatchMessage,
+      broadcastEvent,
+      sseClients,
+      AUTO_REPLY_ENABLED
+    });
   });
 
   return server;
@@ -354,4 +109,3 @@ module.exports = {
   dispatchMessage,
   createServer
 };
-
