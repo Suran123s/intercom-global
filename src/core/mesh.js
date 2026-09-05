@@ -69,21 +69,26 @@ function checkAndMarkRead(agentName) {
   return unread;
 }
 
-function listActiveMailboxes() {
+async function listActiveMailboxes() {
   if (!fs.existsSync(MESH_DIR)) return [];
-  const files = fs.readdirSync(MESH_DIR);
-  const mailboxes = [];
-  files.forEach(f => {
-    if (f.endsWith('.json')) {
+  try {
+    const files = await fs.promises.readdir(MESH_DIR);
+    const jsonFiles = files.filter(f => f.endsWith('.json'));
+    const mailboxes = await Promise.all(jsonFiles.map(async f => {
       const name = f.replace('.json', '');
       try {
-        const content = JSON.parse(fs.readFileSync(path.join(MESH_DIR, f), 'utf8') || '[]');
+        const raw = await fs.promises.readFile(path.join(MESH_DIR, f), 'utf8');
+        const content = JSON.parse(raw || '[]');
         const unreadCount = content.filter(m => !m.read).length;
-        mailboxes.push({ name, total: content.length, unread: unreadCount });
-      } catch {}
-    }
-  });
-  return mailboxes;
+        return { name, total: content.length, unread: unreadCount };
+      } catch {
+        return null;
+      }
+    }));
+    return mailboxes.filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function clearInbox(agentName) {
@@ -239,13 +244,13 @@ function listChannels() {
   return channels;
 }
 
-function broadcastToAgents(from, targets, message, dispatchFn) {
+async function broadcastToAgents(from, targets, message, dispatchFn) {
   let targetList = [];
   if (Array.isArray(targets)) {
     targetList = targets;
   } else if (typeof targets === 'string') {
     if (targets.toLowerCase() === 'all' || targets === '*') {
-      targetList = listActiveMailboxes().map(m => m.name);
+      targetList = (await listActiveMailboxes()).map(m => m.name);
     } else {
       targetList = targets.split(',').map(t => t.trim()).filter(Boolean);
     }

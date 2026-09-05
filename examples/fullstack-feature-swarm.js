@@ -64,7 +64,7 @@ async function runFeatureSwarm() {
 
   // Step 4: Broadcast Sync Notification to DevOps & Staging Testers
   console.log('📢 [PHASE 4]: Swarm Broadcast to Pi-Agent and QA Companions...');
-  const broadcastResults = broadcastToAgents(supervisor, 'pal,keshav,madhav', 'Feature branch stripe-checkout ready for staging run', dispatchMessage);
+  const broadcastResults = await broadcastToAgents(supervisor, 'pal,keshav,madhav', 'Feature branch stripe-checkout ready for staging run', dispatchMessage);
   console.log(`   ✔ Swarm broadcast delivered to: ${broadcastResults.map(r => r.to.toUpperCase()).join(', ')}\n`);
 
   // Step 5: Read and summarize the entire channel history
