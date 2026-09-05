@@ -78,18 +78,13 @@ function waitForUnread(agentName, timeoutMs = 300000) {
       return resolve(immediate);
     }
 
-    const inboxFile = getInboxFile(agentName);
     let resolved = false;
     let timer = null;
     let pollInterval = null;
-    let watcher = null;
 
     const cleanup = () => {
-      if (timer) clearTimeout(timer);
-      if (pollInterval) clearInterval(pollInterval);
-      if (watcher) {
-        try { watcher.close(); } catch {}
-      }
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     };
 
     const checkNow = () => {
@@ -112,21 +107,7 @@ function waitForUnread(agentName, timeoutMs = 300000) {
     }, timeoutMs);
 
     // Poll fallback
-    pollInterval = setInterval(checkNow, 500);
-
-    // fs watcher on MESH_DIR
-    try {
-      watcher = fs.watch(MESH_DIR, (eventType, filename) => {
-        if (!filename) {
-          checkNow();
-          return;
-        }
-        const targetFilename = path.basename(inboxFile).toLowerCase();
-        if (filename.toLowerCase() === targetFilename || filename.toLowerCase().startsWith(agentName.toLowerCase())) {
-          checkNow();
-        }
-      });
-    } catch {}
+    pollInterval = setInterval(checkNow, 50);
   });
 }
 
@@ -228,4 +209,3 @@ module.exports = {
   listChannels,
   broadcastToAgents
 };
-
