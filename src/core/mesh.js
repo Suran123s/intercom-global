@@ -3,13 +3,25 @@ const fs = require('fs');
 const path = require('path');
 const { MESH_DIR } = require('../config');
 
+function sanitizeSegment(val) {
+  return val.toLowerCase().trim().replace(/[^a-z0-9_-]/g, '-');
+}
+
 function getInboxFile(agentName) {
   const clean = agentName.toLowerCase().trim();
+  let baseName = '';
   if (clean.includes('#')) {
     const [agent, session] = clean.split('#');
-    return path.join(MESH_DIR, `${agent}-${session}.json`);
+    baseName = `${sanitizeSegment(agent)}-${sanitizeSegment(session)}.json`;
+  } else {
+    baseName = `${sanitizeSegment(clean)}.json`;
   }
-  return path.join(MESH_DIR, `${clean}.json`);
+  const resolved = path.resolve(MESH_DIR, baseName);
+  const resolvedMeshDir = path.resolve(MESH_DIR);
+  if (!resolved.startsWith(resolvedMeshDir + path.sep)) {
+    throw new Error('Invalid agent name: Path traversal detected');
+  }
+  return resolved;
 }
 
 function readInbox(agentName) {
@@ -137,7 +149,13 @@ if (!fs.existsSync(CHANNELS_DIR)) {
 
 function getChannelFile(channelName) {
   const clean = channelName.toLowerCase().replace(/^#/, '').trim();
-  return path.join(CHANNELS_DIR, `${clean}.json`);
+  const baseName = `${sanitizeSegment(clean)}.json`;
+  const resolved = path.resolve(CHANNELS_DIR, baseName);
+  const resolvedChannelsDir = path.resolve(CHANNELS_DIR);
+  if (!resolved.startsWith(resolvedChannelsDir + path.sep)) {
+    throw new Error('Invalid channel name: Path traversal detected');
+  }
+  return resolved;
 }
 
 function readChannel(channelName) {
@@ -228,4 +246,3 @@ module.exports = {
   listChannels,
   broadcastToAgents
 };
-
