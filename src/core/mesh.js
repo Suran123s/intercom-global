@@ -4,12 +4,20 @@ const path = require('path');
 const { MESH_DIR } = require('../config');
 
 function getInboxFile(agentName) {
-  const clean = agentName.toLowerCase().trim();
-  if (clean.includes('#')) {
-    const [agent, session] = clean.split('#');
-    return path.join(MESH_DIR, `${agent}-${session}.json`);
+  const safe = (agentName || '').toLowerCase().trim().replace(/[^a-zA-Z0-9_\-#]/g, '') || 'unknown';
+  let file;
+  if (safe.includes('#')) {
+    const [agent, session] = safe.split('#');
+    file = path.join(MESH_DIR, `${agent}-${session}.json`);
+  } else {
+    file = path.join(MESH_DIR, `${safe}.json`);
   }
-  return path.join(MESH_DIR, `${clean}.json`);
+  const resolvedMeshDir = path.resolve(MESH_DIR);
+  const resolvedFile = path.resolve(file);
+  if (!resolvedFile.startsWith(resolvedMeshDir + path.sep)) {
+    throw new Error('Invalid agent name: path traversal detected');
+  }
+  return file;
 }
 
 function readInbox(agentName) {
@@ -41,8 +49,10 @@ function writeInbox(agentName, messages) {
 function checkAndMarkRead(agentName) {
   const inbox = readInbox(agentName);
   const unread = inbox.filter(m => !m.read);
-  inbox.forEach(m => (m.read = true));
-  writeInbox(agentName, inbox);
+  if (unread.length > 0) {
+    inbox.forEach(m => (m.read = true));
+    writeInbox(agentName, inbox);
+  }
   return unread;
 }
 
@@ -136,8 +146,14 @@ if (!fs.existsSync(CHANNELS_DIR)) {
 }
 
 function getChannelFile(channelName) {
-  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
-  return path.join(CHANNELS_DIR, `${clean}.json`);
+  const safe = (channelName || '').toLowerCase().replace(/^#/, '').trim().replace(/[^a-zA-Z0-9_\-]/g, '') || 'general';
+  const file = path.join(CHANNELS_DIR, `${safe}.json`);
+  const resolvedChannelsDir = path.resolve(CHANNELS_DIR);
+  const resolvedFile = path.resolve(file);
+  if (!resolvedFile.startsWith(resolvedChannelsDir + path.sep)) {
+    throw new Error('Invalid channel name: path traversal detected');
+  }
+  return file;
 }
 
 function readChannel(channelName) {
@@ -228,4 +244,3 @@ module.exports = {
   listChannels,
   broadcastToAgents
 };
-

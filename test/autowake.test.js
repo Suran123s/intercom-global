@@ -1,10 +1,12 @@
-﻿// test/autowake.test.js
+// test/autowake.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
 const { wakeCliAgent, wakeOpenCodeAgent, wakeHermesAgent } = require('../src/controllers/autowake');
 const { getInboxFile, readInbox } = require('../src/core/mesh');
+const { MESH_DIR } = require('../src/config');
 
 test('wakeCliAgent writes to mailbox with beep and unread status', () => {
   const agent = 'wake-test-' + Date.now();
@@ -19,6 +21,21 @@ test('wakeCliAgent writes to mailbox with beep and unread status', () => {
 
   if (fs.existsSync(file)) {
     fs.unlinkSync(file);
+  }
+});
+
+test('wakeCliAgent sanitizes targetName to prevent path traversal', () => {
+  const dangerousTarget = '../../traversal-test-' + Date.now();
+  const res = wakeCliAgent(dangerousTarget, 'Malicious payload');
+
+  const resolvedMeshDir = path.resolve(MESH_DIR);
+  const resolvedFile = path.resolve(res.file);
+
+  assert.ok(resolvedFile.startsWith(resolvedMeshDir + path.sep), 'File path must be inside MESH_DIR');
+  assert.strictEqual(fs.existsSync(path.join(MESH_DIR, '..', `traversal-test-${Date.now()}.json`)), false);
+
+  if (fs.existsSync(resolvedFile)) {
+    fs.unlinkSync(resolvedFile);
   }
 });
 
