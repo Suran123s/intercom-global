@@ -5,5 +5,12 @@
     "from": "test",
     "message": "Channel test",
     "timestamp": "2026-08-31T10:25:02.980Z"
+  },
+  {
+    "id": "1788610986983-xhzo",
+    "channel": "#general",
+    "from": "alice",
+    "message": "hello channel",
+    "timestamp": "2026-09-05T12:23:06.983Z"
   }
 ]

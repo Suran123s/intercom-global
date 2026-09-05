@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { getInboxFile, readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes } = require('../src/core/mesh');
+const { safeWriteJson, getInboxFile, readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes } = require('../src/core/mesh');
 
 test('mesh mailbox read, write, and checkAndMarkRead', async (t) => {
   const testAgent = 'test-agent-mesh-' + Date.now();
@@ -84,5 +84,21 @@ test('waitForUnread times out cleanly if no message arrives', async () => {
 
   if (fs.existsSync(file)) {
     fs.unlinkSync(file);
+  }
+});
+
+
+test('safeWriteJson atomically writes JSON data to file', async () => {
+  const tmpFile = path.join(__dirname, '../mesh/test-safewrite-' + Date.now() + '.json');
+  const payload = { key: 'value', number: 42 };
+
+  safeWriteJson(tmpFile, payload);
+
+  assert.ok(fs.existsSync(tmpFile));
+  const content = JSON.parse(fs.readFileSync(tmpFile, 'utf8'));
+  assert.deepStrictEqual(content, payload);
+
+  if (fs.existsSync(tmpFile)) {
+    fs.unlinkSync(tmpFile);
   }
 });

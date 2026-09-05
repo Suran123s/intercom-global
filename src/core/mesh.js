@@ -22,20 +22,24 @@ function readInbox(agentName) {
   }
 }
 
-function writeInbox(agentName, messages) {
-  const target = getInboxFile(agentName);
-  const tmp = `${target}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+function safeWriteJson(targetPath, data) {
+  const tmp = `${targetPath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
   try {
-    fs.writeFileSync(tmp, JSON.stringify(messages, null, 2), 'utf8');
-    fs.renameSync(tmp, target);
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmp, targetPath);
   } catch (err) {
     try {
-      fs.writeFileSync(target, JSON.stringify(messages, null, 2), 'utf8');
+      fs.writeFileSync(targetPath, JSON.stringify(data, null, 2), 'utf8');
     } catch {}
     try {
       if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
     } catch {}
   }
+}
+
+function writeInbox(agentName, messages) {
+  const target = getInboxFile(agentName);
+  safeWriteJson(target, messages);
 }
 
 function checkAndMarkRead(agentName) {
@@ -163,15 +167,7 @@ function sendChannelMessage(channelName, from, message) {
   };
   messages.push(msgObj);
 
-  // Atomic write
-  const tmp = `${file}.${Date.now()}.tmp`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(messages, null, 2), 'utf8');
-    fs.renameSync(tmp, file);
-  } catch {
-    try { fs.writeFileSync(file, JSON.stringify(messages, null, 2), 'utf8'); } catch {}
-    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
-  }
+  safeWriteJson(file, messages);
 
   return msgObj;
 }
@@ -215,6 +211,7 @@ function broadcastToAgents(from, targets, message, dispatchFn) {
 }
 
 module.exports = {
+  safeWriteJson,
   getInboxFile,
   readInbox,
   writeInbox,
