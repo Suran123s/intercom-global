@@ -309,7 +309,7 @@ async function diagnoseMesh() {
 
   // 5. Active Mailboxes
   const { listActiveMailboxes } = require('../core/mesh');
-  status.mailboxes = listActiveMailboxes();
+  status.mailboxes = await listActiveMailboxes();
 
   return status;
 }

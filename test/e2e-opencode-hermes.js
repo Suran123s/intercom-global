@@ -102,7 +102,7 @@ async function runVerification() {
 
   // 6. Test Multi-Agent Swarm Broadcast
   console.log('\n📢 6. Testing 1-to-Many Swarm Broadcast to OpenCode, Hermes, and Pal...');
-  const broadcastResults = broadcastToAgents('suran', 'opencode,hermes,pal', 'Sync release build v1.0.0', dispatchMessage);
+  const broadcastResults = await broadcastToAgents('suran', 'opencode,hermes,pal', 'Sync release build v1.0.0', dispatchMessage);
   assert.strictEqual(broadcastResults.length, 3);
   console.log(`   ✔ Broadcast delivered to: ${broadcastResults.map(r => r.to).join(', ')}`);
 

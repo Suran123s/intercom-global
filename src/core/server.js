@@ -115,9 +115,14 @@ function createServer() {
 
     // 1. A2A Agent Card Discovery
     if (req.method === 'GET' && (parsedUrl.pathname === '/.well-known/agent.json' || parsedUrl.pathname === '/a2a/agent-card' || parsedUrl.pathname === '/a2a/v1/agent-card')) {
-      const card = generateAgentCard(host);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(card, null, 2));
+      generateAgentCard(host).then(card => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(card, null, 2));
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
     }
 
     // 2. A2A Send Message / Create Task
@@ -153,9 +158,14 @@ function createServer() {
 
     // 3b. Peers list — all active mailboxes (used by web dashboard)
     if (req.method === 'GET' && parsedUrl.pathname === '/api/intercom/peers') {
-      const peers = listActiveMailboxes();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(peers, null, 2));
+      listActiveMailboxes().then(peers => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(peers, null, 2));
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
     }
 
     // 3c. Doctor — full mesh health probe (used by web dashboard)
@@ -207,11 +217,11 @@ function createServer() {
     if (req.method === 'POST' && parsedUrl.pathname === '/api/intercom/broadcast') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { from, to, message } = JSON.parse(body);
           if (!from || !to || !message) throw new Error('Missing from, to, or message fields');
-          const results = broadcastToAgents(from, to, message, dispatchMessage);
+          const results = await broadcastToAgents(from, to, message, dispatchMessage);
           broadcastEvent('broadcast', { from, targets: to, message, results });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: 'broadcast_dispatched', count: results.length, results }));

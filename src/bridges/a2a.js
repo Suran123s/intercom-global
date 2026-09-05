@@ -4,8 +4,8 @@ const { PORT } = require('../config');
 
 const tasks = new Map();
 
-function generateAgentCard(host = `http://localhost:${PORT}`) {
-  const mailboxes = listActiveMailboxes();
+async function generateAgentCard(host = `http://localhost:${PORT}`) {
+  const mailboxes = await listActiveMailboxes();
   const skills = [
     {
       id: "universal-mesh-relay",
