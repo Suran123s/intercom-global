@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const { PI_PIPE_NAME, MESH_DIR } = require('../config');
+const { readInbox, writeInbox, getInboxFile } = require('../core/mesh');
 const { writeFrame, tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
 
 function connectSocket(target, connectListener) {
@@ -83,9 +84,8 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
 }
 
 function wakeCliAgent(targetName, message) {
-  const inboxFile = path.join(MESH_DIR, `${targetName.toLowerCase()}.json`);
-  let inbox = [];
-  try { inbox = JSON.parse(fs.readFileSync(inboxFile, 'utf8')); } catch {}
+  const inboxFile = getInboxFile(targetName);
+  let inbox = readInbox(targetName);
   inbox.push({
     id: Date.now(),
     from: 'autowake',
@@ -94,7 +94,7 @@ function wakeCliAgent(targetName, message) {
     timestamp: new Date().toISOString(),
     read: false
   });
-  fs.writeFileSync(inboxFile, JSON.stringify(inbox, null, 2), 'utf8');
+  writeInbox(targetName, inbox);
   console.log(`⚡ [AUTOWAKE MAILBOX] Dispatched to durable session mailbox: "${targetName.toUpperCase()}"`);
 
   if (process.platform === 'win32') {
