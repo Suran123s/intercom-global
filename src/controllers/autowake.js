@@ -206,59 +206,66 @@ function wakeCloudAgent(targetName, message) {
 const { showDesktopNotification } = require('../core/notifications');
 const { spawnAgent } = require('./spawner');
 
-function wakeAgent(to, message, callback, options = {}) {
+function logWakeHeader(to, message, options = {}) {
   console.log(`\n===========================================================`);
   console.log(`🔔 [UNIVERSAL AUTOWAKE TRIGGER INITIATED]`);
   console.log(`🎯 Recipient : ${to.toUpperCase()}`);
   console.log(`💬 Message   : "${message}"`);
   if (options.autoSpawn) console.log(`🚀 Auto-Spawn: ENABLED (Will attempt launch if offline)`);
   console.log(`===========================================================\n`);
+}
 
-  const runWake = () => {
-    const report = {
-      target: to,
-      timestamp: new Date().toISOString(),
-      channels: {}
-    };
+function logDeliveryDiagnostics(to, channels) {
+  console.log(`\n📋 [DELIVERY DIAGNOSTICS FOR ${to.toUpperCase()}]:`);
+  console.log(`- 📬 Durable Mailbox : ✅ DELIVERED (${channels.mailbox?.file})`);
+  if (channels.pi?.delivered) console.log(`- 🥧 Pi IPC Pipe     : ✅ DELIVERED`);
+  else if (channels.pi?.reason) console.log(`- 🥧 Pi IPC Pipe     : ℹ️ NOT CONNECTED (${channels.pi.reason})`);
 
-    wakePiAgent(to, message, (piRes) => {
-      report.channels.pi = piRes;
-      wakeOpenCodeAgent(to, message, (opencodeRes) => {
-        report.channels.opencode = opencodeRes;
-        wakeHermesAgent(to, message, (hermesRes) => {
-          report.channels.hermes = hermesRes;
-          report.channels.mailbox = wakeCliAgent(to, message);
-          report.channels.cloud = wakeCloudAgent(to, message);
+  if (channels.opencode?.delivered) console.log(`- 💻 OpenCode REST   : ✅ PROMPT INJECTED (Session: ${channels.opencode.session})`);
+  else if (channels.opencode?.reason) console.log(`- 💻 OpenCode REST   : ℹ️ OFFLINE (${channels.opencode.reason})`);
 
-          // Show OS desktop toast notification if offline or on wake
-          showDesktopNotification(`Intercom Task for ${to.toUpperCase()}`, message.slice(0, 100));
+  if (channels.hermes?.delivered) console.log(`- 🦙 Hermes Gateway  : ✅ DISPATCHED (${channels.hermes.url})`);
+  else if (channels.hermes?.reason) console.log(`- 🦙 Hermes Gateway  : ℹ️ OFFLINE (${channels.hermes.reason})`);
 
-          // Summary details
-          console.log(`\n📋 [DELIVERY DIAGNOSTICS FOR ${to.toUpperCase()}]:`);
-          console.log(`- 📬 Durable Mailbox : ✅ DELIVERED (${report.channels.mailbox.file})`);
-          if (report.channels.pi?.delivered) console.log(`- 🥧 Pi IPC Pipe     : ✅ DELIVERED`);
-          else if (report.channels.pi?.reason) console.log(`- 🥧 Pi IPC Pipe     : ℹ️ NOT CONNECTED (${report.channels.pi.reason})`);
+  if (channels.cloud?.delivered) console.log(`- ☁️ Devin Cloud     : ✅ SESSION TRIGGERED`);
+  else if (channels.cloud?.reason) console.log(`- ☁️ Devin Cloud     : ℹ️ SKIPPED (${channels.cloud.reason})`);
 
-          if (report.channels.opencode?.delivered) console.log(`- 💻 OpenCode REST   : ✅ PROMPT INJECTED (Session: ${report.channels.opencode.session})`);
-          else if (report.channels.opencode?.reason) console.log(`- 💻 OpenCode REST   : ℹ️ OFFLINE (${report.channels.opencode.reason})`);
+  console.log(`- 🔔 Desktop Toast   : ✅ OS NOTIFICATION SENT`);
+  console.log(`===========================================================\n`);
+}
 
-          if (report.channels.hermes?.delivered) console.log(`- 🦙 Hermes Gateway  : ✅ DISPATCHED (${report.channels.hermes.url})`);
-          else if (report.channels.hermes?.reason) console.log(`- 🦙 Hermes Gateway  : ℹ️ OFFLINE (${report.channels.hermes.reason})`);
+async function dispatchChannels(to, message) {
+  const pi = await new Promise((resolve) => wakePiAgent(to, message, resolve));
+  const opencode = await new Promise((resolve) => wakeOpenCodeAgent(to, message, resolve));
+  const hermes = await new Promise((resolve) => wakeHermesAgent(to, message, resolve));
+  const mailbox = wakeCliAgent(to, message);
+  const cloud = wakeCloudAgent(to, message);
 
-          if (report.channels.cloud?.delivered) console.log(`- ☁️ Devin Cloud     : ✅ SESSION TRIGGERED`);
-          else if (report.channels.cloud?.reason) console.log(`- ☁️ Devin Cloud     : ℹ️ SKIPPED (${report.channels.cloud.reason})`);
+  return { pi, opencode, hermes, mailbox, cloud };
+}
 
-          console.log(`- 🔔 Desktop Toast   : ✅ OS NOTIFICATION SENT`);
-          console.log(`===========================================================\n`);
-
-          if (callback) callback(report);
-        });
-      });
-    });
+async function executeWake(to, message, callback) {
+  const channels = await dispatchChannels(to, message);
+  const report = {
+    target: to,
+    timestamp: new Date().toISOString(),
+    channels
   };
 
+  showDesktopNotification(`Intercom Task for ${to.toUpperCase()}`, message.slice(0, 100));
+  logDeliveryDiagnostics(to, channels);
+
+  if (callback) callback(report);
+  return report;
+}
+
+function wakeAgent(to, message, callback, options = {}) {
+  logWakeHeader(to, message, options);
+
+  const runWake = () => executeWake(to, message, callback);
+
   if (options.autoSpawn) {
-    spawnAgent(to).then(() => runWake()).catch(() => runWake());
+    spawnAgent(to).then(runWake).catch(runWake);
   } else {
     runWake();
   }
