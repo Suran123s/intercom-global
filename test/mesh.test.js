@@ -1,4 +1,4 @@
-﻿// test/mesh.test.js
+// test/mesh.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -39,6 +39,23 @@ test('mesh mailbox read, write, and checkAndMarkRead', async (t) => {
   if (fs.existsSync(file)) {
     fs.unlinkSync(file);
   }
+});
+
+test('getInboxFile prevents directory traversal', () => {
+  // Traversal attempt
+  const file1 = getInboxFile('../../secret');
+  assert.ok(!file1.includes('..'));
+  assert.ok(file1.endsWith('secret.json'));
+
+  // Session traversal attempt
+  const file2 = getInboxFile('../../agent#../../session');
+  assert.ok(!file2.includes('..'));
+  assert.ok(file2.endsWith('agent-session.json'));
+
+  // Empty / dot traversal attempt should throw
+  assert.throws(() => {
+    getInboxFile('../..');
+  }, /Invalid agent name/);
 });
 
 test('waitForUnread resolves immediately if unread exists', async () => {
