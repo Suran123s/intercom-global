@@ -1,4 +1,4 @@
-﻿// test/channels.test.js
+// test/channels.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');

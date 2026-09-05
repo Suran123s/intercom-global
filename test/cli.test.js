@@ -1,4 +1,4 @@
-﻿// test/cli.test.js
+// test/cli.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const { execSync, spawn } = require('child_process');

@@ -1,4 +1,4 @@
-﻿// test/autowake.test.js
+// test/autowake.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');

@@ -231,17 +231,24 @@ class PiIntercomClient {
 
       // Write to durable global mesh inbox
       const inboxFile = path.join(MESH_DIR, `${this.name.toLowerCase()}.json`);
-      let inbox = [];
-      try { inbox = JSON.parse(fs.readFileSync(inboxFile, 'utf8')); } catch {}
-      inbox.push({
-        id: Date.now(),
-        from: `pi:${fromName}`,
-        to: this.name,
-        message: text,
-        timestamp: new Date().toISOString(),
-        read: false
-      });
-      fs.writeFileSync(inboxFile, JSON.stringify(inbox, null, 2), 'utf8');
+      (async () => {
+        let inbox = [];
+        try {
+          const content = await fs.promises.readFile(inboxFile, 'utf8');
+          inbox = JSON.parse(content);
+        } catch {}
+        inbox.push({
+          id: Date.now(),
+          from: `pi:${fromName}`,
+          to: this.name,
+          message: text,
+          timestamp: new Date().toISOString(),
+          read: false
+        });
+        try {
+          await fs.promises.writeFile(inboxFile, JSON.stringify(inbox, null, 2), 'utf8');
+        } catch {}
+      })();
 
       // Send instant native ack back over the pipe
       const ackText = `[Antigravity]: Received task "${text}". Logged to active mesh queue.`;
@@ -254,30 +261,45 @@ class PiIntercomClient {
   }
 
   startMeshSyncLoop() {
-    setInterval(() => {
+    if (this.syncInterval) return;
+    this.syncInterval = setInterval(async () => {
       if (!this.connected) return;
-      if (!fs.existsSync(MESH_DIR)) return;
-      const files = fs.readdirSync(MESH_DIR);
-      files.forEach((fileName) => {
-        if (fileName.endsWith('.json')) {
-          const filePath = path.join(MESH_DIR, fileName);
-          try {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-            let updated = false;
-            data.forEach((m) => {
-              if (!m.read && m.from !== this.name && !m.from.startsWith('pi:')) {
-                const target = fileName.replace('.json', '');
-                this.sendMessage(target, `[From ${m.from.toUpperCase()}]: ${m.message}`);
-                m.read = true;
-                updated = true;
-              }
-            });
-            if (updated) {
-              fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
-            }
-          } catch {}
+      if (this.isSyncing) return;
+      this.isSyncing = true;
+      try {
+        try {
+          await fs.promises.access(MESH_DIR);
+        } catch {
+          return;
         }
-      });
+        const files = await fs.promises.readdir(MESH_DIR);
+        await Promise.all(
+          files.map(async (fileName) => {
+            if (fileName.endsWith('.json')) {
+              const filePath = path.join(MESH_DIR, fileName);
+              try {
+                const content = await fs.promises.readFile(filePath, 'utf8');
+                const data = JSON.parse(content);
+                let updated = false;
+                data.forEach((m) => {
+                  if (!m.read && m.from !== this.name && !m.from.startsWith('pi:')) {
+                    const target = fileName.replace('.json', '');
+                    this.sendMessage(target, `[From ${m.from.toUpperCase()}]: ${m.message}`);
+                    m.read = true;
+                    updated = true;
+                  }
+                });
+                if (updated) {
+                  await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+                }
+              } catch {}
+            }
+          })
+        );
+      } catch {
+      } finally {
+        this.isSyncing = false;
+      }
     }, 1000);
   }
 }

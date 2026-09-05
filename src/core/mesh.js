@@ -97,8 +97,10 @@ function waitForUnread(agentName, timeoutMs = 300000) {
       const unread = checkAndMarkRead(agentName);
       if (unread.length > 0) {
         resolved = true;
-        cleanup();
-        resolve(unread);
+        setImmediate(() => {
+          cleanup();
+          resolve(unread);
+        });
       }
     };
 
@@ -106,27 +108,17 @@ function waitForUnread(agentName, timeoutMs = 300000) {
     timer = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        cleanup();
-        resolve([]);
+        setImmediate(() => {
+          cleanup();
+          resolve([]);
+        });
       }
     }, timeoutMs);
 
     // Poll fallback
-    pollInterval = setInterval(checkNow, 500);
+    pollInterval = setInterval(checkNow, 50);
 
-    // fs watcher on MESH_DIR
-    try {
-      watcher = fs.watch(MESH_DIR, (eventType, filename) => {
-        if (!filename) {
-          checkNow();
-          return;
-        }
-        const targetFilename = path.basename(inboxFile).toLowerCase();
-        if (filename.toLowerCase() === targetFilename || filename.toLowerCase().startsWith(agentName.toLowerCase())) {
-          checkNow();
-        }
-      });
-    } catch {}
+    // Polling handles detection efficiently
   });
 }
 
