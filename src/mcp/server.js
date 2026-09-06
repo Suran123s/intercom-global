@@ -269,7 +269,7 @@ function startMcpServer() {
       }
 
       if (name === "intercom_list_peers") {
-        const peers = listActiveMailboxes();
+        const peers = await listActiveMailboxes();
         return { content: [{ type: "text", text: JSON.stringify(peers, null, 2) }] };
       }
 

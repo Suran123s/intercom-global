@@ -33,14 +33,14 @@ test('sendChannelMessage and readChannel perform atomic pub-sub', () => {
   }
 });
 
-test('broadcastToAgents dispatches to multiple recipients simultaneously', () => {
+test('broadcastToAgents dispatches to multiple recipients simultaneously', async () => {
   const dispatched = [];
   const mockDispatch = (from, to, msg) => {
     dispatched.push({ from, to, msg, id: 'msg-' + Date.now() });
     return { id: 'msg-' + Date.now() };
   };
 
-  const results = broadcastToAgents('coordinator', 'agent1,agent2,agent3', 'Sync codebase', mockDispatch);
+  const results = await broadcastToAgents('coordinator', 'agent1,agent2,agent3', 'Sync codebase', mockDispatch);
   assert.strictEqual(results.length, 3);
   assert.strictEqual(dispatched.length, 3);
   assert.strictEqual(dispatched[0].to, 'agent1');

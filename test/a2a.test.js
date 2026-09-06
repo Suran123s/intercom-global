@@ -8,8 +8,8 @@ const { generateAgentCard, processA2AMessage, getA2ATask } = require('../src/bri
 const { createServer, dispatchMessage } = require('../src/core/server');
 const { getInboxFile } = require('../src/core/mesh');
 
-test('A2A Agent Card generation contains required A2A schema fields', () => {
-  const card = generateAgentCard('http://localhost:4150');
+test('A2A Agent Card generation contains required A2A schema fields', async () => {
+  const card = await generateAgentCard('http://localhost:4150');
   assert.strictEqual(card.name, 'Intercom Global Mesh Coordinator');
   assert.strictEqual(card.version, '1.0.0');
   assert.strictEqual(card.protocolVersion, '1.0');
