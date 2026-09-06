@@ -254,29 +254,45 @@ class PiIntercomClient {
   }
 
   startMeshSyncLoop() {
-    setInterval(() => {
+    if (this.syncInterval) return;
+    this.syncInterval = setInterval(async () => {
       if (!this.connected) return;
-      if (!fs.existsSync(MESH_DIR)) return;
-      const files = fs.readdirSync(MESH_DIR);
-      files.forEach((fileName) => {
-        if (fileName.endsWith('.json')) {
-          const targetAgent = fileName.replace('.json', '');
-          try {
-            const data = readInbox(targetAgent);
-            let updated = false;
-            data.forEach((m) => {
-              if (!m.read && m.from !== this.name && !m.from.startsWith('pi:')) {
-                this.sendMessage(targetAgent, `[From ${m.from.toUpperCase()}]: ${m.message}`);
-                m.read = true;
-                updated = true;
-              }
-            });
-            if (updated) {
-              writeInbox(targetAgent, data);
-            }
-          } catch {}
+      if (this.isSyncing) return;
+      this.isSyncing = true;
+      try {
+        try {
+          await fs.promises.access(MESH_DIR);
+        } catch {
+          return;
         }
-      });
+        const files = await fs.promises.readdir(MESH_DIR);
+        await Promise.all(
+          files.map(async (fileName) => {
+            if (fileName.endsWith('.json')) {
+              const filePath = path.join(MESH_DIR, fileName);
+              try {
+                const content = await fs.promises.readFile(filePath, 'utf8');
+                const data = JSON.parse(content);
+                let updated = false;
+                data.forEach((m) => {
+                  if (!m.read && m.from !== this.name && !m.from.startsWith('pi:')) {
+                    const target = fileName.replace('.json', '');
+                    this.sendMessage(target, `[From ${m.from.toUpperCase()}]: ${m.message}`);
+                    m.read = true;
+                    updated = true;
+                  }
+                });
+                if (updated) {
+                  await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+                }
+              } catch {}
+            }
+          })
+        );
+      } catch {
+      } finally {
+        this.isSyncing = false;
+      }
     }, 1000);
   }
 }

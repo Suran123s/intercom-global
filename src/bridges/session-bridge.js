@@ -7,10 +7,19 @@ const readline = require('readline');
 const { MESH_DIR } = require('../config');
 const { getInboxFile, readInbox, writeInbox } = require('../core/mesh');
 
+function sanitizeName(name, fallback = "default") {
+  if (typeof name !== "string") return fallback;
+  const safeBasename = path.basename(name.replace(/\\/g, "/"));
+  const clean = safeBasename.replace(/[^a-zA-Z0-9_-]/g, "").toLowerCase();
+  return clean || fallback;
+}
+
 function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.random().toString(36).substring(2, 8), command = 'powershell', cmdArgs = []) {
-  const fullAgentTag = `${agentName.toLowerCase()}#${sessionId}`;
-  const inboxFile = getInboxFile(agentName);
-  const sessionInboxFile = getInboxFile(`${agentName}#${sessionId}`);
+  const safeAgent = sanitizeName(agentName, 'cli-agent');
+  const safeSession = sanitizeName(sessionId, 's-' + Math.random().toString(36).substring(2, 8));
+  const fullAgentTag = `${safeAgent}#${safeSession}`;
+  const inboxFile = getInboxFile(safeAgent);
+  const sessionInboxFile = getInboxFile(`${safeAgent}#${safeSession}`);
 
   console.log(`\n=============================================================`);
   console.log(`🚀 [GLOBAL INTERCOM SESSION BRIDGE ACTIVE]`);
@@ -96,7 +105,7 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
   });
 }
 
-module.exports = { startSessionBridge };
+module.exports = { startSessionBridge, sanitizeName };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

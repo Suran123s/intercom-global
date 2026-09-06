@@ -1,4 +1,4 @@
-﻿// test/channels.test.js
+// test/channels.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
@@ -31,6 +31,16 @@ test('sendChannelMessage and readChannel perform atomic pub-sub', () => {
   if (fs.existsSync(file)) {
     fs.unlinkSync(file);
   }
+});
+
+test('getChannelFile prevents directory traversal', () => {
+  // Traversal attempt with ../
+  const file1 = getChannelFile('../../secret');
+  assert.ok(!file1.includes('..'));
+
+  // Traversal attempt with slashes
+  const file2 = getChannelFile('foo/bar');
+  assert.ok(!file2.includes('foo/bar'));
 });
 
 test('broadcastToAgents dispatches to multiple recipients simultaneously', async () => {

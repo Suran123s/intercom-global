@@ -1,36 +1,35 @@
 // src/core/notifications.js - Cross-Platform OS Desktop Toast Notifications & Audio Alerts
-const { execFile } = require('child_process');
+const childProcess = require('child_process');
+
+function sanitizeAppleScript(str) {
+  return String(str || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
 
 function showDesktopNotification(title, message, options = {}) {
-  const rawTitle = title || 'Intercom Global';
-  const rawMessage = message || '';
+  const safeTitle = title || 'Intercom Global';
+  const safeMessage = message || '';
 
   if (process.platform === 'win32') {
-    // Windows PowerShell Toast / Balloon Notification
-    const psTitle = rawTitle.replace(/'/g, "''");
-    const psMessage = rawMessage.replace(/'/g, "''");
-
+    // Windows PowerShell Toast / Balloon Notification — uses $args to avoid injection
     const psScript = `
       [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms");
       $notify = New-Object System.Windows.Forms.NotifyIcon;
       $notify.Icon = [System.Drawing.SystemIcons]::Information;
       $notify.Visible = $true;
-      $notify.ShowBalloonTip(5000, '${psTitle}', '${psMessage}', [System.Windows.Forms.ToolTipIcon]::Info);
+      $notify.ShowBalloonTip(5000, $args[0], $args[1], [System.Windows.Forms.ToolTipIcon]::Info);
       [console]::beep(900, 180);
     `.trim().replace(/\r?\n/g, ' ');
 
-    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], { windowsHide: true }, () => {});
+    childProcess.execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript, safeTitle, safeMessage], { windowsHide: true }, () => {});
   } else if (process.platform === 'darwin') {
-    // macOS AppleScript Notification
-    const safeTitle = rawTitle.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const safeMessage = rawMessage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const macScript = `display notification "${safeMessage}" with title "${safeTitle}" sound name "Glass"`;
+    // macOS AppleScript Notification — sanitized to prevent injection
+    const macScript = `display notification "${sanitizeAppleScript(safeMessage)}" with title "${sanitizeAppleScript(safeTitle)}" sound name "Glass"`;
 
-    execFile('osascript', ['-e', macScript], () => {});
+    childProcess.execFile('osascript', ['-e', macScript], () => {});
   } else {
     // Linux notify-send
-    execFile('notify-send', [rawTitle, rawMessage], () => {});
+    childProcess.execFile('notify-send', [safeTitle, safeMessage], () => {});
   }
 }
 
-module.exports = { showDesktopNotification };
+module.exports = { showDesktopNotification, sanitizeAppleScript };
