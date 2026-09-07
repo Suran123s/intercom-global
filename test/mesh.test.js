@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { getInboxFile, readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes, getChannelFile } = require('../src/core/mesh');
+const { safeWriteJson, getInboxFile, readInbox, writeInbox, checkAndMarkRead, clearInbox, waitForUnread, listActiveMailboxes, getChannelFile } = require('../src/core/mesh');
 const { MESH_DIR } = require('../src/config');
 
 test('mesh mailbox read, write, and checkAndMarkRead', async (t) => {
@@ -95,5 +95,30 @@ test('waitForUnread times out cleanly if no message arrives', async () => {
 
   if (fs.existsSync(file)) {
     fs.unlinkSync(file);
+  }
+});
+
+test('getInboxFile and getChannelFile prevent path traversal', () => {
+  const inboxFile = getInboxFile('../../../etc/passwd');
+  const resolvedMeshDir = path.resolve(MESH_DIR);
+  assert.ok(path.resolve(inboxFile).startsWith(resolvedMeshDir + path.sep));
+
+  const channelFile = getChannelFile('../../../etc/passwd');
+  const resolvedChannelsDir = path.resolve(MESH_DIR, 'channels');
+  assert.ok(path.resolve(channelFile).startsWith(resolvedChannelsDir + path.sep));
+});
+
+test('safeWriteJson atomically writes JSON data to file', () => {
+  const tmpFile = path.join(__dirname, '../mesh/test-safewrite-' + Date.now() + '.json');
+  const payload = { key: 'value', number: 42 };
+
+  safeWriteJson(tmpFile, payload);
+
+  assert.ok(fs.existsSync(tmpFile));
+  const content = JSON.parse(fs.readFileSync(tmpFile, 'utf8'));
+  assert.deepStrictEqual(content, payload);
+
+  if (fs.existsSync(tmpFile)) {
+    fs.unlinkSync(tmpFile);
   }
 });
