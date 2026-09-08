@@ -37,10 +37,20 @@ test('getChannelFile prevents directory traversal', () => {
   // Traversal attempt with ../
   const file1 = getChannelFile('../../secret');
   assert.ok(!file1.includes('..'));
+  assert.ok(file1.endsWith('secret.json'));
 
   // Traversal attempt with slashes
   const file2 = getChannelFile('foo/bar');
   assert.ok(!file2.includes('foo/bar'));
+  assert.ok(file2.endsWith('foobar.json'));
+
+  // Empty / only dot traversal attempt should throw
+  assert.throws(() => {
+    getChannelFile('../..');
+  }, /Invalid channel name/);
+});
+
+test('broadcastToAgents dispatches to multiple recipients simultaneously', () => {
 });
 
 test('broadcastToAgents dispatches to multiple recipients simultaneously', async () => {
@@ -66,7 +76,9 @@ test('HTTP server SSE streaming and broadcast endpoints', async () => {
 
   // 1. Test SSE Stream
   let sseReceivedConnect = false;
+  let sseResStream = null;
   const sseReq = http.get(`${baseUrl}/api/intercom/events`, (res) => {
+    sseResStream = res;
     assert.strictEqual(res.statusCode, 200);
     assert.strictEqual(res.headers['content-type'], 'text/event-stream');
     res.on('data', (chunk) => {
@@ -105,7 +117,12 @@ test('HTTP server SSE streaming and broadcast endpoints', async () => {
   assert.strictEqual(chanReadRes[0].message, 'All tests green');
 
   // Clean up
+  if (sseResStream) sseResStream.destroy();
   sseReq.destroy();
+
+  if (typeof server.closeAllConnections === 'function') {
+    server.closeAllConnections();
+  }
   await new Promise(r => server.close(r));
   const chanFile = getChannelFile('qa-room');
   if (fs.existsSync(chanFile)) fs.unlinkSync(chanFile);
