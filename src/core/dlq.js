@@ -1,8 +1,8 @@
-﻿// src/core/dlq.js - Dead Letter Queue (DLQ), Exponential Backoff Retry & Task Status Tracking
+// src/core/dlq.js - Dead Letter Queue (DLQ), Exponential Backoff Retry & Task Status Tracking
 const fs = require('fs');
 const path = require('path');
 const { MESH_DIR } = require('../config');
-const { readInbox, writeInbox } = require('./mesh');
+const { readInbox, writeInbox, safeWriteJson } = require('./mesh');
 
 const DLQ_FILE = path.join(MESH_DIR, 'dlq.json');
 
@@ -16,14 +16,7 @@ function getDlq() {
 }
 
 function writeDlq(items) {
-  const tmp = `${DLQ_FILE}.${Date.now()}.tmp`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(items, null, 2), 'utf8');
-    fs.renameSync(tmp, DLQ_FILE);
-  } catch {
-    try { fs.writeFileSync(DLQ_FILE, JSON.stringify(items, null, 2), 'utf8'); } catch {}
-    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
-  }
+  safeWriteJson(DLQ_FILE, items);
 }
 
 function enqueueDlq(msgObj, failureReason) {

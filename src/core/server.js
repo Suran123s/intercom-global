@@ -1,10 +1,8 @@
 // src/core/server.js - HTTP Intercom Daemon
 const http = require('http');
 const { exec } = require('child_process');
-const { PORT, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, checkAndMarkRead, sendChannelMessage, readChannel, listChannels, broadcastToAgents, listActiveMailboxes } = require('./mesh');
-const { updateMessageStatus, getMessageStatus, getDlq, clearDlq } = require('./dlq');
-const { spawnAgent } = require('../controllers/spawner');
+const { readInbox, writeInbox } = require('./mesh');
+const { handleRequest, sendError } = require('../routes/router');
 
 const AUTO_REPLY_ENABLED = process.argv.includes('--auto-reply') || process.env.INTERCOM_AUTO_REPLY === 'true';
 
@@ -91,14 +89,6 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
   }
 
   return msgObj;
-}
-
-const { generateAgentCard, processA2AMessage, getA2ATask } = require('../bridges/a2a');
-
-function setCorsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
 }
 
 function createServer() {
@@ -358,6 +348,12 @@ function createServer() {
 
     res.writeHead(404);
     res.end();
+    handleRequest(req, res, {
+      dispatchMessage,
+      broadcastEvent,
+      sseClients,
+      AUTO_REPLY_ENABLED
+    });
   });
 
   return server;
@@ -365,5 +361,6 @@ function createServer() {
 
 module.exports = {
   dispatchMessage,
-  createServer
+  createServer,
+  sendError
 };
