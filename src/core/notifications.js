@@ -10,7 +10,7 @@ function showDesktopNotification(title, message, options = {}) {
   const safeMessage = message || '';
 
   if (process.platform === 'win32') {
-    // Windows PowerShell Toast / Balloon Notification
+    // Windows PowerShell Toast / Balloon Notification — uses $args to avoid injection
     const psScript = `
       [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms");
       $notify = New-Object System.Windows.Forms.NotifyIcon;
@@ -22,8 +22,9 @@ function showDesktopNotification(title, message, options = {}) {
 
     childProcess.execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript, safeTitle, safeMessage], { windowsHide: true }, () => {});
   } else if (process.platform === 'darwin') {
-    // macOS AppleScript Notification
+    // macOS AppleScript Notification — sanitized to prevent injection
     const macScript = `display notification "${sanitizeAppleScript(safeMessage)}" with title "${sanitizeAppleScript(safeTitle)}" sound name "Glass"`;
+
     childProcess.execFile('osascript', ['-e', macScript], () => {});
   } else {
     // Linux notify-send

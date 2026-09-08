@@ -1,5 +1,5 @@
-﻿// src/controllers/spawner.js - On-Demand Dynamic Agent Process Auto-Spawner
-const { spawn } = require('child_process');
+// src/controllers/spawner.js - On-Demand Dynamic Agent Process Auto-Spawner
+const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
@@ -72,10 +72,11 @@ async function spawnAgent(agentName, options = {}) {
   console.log(`🚀 [AUTO-SPAWN] Launching agent process: "${profile.name}" (${profile.command} ${profile.args.join(' ')})...`);
 
   try {
-    const child = spawn(profile.command, profile.args, {
+    const args = Array.isArray(profile.args) ? profile.args : [];
+    const child = cp.spawn(profile.command, args, {
       detached: true,
       stdio: 'ignore',
-      shell: true,
+      shell: false,
       windowsHide: !options.visible
     });
     child.unref();
