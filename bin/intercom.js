@@ -134,10 +134,11 @@ if (command === 'broadcast') {
   const to = args[toIdx + 1];
   const msg = args[msgIdx + 1];
 
-  const results = broadcastToAgents(from, to, msg, dispatchMessage);
-  console.log(`\n📢 [BROADCAST COMPLETE]: Dispatched to ${results.length} agents:`);
-  results.forEach(r => console.log(`   - 📬 ${r.to.toUpperCase()} (Message ID: ${r.messageId})`));
-  process.exit(0);
+  broadcastToAgents(from, to, msg, dispatchMessage).then(results => {
+    console.log(`\n📢 [BROADCAST COMPLETE]: Dispatched to ${results.length} agents:`);
+    results.forEach(r => console.log(`   - 📬 ${r.to.toUpperCase()} (Message ID: ${r.messageId})`));
+    process.exit(0);
+  });
 }
 
 if (command === 'channel') {
@@ -323,12 +324,13 @@ if (command === 'read') {
 }
 
 if (command === 'peers') {
-  const peers = listActiveMailboxes();
-  console.log('\n📋 [ACTIVE REGISTERED COMPANIONS & MAILBOXES]:');
-  peers.forEach(p => {
-    console.log(`- 📦 [${p.name}] Total: ${p.total} | Unread: ${p.unread}`);
+  listActiveMailboxes().then(peers => {
+    console.log('\n📋 [ACTIVE REGISTERED COMPANIONS & MAILBOXES]:');
+    peers.forEach(p => {
+      console.log(`- 📦 [${p.name}] Total: ${p.total} | Unread: ${p.unread}`);
+    });
+    process.exit(0);
   });
-  process.exit(0);
 }
 
 if (command === 'doctor' || command === 'status') {
@@ -389,9 +391,10 @@ if (command === 'doctor' || command === 'status') {
 if (command === 'a2a') {
   const subCmd = args[1];
   if (!subCmd || subCmd === 'card') {
-    const card = generateAgentCard();
-    console.log(JSON.stringify(card, null, 2));
-    process.exit(0);
+    generateAgentCard().then(card => {
+      console.log(JSON.stringify(card, null, 2));
+      process.exit(0);
+    });
   } else if (subCmd === 'send') {
     const toIdx = args.indexOf('--to');
     const msgIdx = args.indexOf('--msg');
