@@ -1,4 +1,4 @@
-﻿// test/channels.test.js
+// test/channels.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
@@ -33,14 +33,24 @@ test('sendChannelMessage and readChannel perform atomic pub-sub', () => {
   }
 });
 
-test('broadcastToAgents dispatches to multiple recipients simultaneously', () => {
+test('getChannelFile prevents directory traversal', () => {
+  // Traversal attempt with ../
+  const file1 = getChannelFile('../../secret');
+  assert.ok(!file1.includes('..'));
+
+  // Traversal attempt with slashes
+  const file2 = getChannelFile('foo/bar');
+  assert.ok(!file2.includes('foo/bar'));
+});
+
+test('broadcastToAgents dispatches to multiple recipients simultaneously', async () => {
   const dispatched = [];
   const mockDispatch = (from, to, msg) => {
     dispatched.push({ from, to, msg, id: 'msg-' + Date.now() });
     return { id: 'msg-' + Date.now() };
   };
 
-  const results = broadcastToAgents('coordinator', 'agent1,agent2,agent3', 'Sync codebase', mockDispatch);
+  const results = await broadcastToAgents('coordinator', 'agent1,agent2,agent3', 'Sync codebase', mockDispatch);
   assert.strictEqual(results.length, 3);
   assert.strictEqual(dispatched.length, 3);
   assert.strictEqual(dispatched[0].to, 'agent1');

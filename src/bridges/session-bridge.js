@@ -43,8 +43,7 @@ function startSessionBridge(agentName = "cli-agent", sessionId = "s-" + Math.ran
     child.stdin.write(line + "\n");
   });
 
-  function checkInbox(filePath) {
-    if (!fs.existsSync(filePath)) return [];
+  async function checkInbox(filePath) {
     try {
       const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
       const unread = data.filter(m => !m.read);
@@ -59,6 +58,7 @@ function startSessionBridge(agentName = "cli-agent", sessionId = "s-" + Math.ran
   }
 
   const processedMessageIds = new Set();
+  let isPolling = false;
 
   const pollInterval = setInterval(() => {
     // 1. Session specific
@@ -70,8 +70,7 @@ function startSessionBridge(agentName = "cli-agent", sessionId = "s-" + Math.ran
       child.stdin.write(msg.message + "\n");
     });
 
-    // 2. Targeted general
-    if (fs.existsSync(inboxFile)) {
+      // 2. Targeted general
       try {
         const allMsgs = JSON.parse(fs.readFileSync(inboxFile, "utf8"));
         let modified = false;
@@ -92,6 +91,8 @@ function startSessionBridge(agentName = "cli-agent", sessionId = "s-" + Math.ran
           fs.writeFileSync(inboxFile, JSON.stringify(allMsgs, null, 2), "utf8");
         }
       } catch {}
+    } finally {
+      isPolling = false;
     }
   }, 1000);
 

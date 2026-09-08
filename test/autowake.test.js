@@ -1,10 +1,12 @@
-﻿// test/autowake.test.js
+// test/autowake.test.js
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
 const { wakeCliAgent, wakeOpenCodeAgent, wakeHermesAgent } = require('../src/controllers/autowake');
 const { getInboxFile, readInbox } = require('../src/core/mesh');
+const { MESH_DIR } = require('../src/config');
 
 test('wakeCliAgent writes to mailbox with beep and unread status', () => {
   const agent = 'wake-test-' + Date.now();
@@ -19,6 +21,20 @@ test('wakeCliAgent writes to mailbox with beep and unread status', () => {
 
   if (fs.existsSync(file)) {
     fs.unlinkSync(file);
+  }
+});
+
+test('wakeCliAgent sanitizes targetName to prevent path traversal', () => {
+  const dangerousTarget = '../../traversal-test-' + Date.now();
+  const res = wakeCliAgent(dangerousTarget, 'Malicious payload');
+
+  const resolvedMeshDir = path.resolve(MESH_DIR);
+  const resolvedFile = path.resolve(res.file);
+
+  assert.ok(resolvedFile.startsWith(resolvedMeshDir + path.sep), 'File path must be inside MESH_DIR');
+
+  if (fs.existsSync(resolvedFile)) {
+    fs.unlinkSync(resolvedFile);
   }
 });
 
@@ -83,4 +99,29 @@ test('wakeHermesAgent connects to Hermes Gateway API when present', async () => 
 
   await new Promise(r => mockHermesServer.close(r));
   delete process.env.HERMES_URL;
+});
+
+const { wakeAgent } = require("../src/controllers/autowake");
+
+test("wakeAgent coordinates channel dispatch and invokes callback with report", async () => {
+  const agent = "wake-report-test-" + Date.now();
+  const file = getInboxFile(agent);
+
+  await new Promise((resolve) => {
+    wakeAgent(agent, "Test full wake report", (report) => {
+      assert.strictEqual(report.target, agent);
+      assert.ok(report.timestamp);
+      assert.ok(report.channels);
+      assert.strictEqual(report.channels.mailbox.delivered, true);
+      assert.ok(report.channels.pi);
+      assert.ok(report.channels.opencode);
+      assert.ok(report.channels.hermes);
+      assert.ok(report.channels.cloud);
+      resolve();
+    });
+  });
+
+  if (fs.existsSync(file)) {
+    fs.unlinkSync(file);
+  }
 });
