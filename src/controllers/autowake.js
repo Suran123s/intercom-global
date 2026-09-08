@@ -101,7 +101,7 @@ function wakeCliAgent(targetName, message) {
     exec('powershell -c "[console]::beep(1000, 200)"', { windowsHide: true }, () => {});
   }
 
-  return { delivered: true, method: 'durable-mailbox', file: inboxFile, target: targetName };
+  return { delivered: true, method: 'durable-mailbox', file: resolvedInboxFile, target: targetName };
 }
 
 function wakeOpenCodeAgent(targetName, message, callback) {

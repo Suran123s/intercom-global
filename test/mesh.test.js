@@ -42,6 +42,16 @@ test('mesh mailbox read, write, and checkAndMarkRead', async (t) => {
   }
 });
 
+test('getInboxFile and getChannelFile prevent path traversal', () => {
+  const inboxFile = getInboxFile('../../../etc/passwd');
+  const resolvedMeshDir = path.resolve(MESH_DIR);
+  assert.ok(path.resolve(inboxFile).startsWith(resolvedMeshDir + path.sep));
+
+  const channelFile = getChannelFile('../../../etc/passwd');
+  const resolvedChannelsDir = path.resolve(MESH_DIR, 'channels');
+  assert.ok(path.resolve(channelFile).startsWith(resolvedChannelsDir + path.sep));
+});
+
 test('waitForUnread resolves immediately if unread exists', async () => {
   const testAgent = 'test-agent-immediate-' + Date.now();
   const file = getInboxFile(testAgent);
