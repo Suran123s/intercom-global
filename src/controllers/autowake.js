@@ -6,6 +6,7 @@ const { exec } = require('child_process');
 const { PI_PIPE_NAME, MESH_DIR } = require('../config');
 const { readInbox, writeInbox, getInboxFile } = require('../core/mesh');
 const { writeFrame, tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
+const { getInboxFile } = require('../core/mesh');
 
 function connectSocket(target, connectListener) {
   if (typeof target === 'object' && target !== null && target.host && target.port) {
@@ -85,7 +86,8 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
 
 function wakeCliAgent(targetName, message) {
   const inboxFile = getInboxFile(targetName);
-  let inbox = readInbox(targetName);
+  let inbox = [];
+  try { inbox = JSON.parse(fs.readFileSync(inboxFile, 'utf8')); } catch {}
   inbox.push({
     id: Date.now(),
     from: 'autowake',
