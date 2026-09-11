@@ -3,6 +3,25 @@ const fs = require('fs');
 const path = require('path');
 const { MESH_DIR } = require('../config');
 
+function sanitizeSegment(val) {
+  return val.toLowerCase().trim().replace(/[^a-z0-9_-]/g, '-');
+}
+
+function getInboxFile(agentName) {
+  const clean = agentName.toLowerCase().trim();
+  let baseName = '';
+  if (clean.includes('#')) {
+    const [agent, session] = clean.split('#');
+    baseName = `${sanitizeSegment(agent)}-${sanitizeSegment(session)}.json`;
+  } else {
+    baseName = `${sanitizeSegment(clean)}.json`;
+  }
+  const resolved = path.resolve(MESH_DIR, baseName);
+  const resolvedMeshDir = path.resolve(MESH_DIR);
+  if (!resolved.startsWith(resolvedMeshDir + path.sep)) {
+    throw new Error('Invalid agent name: Path traversal detected');
+  }
+  return resolved;
 function sanitizeName(name) {
   if (typeof name !== 'string') return 'unknown';
   const base = path.basename(name.replace(/\0/g, '').replace(/\\/g, '/'));
@@ -171,6 +190,14 @@ if (!fs.existsSync(CHANNELS_DIR)) {
 }
 
 function getChannelFile(channelName) {
+  const clean = channelName.toLowerCase().replace(/^#/, '').trim();
+  const baseName = `${sanitizeSegment(clean)}.json`;
+  const resolved = path.resolve(CHANNELS_DIR, baseName);
+  const resolvedChannelsDir = path.resolve(CHANNELS_DIR);
+  if (!resolved.startsWith(resolvedChannelsDir + path.sep)) {
+    throw new Error('Invalid channel name: Path traversal detected');
+  }
+  return resolved;
   const raw = (channelName || 'general').toString().toLowerCase().replace(/^#/, '').trim();
   const clean = sanitizeName(raw);
   const target = path.join(CHANNELS_DIR, `${clean}.json`);

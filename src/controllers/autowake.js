@@ -3,9 +3,9 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
-const { PI_PIPE_NAME, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, getInboxFile } = require('../core/mesh');
+const { PI_PIPE_NAME } = require('../config');
 const { writeFrame, tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
+const { getInboxFile, readInbox, writeInbox } = require('../core/mesh');
 
 function connectSocket(target, connectListener) {
   if (typeof target === 'object' && target !== null && target.host && target.port) {
