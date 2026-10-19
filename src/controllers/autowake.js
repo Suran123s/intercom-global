@@ -84,6 +84,10 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
 }
 
 function wakeCliAgent(targetName, message) {
+  const { getInboxFile } = require('../core/mesh');
+  const inboxFile = getInboxFile(targetName);
+  let inbox = [];
+  try { inbox = JSON.parse(fs.readFileSync(inboxFile, 'utf8')); } catch {}
   const inboxFile = getInboxFile(targetName);
   let inbox = readInbox(targetName);
   inbox.push({

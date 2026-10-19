@@ -42,6 +42,21 @@ test('mesh mailbox read, write, and checkAndMarkRead', async (t) => {
   }
 });
 
+test('getInboxFile prevents directory traversal', () => {
+  // Traversal attempt
+  const file1 = getInboxFile('../../secret');
+  assert.ok(!file1.includes('..'));
+  assert.ok(file1.endsWith('secret.json'));
+
+  // Session traversal attempt
+  const file2 = getInboxFile('../../agent#../../session');
+  assert.ok(!file2.includes('..'));
+  assert.ok(file2.endsWith('agent-session.json'));
+
+  // Empty / dot traversal attempt should throw
+  assert.throws(() => {
+    getInboxFile('../..');
+  }, /Invalid agent name/);
 test('getInboxFile and getChannelFile prevent path traversal', () => {
   const inboxFile = getInboxFile('../../../etc/passwd');
   const resolvedMeshDir = path.resolve(MESH_DIR);
