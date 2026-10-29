@@ -104,7 +104,7 @@ test('spawnAgent executes process with shell set to false to prevent shell comma
 
   try {
     const { spawnAgent } = require('../src/controllers/spawner');
-    await spawnAgent('opencode', { timeoutMs: 100 });
+    await spawnAgent('opencode', { timeoutMs: 100, force: true });
     assert.ok(spawnOptions, 'spawn should have been called');
     assert.strictEqual(spawnOptions.shell, false, 'shell option must be false');
   } finally {

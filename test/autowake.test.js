@@ -68,6 +68,7 @@ test('wakeOpenCodeAgent connects to OpenCode API server when present', async () 
     });
   });
 
+  if (mockOpenCodeServer.closeAllConnections) mockOpenCodeServer.closeAllConnections();
   await new Promise(r => mockOpenCodeServer.close(r));
   delete process.env.OPENCODE_URL;
 });
@@ -97,6 +98,7 @@ test('wakeHermesAgent connects to Hermes Gateway API when present', async () => 
     });
   });
 
+  if (mockHermesServer.closeAllConnections) mockHermesServer.closeAllConnections();
   await new Promise(r => mockHermesServer.close(r));
   delete process.env.HERMES_URL;
 });

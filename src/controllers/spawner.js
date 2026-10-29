@@ -65,7 +65,7 @@ async function spawnAgent(agentName, options = {}) {
   }
 
   // Check if already running
-  if (profile.checkEndpoint && await isEndpointReady(profile.checkEndpoint, 800)) {
+  if (!options.force && profile.checkEndpoint && await isEndpointReady(profile.checkEndpoint, 800)) {
     return { success: true, message: `${profile.name} is already online`, alreadyRunning: true, port: profile.port };
   }
 

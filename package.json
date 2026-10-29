@@ -1,7 +1,7 @@
 {
-  "name": "intercom-global",
-  "version": "1.0.0",
-  "description": "Universal Multi-IDE & Multi-CLI Intercom, Auto-Wake & Agent Communication Mesh",
+  "name": "@advance/intercom-global",
+  "version": "2.0.0",
+  "description": "Universal Cross-IDE & Cross-Harness Intercom, Interruption & Agent Communication Framework",
   "main": "src/index.js",
   "bin": {
     "intercom": "./bin/intercom.js",
@@ -22,15 +22,12 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "start": "node bin/intercom.js server",
-    "server": "node bin/intercom.js server",
-    "daemon": "node bin/intercom.js daemon start",
-    "tui": "node bin/intercom-tui.js",
-    "dashboard": "start examples/live-mesh-dashboard.html",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "start": "node bin/intercom.js daemon start",
+    "daemon": "node bin/intercom.js daemon",
     "doctor": "node bin/intercom.js doctor",
-    "bridge": "node src/bridges/pi-intercom.js",
-    "mcp": "node bin/intercom-mcp.js"
+    "mcp": "node bin/intercom-mcp.js",
+    "peers": "node bin/intercom.js peers"
   },
   "repository": {
     "type": "git",
@@ -43,10 +40,14 @@
   "keywords": [
     "ai-agents",
     "intercom",
-    "pi-intercom",
-    "cursor",
     "antigravity",
+    "cursor",
+    "windsurf",
+    "vscode",
     "opencode",
+    "qoder",
+    "claude",
+    "jules",
     "multi-agent",
     "mcp",
     "model-context-protocol"

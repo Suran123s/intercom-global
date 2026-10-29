@@ -106,6 +106,7 @@ test('HTTP server SSE streaming and broadcast endpoints', async () => {
 
   // Clean up
   sseReq.destroy();
+  if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
   await new Promise(r => server.close(r));
   const chanFile = getChannelFile('qa-room');
   if (fs.existsSync(chanFile)) fs.unlinkSync(chanFile);

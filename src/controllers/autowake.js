@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const { PI_PIPE_NAME, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, getInboxFile } = require('../core/mesh');
+const { readInbox, writeInbox, getInboxFile, sanitizeName } = require('../core/mesh');
 const { writeFrame, tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
 
 function connectSocket(target, connectListener) {
@@ -84,24 +84,23 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
 }
 
 function wakeCliAgent(targetName, message) {
-  const inboxFile = getInboxFile(targetName);
-  let inbox = readInbox(targetName);
+  const cleanTarget = sanitizeName(targetName);
+  const inboxFile = getInboxFile(cleanTarget);
+  let inbox = readInbox(cleanTarget);
   inbox.push({
     id: Date.now(),
     from: 'autowake',
-    to: targetName,
+    to: cleanTarget,
     message: message,
     timestamp: new Date().toISOString(),
     read: false
   });
-  writeInbox(targetName, inbox);
-  console.log(`⚡ [AUTOWAKE MAILBOX] Dispatched to durable session mailbox: "${targetName.toUpperCase()}"`);
+  writeInbox(cleanTarget, inbox);
+  console.log(`⚡ [AUTOWAKE MAILBOX] Dispatched to durable session mailbox: "${cleanTarget.toUpperCase()}"`);
 
-  if (process.platform === 'win32') {
-    exec('powershell -c "[console]::beep(1000, 200)"', { windowsHide: true }, () => {});
-  }
+  // Audio beep completely removed
 
-  return { delivered: true, method: 'durable-mailbox', file: resolvedInboxFile, target: targetName };
+  return { delivered: true, method: 'durable-mailbox', file: inboxFile, target: cleanTarget };
 }
 
 function wakeOpenCodeAgent(targetName, message, callback) {
@@ -230,7 +229,7 @@ function logDeliveryDiagnostics(to, channels) {
   if (channels.cloud?.delivered) console.log(`- ☁️ Devin Cloud     : ✅ SESSION TRIGGERED`);
   else if (channels.cloud?.reason) console.log(`- ☁️ Devin Cloud     : ℹ️ SKIPPED (${channels.cloud.reason})`);
 
-  console.log(`- 🔔 Desktop Toast   : ✅ OS NOTIFICATION SENT`);
+  console.log(`- 🔔 Desktop Toast   : ℹ️ OS NOTIFICATION DISABLED`);
   console.log(`===========================================================\n`);
 }
 
@@ -252,7 +251,7 @@ async function executeWake(to, message, callback) {
     channels
   };
 
-  showDesktopNotification(`Intercom Task for ${to.toUpperCase()}`, message.slice(0, 100));
+  // OS balloon notification disabled
   logDeliveryDiagnostics(to, channels);
 
   if (callback) callback(report);

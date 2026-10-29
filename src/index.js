@@ -1,20 +1,31 @@
-// src/index.js - Main Library Entrypoint
+// src/index.js - Primary Library Exports for intercom-global
 const config = require('./config');
+const message = require('./core/message');
 const mesh = require('./core/mesh');
-const server = require('./core/server');
-const autowake = require('./controllers/autowake');
-const piIntercom = require('./bridges/pi-intercom');
-const sessionBridge = require('./bridges/session-bridge');
-const a2a = require('./bridges/a2a');
+const registry = require('./core/registry');
+const daemon = require('./core/daemon');
+const interrupter = require('./core/interrupter');
+const julesDelegator = require('./core/jules-delegator');
+const julesBridge = require('./bridges/jules-bridge');
+const governance = require('./core/governance');
+const antigravityBridge = require('./bridges/antigravity-bridge');
+const cli = require('./cli');
 const mcp = require('./mcp/server');
 
 module.exports = {
   config,
+  ...message,
   ...mesh,
-  ...server,
-  ...autowake,
-  ...piIntercom,
-  ...sessionBridge,
-  ...a2a,
+  ...registry,
+  ...daemon,
+  ...interrupter,
+  julesDelegator,
+  julesBridge,
+  antigravityBridge,
+  governance,
+  ...julesDelegator,
+  ...governance,
+  ...antigravityBridge,
+  ...cli,
   ...mcp
 };

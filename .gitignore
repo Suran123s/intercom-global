@@ -16,3 +16,10 @@ Thumbs.db
 # Mesh runtime mailboxes (keep directory, ignore transient user messages)
 mesh/*.json
 !mesh/.gitkeep
+
+# Mesh runtime state (messages, channels, interrupts, registry tracking)
+mesh/archive/
+mesh/channels/
+mesh/inbox/
+mesh/interrupts/
+mesh/registry/

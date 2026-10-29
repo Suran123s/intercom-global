@@ -9,7 +9,7 @@ test('sanitizeAppleScript escapes backslashes and double quotes correctly', () =
   assert.strictEqual(sanitizeAppleScript('$(whoami); echo "pwn"'), '$(whoami); echo \\"pwn\\"');
 });
 
-test('showDesktopNotification invokes execFile with safe arguments on darwin', (t) => {
+test('showDesktopNotification invokes execFile with safe arguments on darwin (silent, no audio)', (t) => {
   const originalPlatform = process.platform;
   Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
 
@@ -33,7 +33,7 @@ test('showDesktopNotification invokes execFile with safe arguments on darwin', (
     assert.strictEqual(calledArgs[0], '-e');
     assert.strictEqual(
       calledArgs[1],
-      'display notification "Test \\" ; touch /tmp/pwned ; echo \\"" with title "Alert \\"$(whoami)\\"" sound name "Glass"'
+      'display notification "Test \\" ; touch /tmp/pwned ; echo \\"" with title "Alert \\"$(whoami)\\""'
     );
   } finally {
     child_process.execFile = originalExecFile;

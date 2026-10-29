@@ -299,7 +299,7 @@ const routes = [
   },
   {
     method: 'POST',
-    match: pathname => pathname === '/api/intercom/send',
+    match: pathname => pathname === '/api/intercom/send' || pathname === '/messages',
     handler: handleIntercomSend
   },
   {
