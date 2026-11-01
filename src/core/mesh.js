@@ -249,10 +249,101 @@ async function writeMessage(recipient, envelopeData) {
   };
 }
 
-// High-performance mtime & payload caches for discrete mailboxes
-const inboxDirCache = new Map();
-const fileEnvelopeCache = new Map();
+/**
+ * Generic Least-Recently-Used (LRU) Cache backed by ES6 Map insertion ordering.
+ * Guarantees O(1) get and set with automatic bound enforcement.
+ */
+class LruCache {
+  /**
+   * @param {number} maxEntries - Maximum number of items before LRU eviction
+   */
+  constructor(maxEntries = 500) {
+    this.maxEntries = Math.max(1, maxEntries);
+    this.cache = new Map();
+    this.hits = 0;
+    this.misses = 0;
+    this.evictions = 0;
+  }
+
+  get(key) {
+    if (!this.cache.has(key)) {
+      this.misses++;
+      return undefined;
+    }
+    this.hits++;
+    const value = this.cache.get(key);
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    return value;
+  }
+
+  set(key, value) {
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.maxEntries) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.cache.delete(oldestKey);
+        this.evictions++;
+      }
+    }
+    this.cache.set(key, value);
+    return this;
+  }
+
+  has(key) {
+    return this.cache.has(key);
+  }
+
+  delete(key) {
+    return this.cache.delete(key);
+  }
+
+  clear() {
+    this.cache.clear();
+  }
+
+  get size() {
+    return this.cache.size;
+  }
+
+  keys() {
+    return this.cache.keys();
+  }
+
+  values() {
+    return this.cache.values();
+  }
+
+  entries() {
+    return this.cache.entries();
+  }
+
+  [Symbol.iterator]() {
+    return this.cache[Symbol.iterator]();
+  }
+
+  forEach(callback, thisArg) {
+    return this.cache.forEach(callback, thisArg);
+  }
+
+  getStats() {
+    return {
+      size: this.cache.size,
+      maxEntries: this.maxEntries,
+      hits: this.hits,
+      misses: this.misses,
+      evictions: this.evictions
+    };
+  }
+}
+
+// Bounded in-memory caches
+const MAX_INBOX_DIR_CACHE_ENTRIES = 500;
 const MAX_FILE_CACHE_ENTRIES = 5000;
+
+const inboxDirCache = new LruCache(MAX_INBOX_DIR_CACHE_ENTRIES);
+const fileEnvelopeCache = new LruCache(MAX_FILE_CACHE_ENTRIES);
 
 /**
  * Resets the in-memory inbox and file payload caches
@@ -260,6 +351,13 @@ const MAX_FILE_CACHE_ENTRIES = 5000;
 function clearMeshCache() {
   inboxDirCache.clear();
   fileEnvelopeCache.clear();
+}
+
+function getMeshCacheStats() {
+  return {
+    inboxDirCache: inboxDirCache.getStats(),
+    fileEnvelopeCache: fileEnvelopeCache.getStats()
+  };
 }
 
 /**
@@ -317,6 +415,174 @@ function writeMessageSync(recipient, envelopeData) {
     path: finalFilePath,
     envelope
   };
+}
+
+/**
+ * Writes a batch of discrete message envelopes into the recipient's inbox
+ * under a single directory CAS advisory lock, maximizing Windows NTFS throughput.
+ * 
+ * @param {string} recipient - Validated agent name
+ * @param {Array<MessageEnvelope|object>} envelopesData - Array of envelopes to write
+ * @param {object} [options]
+ * @param {number} [options.lockTtlMs] - Custom lock TTL (defaults to dynamic based on batch size)
+ * @param {number} [options.timeoutMs=15000] - Lock acquisition timeout
+ * @returns {Promise<Array<{ messageId: string, path: string, envelope: MessageEnvelope }>>}
+ */
+async function writeMessagesBatch(recipient, envelopesData, options = {}) {
+  const cleanRecipient = validateAgentName(recipient);
+  if (!Array.isArray(envelopesData) || envelopesData.length === 0) {
+    return [];
+  }
+
+  const batchCount = envelopesData.length;
+  // Dynamic lock TTL: base 5000ms + 50ms per message to prevent premature stale lock takeover
+  const lockTtlMs = options.lockTtlMs || Math.max(5000, batchCount * 50);
+  const timeoutMs = options.timeoutMs || 15000;
+
+  return await withLock(cleanRecipient, async () => {
+    const inboxDir = getInboxDir(cleanRecipient);
+    const results = [];
+    const now = Date.now();
+
+    // Prepare envelopes and normalize timestamps
+    const prepared = envelopesData.map((data, idx) => {
+      const envelope = data instanceof MessageEnvelope
+        ? data
+        : (data && typeof data.toJSON === 'function'
+          ? data
+          : MessageEnvelope.create({ ...data, recipient: cleanRecipient }));
+      
+      // Ensure epochMs monotonicity within the batch
+      envelope.epochMs = (envelope.epochMs || now) + idx;
+      return envelope;
+    });
+
+    // Write all messages within the single held lock
+    for (let i = 0; i < prepared.length; i++) {
+      const envelope = prepared[i];
+      const tmpFileName = `.tmp_${envelope.id}_${now}_${i}.tmp`;
+      const tmpFilePath = path.join(inboxDir, tmpFileName);
+      const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
+      const finalFilePath = path.join(inboxDir, finalFileName);
+      const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
+
+      // 1. Write tmp file
+      await retryNtfsOperation(async () => {
+        await fs.promises.writeFile(tmpFilePath, serialized, 'utf8');
+      });
+
+      // 2. Atomic rename to final message file
+      await retryNtfsOperation(async () => {
+        await fs.promises.rename(tmpFilePath, finalFilePath);
+      });
+
+      // 3. Mirror to Antigravity dual mailbox if applicable
+      if (cleanRecipient.toLowerCase() === 'antigravity') {
+        try {
+          const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
+          if (workspaceInbox !== inboxDir) {
+            if (!fs.existsSync(workspaceInbox)) fs.mkdirSync(workspaceInbox, { recursive: true });
+            const wsTmp = path.join(workspaceInbox, tmpFileName);
+            const wsFinal = path.join(workspaceInbox, finalFileName);
+            await retryNtfsOperation(async () => {
+              await fs.promises.writeFile(wsTmp, serialized, 'utf8');
+            });
+            await retryNtfsOperation(async () => {
+              await fs.promises.rename(wsTmp, wsFinal);
+            });
+          }
+        } catch {}
+      }
+
+      results.push({
+        messageId: envelope.id,
+        path: finalFilePath,
+        envelope
+      });
+    }
+
+    // Invalidate inbox directory cache once after whole batch
+    inboxDirCache.delete(inboxDir);
+    return results;
+  }, { ttlMs: lockTtlMs, timeoutMs });
+}
+
+/**
+ * Synchronous variant of writeMessagesBatch
+ * @param {string} recipient 
+ * @param {Array<MessageEnvelope|object>} envelopesData 
+ * @param {object} [options]
+ * @returns {Array<{ messageId: string, path: string, envelope: MessageEnvelope }>}
+ */
+function writeMessagesBatchSync(recipient, envelopesData, options = {}) {
+  const cleanRecipient = validateAgentName(recipient);
+  if (!Array.isArray(envelopesData) || envelopesData.length === 0) {
+    return [];
+  }
+
+  const batchCount = envelopesData.length;
+  const lockTtlMs = options.lockTtlMs || Math.max(5000, batchCount * 50);
+  const timeoutMs = options.timeoutMs || 15000;
+
+  return withLockSync(cleanRecipient, () => {
+    const inboxDir = getInboxDir(cleanRecipient);
+    const results = [];
+    const now = Date.now();
+
+    const prepared = envelopesData.map((data, idx) => {
+      const envelope = data instanceof MessageEnvelope
+        ? data
+        : (data && typeof data.toJSON === 'function'
+          ? data
+          : MessageEnvelope.create({ ...data, recipient: cleanRecipient }));
+      
+      envelope.epochMs = (envelope.epochMs || now) + idx;
+      return envelope;
+    });
+
+    for (let i = 0; i < prepared.length; i++) {
+      const envelope = prepared[i];
+      const tmpFileName = `.tmp_${envelope.id}_${now}_${i}.tmp`;
+      const tmpFilePath = path.join(inboxDir, tmpFileName);
+      const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
+      const finalFilePath = path.join(inboxDir, finalFileName);
+      const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
+
+      retryNtfsOperationSync(() => {
+        fs.writeFileSync(tmpFilePath, serialized, 'utf8');
+      });
+
+      retryNtfsOperationSync(() => {
+        fs.renameSync(tmpFilePath, finalFilePath);
+      });
+
+      if (cleanRecipient.toLowerCase() === 'antigravity') {
+        try {
+          const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
+          if (workspaceInbox !== inboxDir) {
+            if (!fs.existsSync(workspaceInbox)) fs.mkdirSync(workspaceInbox, { recursive: true });
+            const wsTmp = path.join(workspaceInbox, tmpFileName);
+            const wsFinal = path.join(workspaceInbox, finalFileName);
+            retryNtfsOperationSync(() => {
+              fs.writeFileSync(wsTmp, serialized, 'utf8');
+            });
+            retryNtfsOperationSync(() => {
+              fs.renameSync(wsTmp, wsFinal);
+            });
+          }
+        } catch {}
+      }
+
+      results.push({
+        messageId: envelope.id,
+        path: finalFilePath,
+        envelope
+      });
+    }
+
+    inboxDirCache.delete(inboxDir);
+    return results;
+  }, { ttlMs: lockTtlMs, timeoutMs });
 }
 
 /**
@@ -828,6 +1094,149 @@ async function releaseLock(lockHandle) {
 }
 
 /**
+ * Synchronous variant of acquireLock
+ */
+function acquireLockSync(resourceName, ttlMs = 3000, options = {}) {
+  const cleanName = sanitizeAgentName(resourceName);
+  const locksDir = path.join(MESH_DIR, 'locks');
+  if (!fs.existsSync(locksDir)) {
+    try { fs.mkdirSync(locksDir, { recursive: true }); } catch {}
+  }
+
+  const lockDir = path.join(locksDir, `${cleanName}.lock`);
+  const metaFile = path.join(lockDir, 'metadata.json');
+  const timeoutMs = options.timeoutMs || 10000;
+  const startTime = Date.now();
+  const token = crypto.randomUUID();
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      fs.mkdirSync(lockDir);
+      const meta = {
+        ownerPid: process.pid,
+        createdAt: Date.now(),
+        ttlMs,
+        resourceName: cleanName,
+        token
+      };
+      fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2), 'utf8');
+      return {
+        lockDir,
+        resourceName: cleanName,
+        token,
+        ownerPid: process.pid
+      };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+
+      // Stale lock detection
+      let isStale = false;
+      try {
+        if (fs.existsSync(metaFile)) {
+          const raw = fs.readFileSync(metaFile, 'utf8');
+          const meta = JSON.parse(raw);
+          const age = Date.now() - meta.createdAt;
+          const effectiveTtl = meta.ttlMs || ttlMs;
+          if (age > effectiveTtl) {
+            isStale = true;
+          } else if (meta.ownerPid && meta.ownerPid !== process.pid) {
+            try {
+              process.kill(meta.ownerPid, 0);
+            } catch (kErr) {
+              if (kErr.code === 'ESRCH') isStale = true;
+            }
+          }
+        } else {
+          const stat = fs.statSync(lockDir);
+          if (Date.now() - stat.mtimeMs > ttlMs) isStale = true;
+        }
+      } catch {}
+
+      if (isStale) {
+        const stalePurgeDir = `${lockDir}.stale.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+        try {
+          fs.renameSync(lockDir, stalePurgeDir);
+          const purgeMeta = path.join(stalePurgeDir, 'metadata.json');
+          if (fs.existsSync(purgeMeta)) fs.unlinkSync(purgeMeta);
+          fs.rmdirSync(stalePurgeDir);
+        } catch {}
+        continue;
+      }
+
+      // Jitter sleep
+      const jitter = Math.floor(Math.random() * 25) + 15;
+      if (waitInt32View) {
+        try { Atomics.wait(waitInt32View, 0, 0, jitter); } catch {
+          const s = Date.now(); while (Date.now() - s < jitter) {}
+        }
+      } else {
+        const s = Date.now(); while (Date.now() - s < jitter) {}
+      }
+    }
+  }
+
+  throw new LockTimeoutError(`Sync lock acquisition timed out after ${timeoutMs}ms for resource "${resourceName}"`);
+}
+
+/**
+ * Synchronous variant of releaseLock
+ */
+function releaseLockSync(lockHandle) {
+  if (!lockHandle || !lockHandle.lockDir) return;
+  const { lockDir, token } = lockHandle;
+  if (!fs.existsSync(lockDir)) return;
+
+  const metaFile = path.join(lockDir, 'metadata.json');
+  try {
+    if (fs.existsSync(metaFile)) {
+      if (token) {
+        try {
+          const raw = fs.readFileSync(metaFile, 'utf8');
+          const meta = JSON.parse(raw);
+          if (meta.token && meta.token !== token) return;
+        } catch {}
+      }
+      retryNtfsOperationSync(() => fs.unlinkSync(metaFile));
+    }
+    retryNtfsOperationSync(() => fs.rmdirSync(lockDir));
+  } catch {}
+}
+
+/**
+ * Executes a function within the scope of a CAS advisory lock
+ * @param {string} resourceName 
+ * @param {Function} fn 
+ * @param {object} [options]
+ * @returns {Promise<any>}
+ */
+async function withLock(resourceName, fn, options = {}) {
+  const ttlMs = options.ttlMs || 5000;
+  const lockHandle = await acquireLock(resourceName, ttlMs, options);
+  try {
+    return await fn(lockHandle);
+  } finally {
+    await releaseLock(lockHandle);
+  }
+}
+
+/**
+ * Executes a function within the scope of a synchronous CAS advisory lock
+ * @param {string} resourceName 
+ * @param {Function} fn 
+ * @param {object} [options]
+ * @returns {any}
+ */
+function withLockSync(resourceName, fn, options = {}) {
+  const ttlMs = options.ttlMs || 5000;
+  const lockHandle = acquireLockSync(resourceName, ttlMs, options);
+  try {
+    return fn(lockHandle);
+  } finally {
+    releaseLockSync(lockHandle);
+  }
+}
+
+/**
  * Reactive inbox wait for incoming messages using file watching and timeout
  * @param {string} agentName 
  * @param {number} timeoutMs Default 30000ms
@@ -1058,36 +1467,77 @@ function checkAndMarkRead(agentName) {
 }
 
 function sendChannelMessage(channelName, from, message) {
-  const normChannel = '#' + channelName.replace(/^#/, '');
-  const file = getChannelFile(channelName);
-  let history = [];
-  if (fs.existsSync(file)) {
-    try {
-      history = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (!Array.isArray(history)) history = [];
-    } catch {}
-  }
-  const msgObj = {
-    id: Date.now(),
-    from,
-    channel: normChannel,
-    message,
-    timestamp: new Date().toISOString()
-  };
-  history.push(msgObj);
-  safeWriteJson(file, history);
-  return msgObj;
+  const normChannel = '#' + (channelName || 'general').replace(/^#/, '');
+  const clean = sanitizeName(normChannel.replace(/^#/, ''));
+  const file = getChannelFile(clean);
+  const channelsDir = path.dirname(file);
+
+  return withLockSync(`channel_${clean}`, () => {
+    let history = [];
+    if (fs.existsSync(file)) {
+      try {
+        const raw = retryNtfsOperationSync(() => fs.readFileSync(file, 'utf8'));
+        history = JSON.parse(raw);
+        if (!Array.isArray(history)) history = [];
+      } catch {
+        history = [];
+      }
+    }
+
+    const msgObj = {
+      id: `${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
+      from: from || 'operator',
+      channel: normChannel,
+      message,
+      timestamp: new Date().toISOString()
+    };
+
+    history.push(msgObj);
+
+    if (!fs.existsSync(channelsDir)) {
+      try { fs.mkdirSync(channelsDir, { recursive: true }); } catch {}
+    }
+
+    const tmpFile = path.join(channelsDir, `.tmp_chan_${clean}_${Date.now()}.tmp`);
+    const serialized = JSON.stringify(history, null, 2);
+
+    retryNtfsOperationSync(() => {
+      fs.writeFileSync(tmpFile, serialized, 'utf8');
+    });
+    retryNtfsOperationSync(() => {
+      fs.renameSync(tmpFile, file);
+    });
+
+    return msgObj;
+  }, { ttlMs: 3000, timeoutMs: 10000 });
 }
 
 function readChannel(channelName) {
-  const file = getChannelFile(channelName);
+  const clean = sanitizeName((channelName || 'general').replace(/^#/, ''));
+  const file = getChannelFile(clean);
   if (!fs.existsSync(file)) return [];
   try {
-    const list = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const raw = retryNtfsOperationSync(() => fs.readFileSync(file, 'utf8'));
+    const list = JSON.parse(raw);
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
   }
+}
+
+function clearChannel(channelName) {
+  const clean = sanitizeName((channelName || 'general').replace(/^#/, ''));
+  const file = getChannelFile(clean);
+  if (!fs.existsSync(file)) return true;
+
+  return withLockSync(`channel_${clean}`, () => {
+    try {
+      retryNtfsOperationSync(() => fs.unlinkSync(file));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function listChannels() {
@@ -1095,7 +1545,7 @@ function listChannels() {
   if (!fs.existsSync(channelsDir)) return [];
   try {
     const files = fs.readdirSync(channelsDir);
-    return files.filter(f => f.endsWith('.json')).map(f => {
+    return files.filter(f => f.endsWith('.json') && !f.startsWith('.tmp_')).map(f => {
       const name = '#' + f.replace('.json', '');
       try {
         const content = JSON.parse(fs.readFileSync(path.join(channelsDir, f), 'utf8'));
@@ -1141,19 +1591,27 @@ module.exports = {
   // Core Interface Contracts
   writeMessage,
   writeMessageSync,
+  writeMessagesBatch,
+  writeMessagesBatchSync,
   migrateLegacyMailboxSync,
   compactMailboxes,
   readInbox,
   readInboxSync,
   ackMessage,
   acquireLock,
+  acquireLockSync,
   releaseLock,
+  releaseLockSync,
+  withLock,
+  withLockSync,
   sanitizeAgentName,
   validateAgentName,
   resolveSafePath,
 
   // Resiliency & Helpers
+  LruCache,
   clearMeshCache,
+  getMeshCacheStats,
   retryNtfsOperation,
   retryNtfsOperationSync,
   waitForUnread,
@@ -1171,6 +1629,7 @@ module.exports = {
   checkAndMarkRead,
   sendChannelMessage,
   readChannel,
+  clearChannel,
   listChannels,
   broadcastToAgents,
 
