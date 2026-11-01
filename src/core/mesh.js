@@ -112,6 +112,10 @@ async function retryNtfsOperation(fn, maxAttempts = 5) {
   }
 }
 
+// Shared memory buffer for non-busy Atomics.wait sync sleeps
+const waitSharedBuffer = typeof SharedArrayBuffer !== 'undefined' ? new SharedArrayBuffer(4) : null;
+const waitInt32View = waitSharedBuffer ? new Int32Array(waitSharedBuffer) : null;
+
 /**
  * Synchronous variant of NTFS retry operation
  */
@@ -131,10 +135,16 @@ function retryNtfsOperationSync(fn, maxAttempts = 5) {
       const baseDelay = delays[attempt - 1] || 320;
       const jitter = Math.floor(Math.random() * 16);
       const totalDelay = baseDelay + jitter;
-      // Synchronous sleep using Atomics.wait if possible, or busy wait
-      const start = Date.now();
-      while (Date.now() - start < totalDelay) {
-        // busy wait
+      if (waitInt32View) {
+        try {
+          Atomics.wait(waitInt32View, 0, 0, totalDelay);
+        } catch {
+          const start = Date.now();
+          while (Date.now() - start < totalDelay) {}
+        }
+      } else {
+        const start = Date.now();
+        while (Date.now() - start < totalDelay) {}
       }
     }
   }
@@ -229,6 +239,9 @@ async function writeMessage(recipient, envelopeData) {
     } catch {}
   }
 
+  // Invalidate local in-memory inbox cache
+  inboxDirCache.delete(inboxDir);
+
   return {
     messageId: envelope.id,
     path: finalFilePath,
@@ -236,18 +249,50 @@ async function writeMessage(recipient, envelopeData) {
   };
 }
 
+// High-performance mtime & payload caches for discrete mailboxes
+const inboxDirCache = new Map();
+const fileEnvelopeCache = new Map();
+const MAX_FILE_CACHE_ENTRIES = 5000;
+
+/**
+ * Resets the in-memory inbox and file payload caches
+ */
+function clearMeshCache() {
+  inboxDirCache.clear();
+  fileEnvelopeCache.clear();
+}
+
 /**
  * Synchronous variant of readInbox with discrete priority & legacy file fallback
  * @param {string} recipient 
+ * @param {object} [options={}]
  * @returns {Array<MessageEnvelope|object>}
  */
-function readInboxSync(recipient) {
+function readInboxSync(recipient, options = {}) {
   const cleanRecipient = validateAgentName(recipient);
   const inboxDir = path.join(MESH_DIR, 'inbox', cleanRecipient);
   const envelopes = [];
+  const limit = (options && typeof options.limit === 'number') ? options.limit : null;
+  const resolvedOrder = (options && options.order) || ((options && options.newestFirst) ? 'desc' : 'asc');
 
   if (fs.existsSync(inboxDir)) {
     try {
+      const dirStat = fs.statSync(inboxDir);
+      const dirCached = inboxDirCache.get(inboxDir);
+
+      if (dirCached && dirCached.mtimeMs === dirStat.mtimeMs) {
+        if (dirCached.allLoaded) {
+          const list = resolvedOrder === 'desc' ? dirCached.allDesc : dirCached.allAsc;
+          if (list.length > 0) {
+            return limit !== null ? list.slice(0, limit) : [...list];
+          }
+        } else if (dirCached.limit !== null && limit !== null && dirCached.limit >= limit && dirCached.order === resolvedOrder) {
+          if (dirCached.envelopes.length > 0) {
+            return dirCached.envelopes.slice(0, limit);
+          }
+        }
+      }
+
       const files = retryNtfsOperationSync(() => fs.readdirSync(inboxDir));
       const messageFiles = files.filter(f => /^\d+_[a-zA-Z0-9\-]+\.json$/.test(f));
 
@@ -262,15 +307,62 @@ function readInboxSync(recipient) {
         return idA.localeCompare(idB);
       });
 
-      for (const file of messageFiles) {
+      const allLoaded = limit === null || messageFiles.length <= limit;
+      let targetFiles = messageFiles;
+
+      if (!allLoaded) {
+        targetFiles = resolvedOrder === 'desc'
+          ? messageFiles.slice(-limit)
+          : messageFiles.slice(0, limit);
+      }
+
+      const loadedEnvelopes = [];
+      for (const file of targetFiles) {
         const fullPath = path.join(inboxDir, file);
         try {
-          const content = retryNtfsOperationSync(() => fs.readFileSync(fullPath, 'utf8'));
-          const parsed = JSON.parse(content);
-          envelopes.push(new MessageEnvelope(parsed));
+          const fileStat = fs.statSync(fullPath);
+          const cachedFile = fileEnvelopeCache.get(fullPath);
+          if (cachedFile && cachedFile.mtimeMs === fileStat.mtimeMs) {
+            loadedEnvelopes.push(cachedFile.envelope);
+          } else {
+            const content = retryNtfsOperationSync(() => fs.readFileSync(fullPath, 'utf8'));
+            const parsed = JSON.parse(content);
+            const env = new MessageEnvelope(parsed);
+            if (fileEnvelopeCache.size >= MAX_FILE_CACHE_ENTRIES) {
+              const oldestKey = fileEnvelopeCache.keys().next().value;
+              fileEnvelopeCache.delete(oldestKey);
+            }
+            fileEnvelopeCache.set(fullPath, { mtimeMs: fileStat.mtimeMs, envelope: env });
+            loadedEnvelopes.push(env);
+          }
         } catch {
           continue;
         }
+      }
+
+      if (allLoaded) {
+        const allAsc = loadedEnvelopes;
+        const allDesc = [...loadedEnvelopes].reverse();
+        inboxDirCache.set(inboxDir, {
+          mtimeMs: dirStat.mtimeMs,
+          allLoaded: true,
+          allAsc,
+          allDesc
+        });
+        const list = resolvedOrder === 'desc' ? allDesc : allAsc;
+        envelopes.push(...(limit !== null ? list.slice(0, limit) : list));
+      } else {
+        if (resolvedOrder === 'desc') {
+          loadedEnvelopes.reverse();
+        }
+        inboxDirCache.set(inboxDir, {
+          mtimeMs: dirStat.mtimeMs,
+          allLoaded: false,
+          limit,
+          order: resolvedOrder,
+          envelopes: loadedEnvelopes
+        });
+        envelopes.push(...loadedEnvelopes);
       }
     } catch {}
   }
@@ -283,7 +375,7 @@ function readInboxSync(recipient) {
         const content = fs.readFileSync(legacyFile, 'utf8');
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed)) {
-          return parsed;
+          return limit !== null ? parsed.slice(0, limit) : parsed;
         }
       } catch {}
     }
@@ -360,6 +452,7 @@ async function ackMessage(agentName, messageId, options = {}) {
         await fs.promises.unlink(srcPath);
       }
     });
+    inboxDirCache.delete(inboxDir);
     return true;
   }
 
@@ -375,6 +468,7 @@ async function ackMessage(agentName, messageId, options = {}) {
     await fs.promises.rename(srcPath, destPath);
   });
 
+  inboxDirCache.delete(inboxDir);
   return true;
 }
 
@@ -538,6 +632,7 @@ async function waitForUnread(agentName, timeoutMs = 30000) {
 
     const check = async () => {
       if (resolved) return;
+      inboxDirCache.delete(inboxDir);
       const msgs = await readInbox(cleanRecipient);
       if (msgs.length > 0) {
         cleanup();
@@ -593,6 +688,8 @@ function clearInboxSync(agentName) {
       count++;
     } catch {}
   }
+
+  inboxDirCache.delete(inboxDir);
 
   return count;
 }
@@ -713,6 +810,8 @@ function writeInbox(agentName, messages) {
   const clean = sanitizeName(agentName);
   const target = getInboxFile(clean);
   safeWriteJson(target, messages);
+  const inboxDir = path.join(MESH_DIR, 'inbox', clean);
+  inboxDirCache.delete(inboxDir);
 }
 
 function checkAndMarkRead(agentName) {
@@ -825,6 +924,7 @@ module.exports = {
   resolveSafePath,
 
   // Resiliency & Helpers
+  clearMeshCache,
   retryNtfsOperation,
   retryNtfsOperationSync,
   waitForUnread,

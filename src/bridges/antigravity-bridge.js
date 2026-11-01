@@ -10,6 +10,17 @@ const ANTIGRAVITY_DEFAULT_URL = process.env.ANTIGRAVITY_URL || 'https://127.0.0.
 let cachedConfig = null;
 let cachedConfigTimestamp = 0;
 const CACHE_TTL_MS = 60 * 1000;
+const OFFLINE_CACHE_TTL_MS = 5000;
+let cachedOfflineResult = null;
+let cachedOfflineTimestamp = 0;
+
+// Shared memory buffer for non-busy Atomics.wait sync sleeps
+const agWaitBuffer = typeof SharedArrayBuffer !== 'undefined' ? new SharedArrayBuffer(4) : null;
+const agWaitInt32 = agWaitBuffer ? new Int32Array(agWaitBuffer) : null;
+
+// Caches for Antigravity dual mailboxes
+const agInboxDirCache = new Map();
+const agFileCache = new Map();
 
 /**
  * Custom HTTPS Agent allowing local self-signed dev certificates for Antigravity web UI
@@ -38,6 +49,10 @@ async function getAntigravityConfig(options = {}) {
       config: cachedConfig,
       url
     };
+  }
+
+  if (!options.forceRefresh && cachedOfflineResult && (now - cachedOfflineTimestamp < OFFLINE_CACHE_TTL_MS)) {
+    return cachedOfflineResult;
   }
 
   return new Promise((resolve) => {
@@ -85,6 +100,8 @@ async function getAntigravityConfig(options = {}) {
             if (res.statusCode >= 200 && res.statusCode < 400) {
               cachedConfig = extractedConfig || { csrfToken };
               cachedConfigTimestamp = Date.now();
+              cachedOfflineResult = null;
+              cachedOfflineTimestamp = 0;
 
               resolve({
                 online: true,
@@ -93,13 +110,16 @@ async function getAntigravityConfig(options = {}) {
                 url
               });
             } else {
-              resolve({
+              const offlineRes = {
                 online: false,
                 csrfToken: null,
                 config: null,
                 url,
                 error: `HTTP ${res.statusCode}`
-              });
+              };
+              cachedOfflineResult = offlineRes;
+              cachedOfflineTimestamp = Date.now();
+              resolve(offlineRes);
             }
           });
         }
@@ -107,32 +127,41 @@ async function getAntigravityConfig(options = {}) {
 
       req.on('timeout', () => {
         req.destroy();
-        resolve({
+        const offlineRes = {
           online: false,
           csrfToken: null,
           config: null,
           url,
           error: 'Connection timeout'
-        });
+        };
+        cachedOfflineResult = offlineRes;
+        cachedOfflineTimestamp = Date.now();
+        resolve(offlineRes);
       });
 
       req.on('error', (err) => {
-        resolve({
+        const offlineRes = {
           online: false,
           csrfToken: null,
           config: null,
           url,
           error: err.message
-        });
+        };
+        cachedOfflineResult = offlineRes;
+        cachedOfflineTimestamp = Date.now();
+        resolve(offlineRes);
       });
     } catch (err) {
-      resolve({
+      const offlineRes = {
         online: false,
         csrfToken: null,
         config: null,
         url,
         error: err.message
-      });
+      };
+      cachedOfflineResult = offlineRes;
+      cachedOfflineTimestamp = Date.now();
+      resolve(offlineRes);
     }
   });
 }
@@ -190,8 +219,17 @@ function retryNtfsOperationSync(fn, maxAttempts = 5) {
       const isLock = err && (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES');
       if (!isLock || attempt === maxAttempts - 1) throw err;
       const delay = delays[attempt] + Math.floor(Math.random() * 15);
-      const start = Date.now();
-      while (Date.now() - start < delay) {}
+      if (agWaitInt32) {
+        try {
+          Atomics.wait(agWaitInt32, 0, 0, delay);
+        } catch {
+          const start = Date.now();
+          while (Date.now() - start < delay) {}
+        }
+      } else {
+        const start = Date.now();
+        while (Date.now() - start < delay) {}
+      }
     }
   }
 }
@@ -248,6 +286,7 @@ async function routeMessageToAntigravity(messageData, options = {}) {
         await fs.promises.rename(tmpPath, finalPath);
       });
 
+      agInboxDirCache.delete(dir);
       writtenPaths.push(finalPath);
     } catch (err) {
       // Continue to next mailbox
@@ -295,19 +334,48 @@ function readAntigravityInboxSync(options = {}) {
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) continue;
     try {
+      const dirStat = fs.statSync(dir);
+      const cached = agInboxDirCache.get(dir);
+      if (cached && cached.mtimeMs === dirStat.mtimeMs) {
+        for (const msg of cached.messages) {
+          if (!seenIds.has(msg.id)) {
+            seenIds.add(msg.id);
+            messages.push(msg);
+          }
+        }
+        continue;
+      }
+
       const files = retryNtfsOperationSync(() => fs.readdirSync(dir));
+      const dirMessages = [];
       for (const file of files) {
         if (!file.endsWith('.json') || file.startsWith('.tmp_')) continue;
         const filePath = path.join(dir, file);
         try {
-          const content = retryNtfsOperationSync(() => fs.readFileSync(filePath, 'utf8'));
-          const parsed = JSON.parse(content);
-          if (parsed && parsed.id && !seenIds.has(parsed.id)) {
-            seenIds.add(parsed.id);
-            messages.push(parsed);
+          const fileStat = fs.statSync(filePath);
+          const cachedFile = agFileCache.get(filePath);
+          let parsed;
+          if (cachedFile && cachedFile.mtimeMs === fileStat.mtimeMs) {
+            parsed = cachedFile.message;
+          } else {
+            const content = retryNtfsOperationSync(() => fs.readFileSync(filePath, 'utf8'));
+            parsed = JSON.parse(content);
+            if (agFileCache.size > 2000) {
+              const oldest = agFileCache.keys().next().value;
+              agFileCache.delete(oldest);
+            }
+            agFileCache.set(filePath, { mtimeMs: fileStat.mtimeMs, message: parsed });
+          }
+          if (parsed && parsed.id) {
+            dirMessages.push(parsed);
+            if (!seenIds.has(parsed.id)) {
+              seenIds.add(parsed.id);
+              messages.push(parsed);
+            }
           }
         } catch {}
       }
+      agInboxDirCache.set(dir, { mtimeMs: dirStat.mtimeMs, messages: dirMessages });
     } catch {}
   }
 
