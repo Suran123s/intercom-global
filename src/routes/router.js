@@ -263,6 +263,13 @@ async function handleSpawnAgent(req, res, ctx) {
   }
 }
 
+// 15. Prometheus Metrics Exporter
+async function handleGetMetrics(req, res, ctx) {
+  const { metrics } = require('../core/metrics');
+  res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+  res.end(metrics.formatPrometheus());
+}
+
 /**
  * Route Definitions Table
  */
@@ -356,6 +363,11 @@ const routes = [
     method: 'POST',
     match: pathname => pathname === '/api/intercom/spawn',
     handler: handleSpawnAgent
+  },
+  {
+    method: 'GET',
+    match: pathname => pathname === '/metrics' || pathname === '/api/intercom/metrics',
+    handler: handleGetMetrics
   }
 ];
 

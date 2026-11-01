@@ -136,6 +136,9 @@ USAGE:
       verify-action <agent> <action>
                                 Verifies action against Zero-Kill Protocol (INVIOLABLE)
 
+  intercom metrics [--json]
+    Displays real-time Prometheus exposition metrics (throughput, latency, active mailboxes, DLQ, locks).
+
   intercom doctor
     Executes comprehensive health, permissions, and network diagnostics.
 
@@ -519,6 +522,16 @@ async function run(rawArgv = process.argv.slice(2)) {
           }
         }
         console.log('');
+        break;
+      }
+
+      case 'metrics': {
+        const { metrics } = require('./core/metrics');
+        if (flags.json) {
+          console.log(JSON.stringify(metrics.gatherFilesystemGauges(), null, 2));
+        } else {
+          console.log(metrics.formatPrometheus());
+        }
         break;
       }
 
