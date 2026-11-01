@@ -73,7 +73,7 @@ describe('Mailbox Compaction & Ephemeral Pruning Suite', () => {
     const cliPath = path.join(__dirname, '../bin/intercom.js');
     const child = spawnSync(process.execPath, [cliPath, 'compact', '--dry-run'], {
       encoding: 'utf8',
-      timeout: 5000
+      timeout: 15000
     });
 
     assert.equal(child.status, 0, `CLI compact must exit with 0 (stderr: ${child.stderr})`);

@@ -78,15 +78,22 @@ describe('Milestone 4 — #94: Prometheus Metrics Exporter Suite', () => {
   });
 
   test('Gauge Tracking: setGauge updates live gauges for active mailboxes and DLQ size', () => {
-    registry.setGauge('intercom_mailboxes_total', {}, 8);
-    registry.setGauge('intercom_dlq_messages_total', {}, 0);
-    registry.setGauge('intercom_active_locks_total', {}, 1);
+    // Populate mock disk items to verify live gauge calculation
+    for (let i = 0; i < 8; i++) {
+      fs.mkdirSync(path.join(tempMeshDir, 'inbox', `test-agent-${i}`), { recursive: true });
+    }
+    fs.mkdirSync(path.join(tempMeshDir, 'locks', 'test.lock'), { recursive: true });
 
     const output = registry.render();
 
     assert.ok(output.includes('intercom_mailboxes_total 8'));
     assert.ok(output.includes('intercom_dlq_messages_total 0'));
     assert.ok(output.includes('intercom_active_locks_total 1'));
+
+    // Dynamically create a 9th mailbox and verify live gauge reflects it on next render
+    fs.mkdirSync(path.join(tempMeshDir, 'inbox', 'test-agent-extra'), { recursive: true });
+    const output2 = registry.render();
+    assert.ok(output2.includes('intercom_mailboxes_total 9'), 'Live gauge must dynamically reflect disk state');
   });
 
   test('Content-Type Header Validation: Conforms to Prometheus exposition content-type standard', () => {

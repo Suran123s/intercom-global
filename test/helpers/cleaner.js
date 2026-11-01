@@ -11,6 +11,9 @@ const path = require('path');
 const os = require('os');
 const { MESH_DIR } = require('../../src/config');
 
+const EPHEMERAL_PREFIX_REGEX = /^(test|worker|stress|a2a|wake|ephem|fuzz|dry-agent|tmp_|agent[-_]|alpha_|architect_|beta_|coordinator_|reviewer_|challenger_|auditor_|batch[-_]|brand[-_]|cli[-_]|ended[-_]|epipe[-_]|live[-_]|task[-_]|sess[-_]|subworker[-_]|slow[-_]|executor[-_]|explorer[-_]?|crash[-_]|unit[-_]|recursion[-_]|burst[-_]|chrono[-_]|adv[-_]|sse[-_]|resilience[-_]|interrupt[-_]|mtime[-_]|locked[-_]|fallback[-_]|orchestrator[-_]|peer[-_]|merge[-_]|fast-path[-_]?|inbox[-_]|operator|boss[-_]|general|mimo[-_]|external_daemon[-_]?|reviewer$|opencode-coordinator$|[ab]$)/i;
+const PERMANENT_AGENTS = new Set(['suran', 'aditya', 'akash', 'keshav', 'madhav', 'pal', 'satyam', 'antigravity', 'opencode', 'claude']);
+
 /**
  * Removes all files in a directory recursively without throwing if missing.
  * @param {string} targetDir
@@ -54,11 +57,11 @@ function cleanAgentMailbox(agentName, baseMeshDir = MESH_DIR) {
 
 /**
  * Scans and cleans all mailboxes matching ephemeral test prefixes (e.g. 'test-', 'ephem-').
- * @param {RegExp} [pattern=/^(test|ephem|temp|stress|fuzz)-/i]
+ * @param {RegExp} [pattern=EPHEMERAL_PREFIX_REGEX]
  * @param {string} [baseMeshDir]
  * @returns {number} count of pruned test mailboxes
  */
-function cleanEphemeralMailboxes(pattern = /^(test|ephem|temp|stress|fuzz)-/i, baseMeshDir = MESH_DIR) {
+function cleanEphemeralMailboxes(pattern = EPHEMERAL_PREFIX_REGEX, baseMeshDir = MESH_DIR) {
   const inboxBase = path.join(baseMeshDir, 'inbox');
   if (!fs.existsSync(inboxBase)) return 0;
 
@@ -66,7 +69,7 @@ function cleanEphemeralMailboxes(pattern = /^(test|ephem|temp|stress|fuzz)-/i, b
   try {
     const entries = fs.readdirSync(inboxBase, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.isDirectory() && pattern.test(entry.name)) {
+      if (entry.isDirectory() && pattern.test(entry.name) && !PERMANENT_AGENTS.has(entry.name.toLowerCase())) {
         safeRmDir(path.join(inboxBase, entry.name));
         pruned++;
       }
@@ -127,9 +130,6 @@ function cleanTestHeartbeats(pattern = /^(test|ephem|temp|stress)-/i, baseMeshDi
   } catch {}
   return removed;
 }
-
-const EPHEMERAL_PREFIX_REGEX = /^(test|worker|stress|a2a|wake|ephem|fuzz|dry-agent|tmp_|agent[-_]|alpha_|architect_|beta_|coordinator_|reviewer_|challenger_|auditor_|batch[-_]|brand[-_])/i;
-const PERMANENT_AGENTS = new Set(['suran', 'aditya', 'akash', 'keshav', 'madhav', 'pal', 'satyam', 'antigravity', 'opencode', 'claude']);
 
 /**
  * Sweeps and cleans all test artifacts across inbox, legacy files, locks, and heartbeats.

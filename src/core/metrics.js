@@ -180,25 +180,14 @@ class MetricsRegistry {
   }
 
   /**
-   * Syncs live gauges with disk state if no manual values were set.
+   * Syncs live gauges with disk state dynamically on every scrape/render call.
    */
   syncLiveGauges(meshDir = this.baseMeshDir) {
     const fsGauges = this.gatherFilesystemGauges(meshDir);
 
-    const hasMbox = Array.from(this.gauges.values()).some(g => g.name === 'intercom_mailboxes_total');
-    if (!hasMbox) {
-      this.setGauge('intercom_mailboxes_total', {}, fsGauges.activeMailboxes);
-    }
-
-    const hasDlq = Array.from(this.gauges.values()).some(g => g.name === 'intercom_dlq_messages_total');
-    if (!hasDlq) {
-      this.setGauge('intercom_dlq_messages_total', {}, fsGauges.dlqCount);
-    }
-
-    const hasLocks = Array.from(this.gauges.values()).some(g => g.name === 'intercom_active_locks_total');
-    if (!hasLocks) {
-      this.setGauge('intercom_active_locks_total', {}, fsGauges.activeLocks);
-    }
+    this.setGauge('intercom_mailboxes_total', {}, fsGauges.activeMailboxes);
+    this.setGauge('intercom_dlq_messages_total', {}, fsGauges.dlqCount);
+    this.setGauge('intercom_active_locks_total', {}, fsGauges.activeLocks);
 
     return fsGauges;
   }
