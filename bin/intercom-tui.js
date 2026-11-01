@@ -66,7 +66,15 @@ function setStatus(msg) {
 async function renderAgents() {
   const peers = await listActiveMailboxes();
   agentList = peers.map(p => p.name);
-  if (peers.length === 0) { agentBox.setContent("{gray-fg}No mailboxes yet{/gray-fg}"); screen.render(); return; }
+  if (peers.length === 0) {
+    agentIdx = 0;
+    agentBox.setContent("{gray-fg}No mailboxes yet{/gray-fg}");
+    screen.render();
+    return;
+  }
+  if (agentIdx >= agentList.length) {
+    agentIdx = Math.max(0, agentList.length - 1);
+  }
   const lines = peers.map(p => {
     const sel = p.name === selectedAgent;
     const unreadMark = p.unread > 0 ? `{red-fg} [${p.unread} new]{/red-fg}` : "";
@@ -151,6 +159,7 @@ async function renderAll() {
 }
 
 async function selectAgent(name) {
+  if (!name || typeof name !== 'string') return;
   selectedAgent = name;
   log("Selected: " + name.toUpperCase());
   await renderAgents();
@@ -163,9 +172,21 @@ screen.key(["q", "C-c"], () => { screen.destroy(); process.exit(0); });
 screen.key(["r", "f5"], async () => { log("Manual refresh"); await renderAll(); renderHealth(); setStatus("Refreshed " + new Date().toLocaleTimeString()); });
 screen.key("tab", () => { focusIndex = (focusIndex + 1) % panels.length; panels[focusIndex].focus(); screen.render(); });
 
-agentBox.key("up", () => { if (agentList.length === 0) return; agentIdx = Math.max(0, agentIdx - 1); selectAgent(agentList[agentIdx]); });
-agentBox.key("down", () => { if (agentList.length === 0) return; agentIdx = Math.min(agentList.length - 1, agentIdx + 1); selectAgent(agentList[agentIdx]); });
-agentBox.key("enter", () => { if (agentList[agentIdx]) selectAgent(agentList[agentIdx]); });
+agentBox.key("up", () => {
+  if (agentList.length === 0) return;
+  agentIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx - 1));
+  if (agentList[agentIdx]) selectAgent(agentList[agentIdx]);
+});
+agentBox.key("down", () => {
+  if (agentList.length === 0) return;
+  agentIdx = Math.min(agentList.length - 1, Math.max(0, agentIdx + 1));
+  if (agentList[agentIdx]) selectAgent(agentList[agentIdx]);
+});
+agentBox.key("enter", () => {
+  if (agentList.length === 0) return;
+  agentIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx));
+  if (agentList[agentIdx]) selectAgent(agentList[agentIdx]);
+});
 
 screen.key("c", async () => {
   if (!selectedAgent) { setStatus("Select an agent first"); return; }

@@ -383,10 +383,205 @@ function readAntigravityInboxSync(options = {}) {
   return messages;
 }
 
+/**
+ * Automatically synchronizes message envelopes between Antigravity's dual mailboxes
+ * (global user inbox and local workspace inbox), ensuring bidirectional zero-loss parity.
+ * 
+ * @param {object} [options]
+ * @returns {Promise<{
+ *   syncedCount: number,
+ *   copiedToWorkspace: number,
+ *   copiedToGlobal: number,
+ *   files: string[]
+ * }>}
+ */
+async function syncDualMailboxes(options = {}) {
+  const dirs = getDualMailboxDirs();
+  const report = {
+    syncedCount: 0,
+    copiedToWorkspace: 0,
+    copiedToGlobal: 0,
+    files: []
+  };
+
+  if (dirs.length < 2) {
+    return report;
+  }
+
+  const [globalDir, workspaceDir] = dirs;
+
+  // Ensure directories exist
+  if (!fs.existsSync(globalDir)) {
+    try { await fs.promises.mkdir(globalDir, { recursive: true }); } catch {}
+  }
+  if (!fs.existsSync(workspaceDir)) {
+    try { await fs.promises.mkdir(workspaceDir, { recursive: true }); } catch {}
+  }
+
+  // Read files from both directories
+  let globalFiles = [];
+  let workspaceFiles = [];
+
+  try {
+    const gList = await fs.promises.readdir(globalDir);
+    globalFiles = gList.filter(f => /^\d+_[a-zA-Z0-9\-]+\.json$/.test(f));
+  } catch {}
+
+  try {
+    const wList = await fs.promises.readdir(workspaceDir);
+    workspaceFiles = wList.filter(f => /^\d+_[a-zA-Z0-9\-]+\.json$/.test(f));
+  } catch {}
+
+  const gSet = new Set(globalFiles);
+  const wSet = new Set(workspaceFiles);
+
+  // 1. Copy files in globalDir missing from workspaceDir
+  for (const f of globalFiles) {
+    if (!wSet.has(f)) {
+      const src = path.join(globalDir, f);
+      const dst = path.join(workspaceDir, f);
+      const tmp = path.join(workspaceDir, `.tmp_sync_${Date.now()}_${f}`);
+      try {
+        const content = await fs.promises.readFile(src, 'utf8');
+        await retryNtfsOperation(async () => {
+          await fs.promises.writeFile(tmp, content, 'utf8');
+        });
+        await retryNtfsOperation(async () => {
+          await fs.promises.rename(tmp, dst);
+        });
+        report.copiedToWorkspace++;
+        report.syncedCount++;
+        report.files.push(f);
+      } catch {}
+    }
+  }
+
+  // 2. Copy files in workspaceDir missing from globalDir
+  for (const f of workspaceFiles) {
+    if (!gSet.has(f)) {
+      const src = path.join(workspaceDir, f);
+      const dst = path.join(globalDir, f);
+      const tmp = path.join(globalDir, `.tmp_sync_${Date.now()}_${f}`);
+      try {
+        const content = await fs.promises.readFile(src, 'utf8');
+        await retryNtfsOperation(async () => {
+          await fs.promises.writeFile(tmp, content, 'utf8');
+        });
+        await retryNtfsOperation(async () => {
+          await fs.promises.rename(tmp, dst);
+        });
+        report.copiedToGlobal++;
+        report.syncedCount++;
+        report.files.push(f);
+      } catch {}
+    }
+  }
+
+  // Invalidate cache if any files synced
+  if (report.syncedCount > 0) {
+    agInboxDirCache.clear();
+  }
+
+  return report;
+}
+
+/**
+ * Synchronous variant of dual-mailbox synchronization
+ */
+function syncDualMailboxesSync(options = {}) {
+  const dirs = getDualMailboxDirs();
+  const report = {
+    syncedCount: 0,
+    copiedToWorkspace: 0,
+    copiedToGlobal: 0,
+    files: []
+  };
+
+  if (dirs.length < 2) return report;
+  const [globalDir, workspaceDir] = dirs;
+
+  if (!fs.existsSync(globalDir)) {
+    try { fs.mkdirSync(globalDir, { recursive: true }); } catch {}
+  }
+  if (!fs.existsSync(workspaceDir)) {
+    try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch {}
+  }
+
+  let globalFiles = [];
+  let workspaceFiles = [];
+
+  try {
+    globalFiles = fs.readdirSync(globalDir).filter(f => /^\d+_[a-zA-Z0-9\-]+\.json$/.test(f));
+  } catch {}
+  try {
+    workspaceFiles = fs.readdirSync(workspaceDir).filter(f => /^\d+_[a-zA-Z0-9\-]+\.json$/.test(f));
+  } catch {}
+
+  const gSet = new Set(globalFiles);
+  const wSet = new Set(workspaceFiles);
+
+  for (const f of globalFiles) {
+    if (!wSet.has(f)) {
+      const src = path.join(globalDir, f);
+      const dst = path.join(workspaceDir, f);
+      const tmp = path.join(workspaceDir, `.tmp_sync_${Date.now()}_${f}`);
+      try {
+        const content = fs.readFileSync(src, 'utf8');
+        retryNtfsOperationSync(() => fs.writeFileSync(tmp, content, 'utf8'));
+        retryNtfsOperationSync(() => fs.renameSync(tmp, dst));
+        report.copiedToWorkspace++;
+        report.syncedCount++;
+        report.files.push(f);
+      } catch {}
+    }
+  }
+
+  for (const f of workspaceFiles) {
+    if (!gSet.has(f)) {
+      const src = path.join(workspaceDir, f);
+      const dst = path.join(globalDir, f);
+      const tmp = path.join(globalDir, `.tmp_sync_${Date.now()}_${f}`);
+      try {
+        const content = fs.readFileSync(src, 'utf8');
+        retryNtfsOperationSync(() => fs.writeFileSync(tmp, content, 'utf8'));
+        retryNtfsOperationSync(() => fs.renameSync(tmp, dst));
+        report.copiedToGlobal++;
+        report.syncedCount++;
+        report.files.push(f);
+      } catch {}
+    }
+  }
+
+  if (report.syncedCount > 0) {
+    agInboxDirCache.clear();
+  }
+
+  return report;
+}
+
+/**
+ * Starts a background periodic auto-sync daemon
+ * @param {number} [intervalMs=5000] 
+ * @returns {{ stop: Function }}
+ */
+function startAutoSyncDaemon(intervalMs = 5000) {
+  const timer = setInterval(() => {
+    syncDualMailboxes().catch(() => {});
+  }, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+
+  return {
+    stop: () => clearInterval(timer)
+  };
+}
+
 module.exports = {
   getAntigravityConfig,
   getDualMailboxDirs,
   routeMessageToAntigravity,
   readAntigravityInboxSync,
+  syncDualMailboxes,
+  syncDualMailboxesSync,
+  startAutoSyncDaemon,
   ANTIGRAVITY_DEFAULT_URL
 };

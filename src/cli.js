@@ -99,6 +99,18 @@ USAGE:
       --no-empty                Do not remove empty mailbox directories
       --temp-ttl <ms>           Age threshold for temp file pruning (default: 60000ms)
 
+  intercom dlq <list|show|clear> [options]
+    Manages Dead Letter Queue for failed deliveries:
+      list [--json] [--limit <n>]  Lists failed messages in DLQ
+      show <id> [--json]           Displays failure diagnostics for specific message
+      clear                        Purges all dead-letter messages
+
+  intercom channel <send|list|read> [options]
+    Publishes and inspects broadcast channels:
+      send <#channel> <message> [--from <sender>]
+      list [--json]
+      read <#channel> [--limit <n>] [--json]
+
   intercom peers
     Lists all connected Fast-Path peers and registered agents.
 
@@ -704,6 +716,174 @@ async function run(rawArgv = process.argv.slice(2)) {
         }
 
         console.error(`Unknown governance command: "${sub}". Use check or verify-action.`);
+        process.exitCode = 1;
+        break;
+      }
+
+      case 'dlq': {
+        const sub = _[1] || 'list';
+        const { getDlq, getDlqMessage, clearDlq } = require('./core/dlq');
+
+        if (sub === 'list') {
+          const items = getDlq();
+          const limit = flags.limit ? parseInt(flags.limit, 10) : (flags.n ? parseInt(flags.n, 10) : null);
+          const displayItems = limit ? items.slice(0, limit) : items;
+
+          if (flags.json) {
+            console.log(JSON.stringify(displayItems, null, 2));
+            break;
+          }
+
+          console.log('\n================================================================================');
+          console.log('                        DEAD LETTER QUEUE (DLQ) DIAGNOSTICS                     ');
+          console.log('================================================================================');
+          console.log(`Total Failed Messages: ${items.length}\n`);
+
+          if (items.length === 0) {
+            console.log('  ✨ DLQ is clean (0 failed messages).\n');
+            break;
+          }
+
+          for (const item of displayItems) {
+            const ts = item.enqueuedAt ? new Date(item.enqueuedAt).toLocaleString() : 'N/A';
+            const to = (item.to || item.recipient || 'unknown').toUpperCase();
+            const from = (item.from || item.sender || 'unknown').toUpperCase();
+            console.log(`  • [${item.id}] ${from} ──► ${to} (Retries: ${item.retries || 0})`);
+            console.log(`    Enqueued : ${ts}`);
+            console.log(`    Reason   : ${item.failureReason || 'Unknown error'}`);
+            const msgPreview = (item.message || (item.payload && item.payload.message) || '').slice(0, 60);
+            if (msgPreview) console.log(`    Snippet  : "${msgPreview}..."`);
+            console.log('');
+          }
+
+          if (limit && items.length > limit) {
+            console.log(`  (...showing ${limit} of ${items.length} items. Use --limit to show more)`);
+          }
+          break;
+        }
+
+        if (sub === 'show') {
+          const id = _[2] || flags.id;
+          if (!id) {
+            console.error('Error: Message ID required. Usage: intercom dlq show <id>');
+            process.exitCode = 1;
+            break;
+          }
+
+          const item = getDlqMessage(id);
+          if (!item) {
+            console.error(`Error: Message "${id}" not found in Dead Letter Queue.`);
+            process.exitCode = 1;
+            break;
+          }
+
+          if (flags.json) {
+            console.log(JSON.stringify(item, null, 2));
+            break;
+          }
+
+          console.log('\n=== DEAD LETTER QUEUE MESSAGE DETAILS ===');
+          console.log(`  ID            : ${item.id}`);
+          console.log(`  Recipient     : ${item.to || item.recipient || 'unknown'}`);
+          console.log(`  Sender        : ${item.from || item.sender || 'unknown'}`);
+          console.log(`  Enqueued At   : ${item.enqueuedAt || 'unknown'}`);
+          console.log(`  Retries       : ${item.retries || 0}`);
+          console.log(`  Failure Reason: ${item.failureReason || 'unknown'}`);
+          const payloadStr = typeof item.payload === 'object' ? JSON.stringify(item.payload, null, 2) : (item.message || '');
+          console.log(`  Payload       :\n${payloadStr}\n`);
+          break;
+        }
+
+        if (sub === 'clear') {
+          const countBefore = getDlq().length;
+          clearDlq();
+          console.log(`\n✨ Dead Letter Queue cleared. ${countBefore} messages removed.\n`);
+          break;
+        }
+
+        console.error(`Unknown dlq subcommand: "${sub}". Use "list", "show", or "clear".`);
+        process.exitCode = 1;
+        break;
+      }
+
+      case 'channel': {
+        const sub = _[1] || 'list';
+        const { sendChannelMessage, readChannel, listChannels } = require('./core/mesh');
+
+        if (sub === 'send') {
+          const chanArg = _[2] || flags.channel;
+          const msgArg = _[3] || flags.msg || flags.message;
+          const fromArg = flags.from || flags.sender || 'operator';
+
+          if (!chanArg || !msgArg) {
+            console.error('Error: Channel and message required. Usage: intercom channel send <#channel> <message> [--from <sender>]');
+            process.exitCode = 1;
+            break;
+          }
+
+          const res = sendChannelMessage(chanArg, fromArg, msgArg);
+          if (flags.json) {
+            console.log(JSON.stringify(res, null, 2));
+          } else {
+            console.log(`[CHANNEL PUBLISHED] ID: ${res.id} | Channel: ${res.channel} | From: ${res.from}`);
+          }
+          break;
+        }
+
+        if (sub === 'list') {
+          const channels = listChannels();
+          if (flags.json) {
+            console.log(JSON.stringify(channels, null, 2));
+            break;
+          }
+
+          console.log('\n================================================================================');
+          console.log('                          ACTIVE MESH CHANNELS                                  ');
+          console.log('================================================================================');
+          if (channels.length === 0) {
+            console.log('  (No active channels found. Use "intercom channel send <#name> <msg>" to create one)\n');
+            break;
+          }
+
+          for (const c of channels) {
+            console.log(`  • ${c.name.padEnd(20)} (${c.total} messages)`);
+          }
+          console.log('');
+          break;
+        }
+
+        if (sub === 'read') {
+          const chanArg = _[2] || flags.channel;
+          if (!chanArg) {
+            console.error('Error: Channel required. Usage: intercom channel read <#channel>');
+            process.exitCode = 1;
+            break;
+          }
+
+          const msgs = readChannel(chanArg);
+          const limit = flags.limit ? parseInt(flags.limit, 10) : null;
+          const displayMsgs = limit ? msgs.slice(-limit) : msgs;
+
+          if (flags.json) {
+            console.log(JSON.stringify(displayMsgs, null, 2));
+            break;
+          }
+
+          console.log(`\n=== CHANNEL ${chanArg.toUpperCase()} (${msgs.length} messages) ===`);
+          if (displayMsgs.length === 0) {
+            console.log('  (Empty channel)\n');
+            break;
+          }
+
+          for (const m of displayMsgs) {
+            const ts = m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : '';
+            console.log(`  [${ts}] ${(m.from || 'unknown').toUpperCase()}: ${m.message}`);
+          }
+          console.log('');
+          break;
+        }
+
+        console.error(`Unknown channel subcommand: "${sub}". Use "send", "list", or "read".`);
         process.exitCode = 1;
         break;
       }
