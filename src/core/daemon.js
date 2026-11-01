@@ -108,7 +108,7 @@ class IntercomDaemon {
 
     try {
       // 1. Health check
-      if (pathname === '/api/intercom/health' && method === 'GET') {
+      if ((pathname === '/api/intercom/health' || pathname === '/health') && method === 'GET') {
         const health = {
           status: 'ONLINE',
           pid: process.pid,

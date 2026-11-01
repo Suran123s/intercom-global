@@ -27,7 +27,7 @@ function startDaemon(port = 4150) {
     return { status: 'already_running', pid: existingPid, port };
   }
 
-  const child = spawn(process.execPath, [BIN_FILE, 'server', '--port', String(port)], {
+  const child = spawn(process.execPath, [BIN_FILE, '__daemon_run', `--port=${port}`], {
     detached: true,
     stdio: 'ignore'
   });

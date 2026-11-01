@@ -7,6 +7,7 @@ const { PORT, MESH_DIR } = require('./config');
 const { MessageEnvelope } = require('./core/message');
 const {
   writeMessage,
+  compactMailboxes,
   readInbox,
   ackMessage,
   clearInbox,
@@ -91,6 +92,12 @@ USAGE:
 
   intercom ack <agent> <messageId> [--unlink]
     Acknowledges message in agent's inbox, moving it to archive or unlinking.
+
+  intercom compact [agent] [options]
+    Prunes empty ephemeral mailboxes and orphaned temp files in mesh/inbox:
+      --dry-run                 Simulates compaction without deleting files
+      --no-empty                Do not remove empty mailbox directories
+      --temp-ttl <ms>           Age threshold for temp file pruning (default: 60000ms)
 
   intercom peers
     Lists all connected Fast-Path peers and registered agents.
@@ -342,6 +349,47 @@ async function run(rawArgv = process.argv.slice(2)) {
           console.error(`Unknown daemon command: ${sub}. Use start, stop, or status.`);
           process.exitCode = 1;
         }
+        break;
+      }
+
+      // Backward compatibility alias for server -> daemon runner
+      case 'server': {
+        const port = flags.port ? parseInt(flags.port, 10) : (PORT || 4150);
+        const daemon = new IntercomDaemon({ port });
+        await daemon.start();
+        await new Promise((resolve) => {
+          const shutdown = async () => {
+            await daemon.stop();
+            resolve();
+          };
+          process.on('SIGTERM', shutdown);
+          process.on('SIGINT', shutdown);
+        });
+        break;
+      }
+
+      case 'compact': {
+        const agent = _[1] || flags.agent;
+        const isDryRun = flags['dry-run'] || flags.dryRun === true;
+        const pruneEmpty = flags['no-empty'] ? false : true;
+        const tempTtlMs = flags['temp-ttl'] ? parseInt(flags['temp-ttl'], 10) : 60000;
+
+        console.log(`[INTERCOM COMPACT] Starting mailbox compaction${isDryRun ? ' [DRY RUN]' : ''}...`);
+        const report = await compactMailboxes({
+          dryRun: isDryRun,
+          pruneEmpty,
+          tempTtlMs,
+          targetMailbox: agent
+        });
+
+        console.log(`  Mailboxes Examined     : ${report.examined}`);
+        console.log(`  Empty Mailboxes Pruned : ${report.prunedDirs}${report.prunedEmptyMailboxes.length > 0 ? ` (${report.prunedEmptyMailboxes.join(', ')})` : ''}`);
+        console.log(`  Orphaned Temp Files    : ${report.prunedTempFiles}`);
+        console.log(`  Space Reclaimed        : ${(report.reclaimedBytes / 1024).toFixed(2)} KB`);
+        if (report.skippedLocked.length > 0) {
+          console.log(`  Skipped (Locked)       : ${report.skippedLocked.join(', ')}`);
+        }
+        console.log(`[INTERCOM SUCCESS] Compaction complete.\n`);
         break;
       }
 

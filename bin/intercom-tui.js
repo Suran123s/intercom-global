@@ -63,8 +63,8 @@ function setStatus(msg) {
 }
 
 // Renderers
-function renderAgents() {
-  const peers = listActiveMailboxes();
+async function renderAgents() {
+  const peers = await listActiveMailboxes();
   agentList = peers.map(p => p.name);
   if (peers.length === 0) { agentBox.setContent("{gray-fg}No mailboxes yet{/gray-fg}"); screen.render(); return; }
   const lines = peers.map(p => {
@@ -143,35 +143,35 @@ function renderDLQ() {
   screen.render();
 }
 
-function renderAll() {
-  renderAgents();
+async function renderAll() {
+  await renderAgents();
   renderMessages();
   renderChannels();
   renderDLQ();
 }
 
-function selectAgent(name) {
+async function selectAgent(name) {
   selectedAgent = name;
   log("Selected: " + name.toUpperCase());
-  renderAgents();
+  await renderAgents();
   renderMessages();
   renderDLQ();
 }
 
 // Keyboard
 screen.key(["q", "C-c"], () => { screen.destroy(); process.exit(0); });
-screen.key(["r", "f5"], () => { log("Manual refresh"); renderAll(); renderHealth(); setStatus("Refreshed " + new Date().toLocaleTimeString()); });
+screen.key(["r", "f5"], async () => { log("Manual refresh"); await renderAll(); renderHealth(); setStatus("Refreshed " + new Date().toLocaleTimeString()); });
 screen.key("tab", () => { focusIndex = (focusIndex + 1) % panels.length; panels[focusIndex].focus(); screen.render(); });
 
 agentBox.key("up", () => { if (agentList.length === 0) return; agentIdx = Math.max(0, agentIdx - 1); selectAgent(agentList[agentIdx]); });
 agentBox.key("down", () => { if (agentList.length === 0) return; agentIdx = Math.min(agentList.length - 1, agentIdx + 1); selectAgent(agentList[agentIdx]); });
 agentBox.key("enter", () => { if (agentList[agentIdx]) selectAgent(agentList[agentIdx]); });
 
-screen.key("c", () => {
+screen.key("c", async () => {
   if (!selectedAgent) { setStatus("Select an agent first"); return; }
   clearInbox(selectedAgent);
   log("Cleared " + selectedAgent.toUpperCase());
-  renderMessages(); renderAgents();
+  renderMessages(); await renderAgents();
   setStatus("Cleared " + selectedAgent.toUpperCase() + " inbox");
 });
 
@@ -196,7 +196,7 @@ screen.key("s", () => {
     if (msg) {
       dispatchMessage(from, to, msg);
       log("Sent -> " + to.toUpperCase() + ": " + msg.slice(0, 40));
-      renderAll();
+      renderAll().catch(() => {});
       setStatus("Sent to " + to.toUpperCase());
     }
     form.destroy(); screen.render();
@@ -213,22 +213,25 @@ try {
   watcher.on("change", filePath => {
     const agent = path.basename(filePath, ".json").toLowerCase();
     log("Changed: " + agent);
-    renderAgents();
+    renderAgents().catch(() => {});
     if (selectedAgent && agent === selectedAgent.toLowerCase()) renderMessages();
     renderChannels(); renderDLQ();
   });
-  watcher.on("add", () => { renderAgents(); renderChannels(); });
+  watcher.on("add", () => { renderAgents().catch(() => {}); renderChannels(); });
 } catch(e) {}
 
 // Initial render
-renderAll();
-renderHealth();
-if (agentList.length > 0) selectAgent(agentList[0]);
-setStatus("Ready — [s] Send  [c] Clear  [r] Refresh  [Tab] Focus  [q] Quit");
+(async () => {
+  await renderAll();
+  renderHealth();
+  if (agentList.length > 0) await selectAgent(agentList[0]);
+  setStatus("Ready — [s] Send  [c] Clear  [r] Refresh  [Tab] Focus  [q] Quit");
+  screen.render();
+})();
 
 // Periodic refresh
 setInterval(() => { renderHealth(); renderDLQ(); }, 15000);
-setInterval(() => { renderAgents(); if (selectedAgent) renderMessages(); renderChannels(); }, 3000);
+setInterval(async () => { await renderAgents(); if (selectedAgent) renderMessages(); renderChannels(); }, 3000);
 
 agentBox.focus();
 screen.render();

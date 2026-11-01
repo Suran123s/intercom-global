@@ -269,6 +269,11 @@ async function handleSpawnAgent(req, res, ctx) {
 const routes = [
   {
     method: 'GET',
+    match: pathname => pathname === '/health' || pathname === '/api/intercom/health',
+    handler: (req, res) => sendJson(res, 200, { status: 'ONLINE', timestamp: new Date().toISOString() })
+  },
+  {
+    method: 'GET',
     match: pathname => pathname === '/.well-known/agent.json' || pathname === '/a2a/agent-card' || pathname === '/a2a/v1/agent-card',
     handler: handleA2AAgentCard
   },

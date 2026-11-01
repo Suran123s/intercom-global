@@ -5,7 +5,7 @@ const fsPromises = fs.promises;
 const path = require('path');
 const readline = require('readline');
 const { MESH_DIR } = require('../config');
-const { getInboxFile, readInbox, writeInbox } = require('../core/mesh');
+const { getInboxFile, readInbox, writeInbox, ackMessage } = require('../core/mesh');
 
 function sanitizeName(name, fallback = "default") {
   if (typeof name !== "string") return fallback;
@@ -62,6 +62,30 @@ function startSessionBridge(agentName = 'cli-agent', sessionId = 's-' + Math.ran
     isPolling = true;
 
     try {
+      // 0. Discrete Inbox Polling (Safe-Path Mesh)
+      for (const target of [fullAgentTag, safeAgent]) {
+        try {
+          const discreteMsgs = await readInbox(target);
+          for (const msg of discreteMsgs) {
+            if (msg.id && processedMessageIds.has(msg.id)) continue;
+            if (msg.id) processedMessageIds.add(msg.id);
+
+            const text = (msg.payload && msg.payload.message)
+              || msg.message
+              || (typeof msg.payload === 'string' ? msg.payload : (msg.payload && msg.payload.text ? msg.payload.text : JSON.stringify(msg.payload || '')));
+
+            const sender = msg.sender || msg.from || 'UNKNOWN';
+            console.log(`\n⚡ [INJECTING TASK FROM ${sender.toUpperCase()}] ──► ${fullAgentTag}`);
+            child.stdin.write(text + '\n');
+
+            // Acknowledge discrete message so it moves to archive
+            try {
+              await ackMessage(target, msg.id, { unlink: false });
+            } catch {}
+          }
+        } catch {}
+      }
+
       // 1. Session specific
       const sessionMessages = await checkInbox(sessionInboxFile);
       sessionMessages.forEach(msg => {

@@ -103,15 +103,51 @@ class MessageEnvelope {
     this.id = data.id || crypto.randomUUID();
     this.timestamp = data.timestamp || new Date().toISOString();
     this.epochMs = Number.isInteger(data.epochMs) ? data.epochMs : (Date.parse(this.timestamp) || Date.now());
-    this.sender = data.sender || '';
-    this.recipient = data.recipient || '';
+    this.sender = data.sender || data.from || '';
+    this.recipient = data.recipient || data.to || '';
     this.type = data.type || 'task_dispatch';
     this.priority = data.priority || 'NORMAL';
-    this.payload = data.payload || {};
+    this.payload = (data.payload && typeof data.payload === 'object' && !Array.isArray(data.payload))
+      ? { ...data.payload }
+      : (data.payload && typeof data.payload === 'string')
+        ? { message: data.payload }
+        : (data.message !== undefined || data.body !== undefined)
+          ? { message: data.message !== undefined ? data.message : data.body }
+          : (data.payload || {});
 
+    if (data.read !== undefined) this.read = Boolean(data.read);
     if (data.correlationId) this.correlationId = String(data.correlationId);
     if (data.parentId) this.parentId = String(data.parentId);
     if (data.metadata) this.metadata = { ...data.metadata };
+  }
+
+  get from() { return this.sender; }
+  set from(val) { this.sender = val; }
+
+  get to() { return this.recipient; }
+  set to(val) { this.recipient = val; }
+
+  get message() {
+    return (this.payload && typeof this.payload.message === 'string')
+      ? this.payload.message
+      : (typeof this.payload === 'string' ? this.payload : (this.payload && typeof this.payload === 'object' && this.payload.text ? this.payload.text : ''));
+  }
+  set message(val) {
+    if (typeof this.payload === 'object' && this.payload !== null && !Array.isArray(this.payload)) {
+      this.payload.message = val;
+    } else {
+      this.payload = { message: val };
+    }
+  }
+
+  get body() { return this.message; }
+  set body(val) { this.message = val; }
+
+  get read() { return Boolean(this._read || (this.metadata && this.metadata.read)); }
+  set read(val) {
+    this._read = Boolean(val);
+    if (!this.metadata) this.metadata = {};
+    this.metadata.read = Boolean(val);
   }
 
   /**
@@ -165,7 +201,11 @@ class MessageEnvelope {
       recipient: this.recipient,
       type: this.type,
       priority: this.priority,
-      payload: this.payload
+      payload: this.payload,
+      from: this.sender,
+      to: this.recipient,
+      message: this.message,
+      read: this.read
     };
     if (this.correlationId) obj.correlationId = this.correlationId;
     if (this.parentId) obj.parentId = this.parentId;

@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const { PI_PIPE_NAME, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, getInboxFile, sanitizeName } = require('../core/mesh');
+const { readInbox, writeInbox, getInboxFile, sanitizeName, writeMessageSync } = require('../core/mesh');
+const { MessageEnvelope } = require('../core/message');
 const { writeFrame, tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
 
 function connectSocket(target, connectListener) {
@@ -85,22 +86,19 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
 
 function wakeCliAgent(targetName, message) {
   const cleanTarget = sanitizeName(targetName);
-  const inboxFile = getInboxFile(cleanTarget);
-  let inbox = readInbox(cleanTarget);
-  inbox.push({
-    id: Date.now(),
-    from: 'autowake',
-    to: cleanTarget,
-    message: message,
-    timestamp: new Date().toISOString(),
-    read: false
+  const envelope = MessageEnvelope.create({
+    sender: 'autowake',
+    recipient: cleanTarget,
+    type: 'task_dispatch',
+    payload: { message }
   });
-  writeInbox(cleanTarget, inbox);
+
+  const writeRes = writeMessageSync(cleanTarget, envelope);
   console.log(`⚡ [AUTOWAKE MAILBOX] Dispatched to durable session mailbox: "${cleanTarget.toUpperCase()}"`);
 
   // Audio beep completely removed
 
-  return { delivered: true, method: 'durable-mailbox', file: inboxFile, target: cleanTarget };
+  return { delivered: true, method: 'durable-mailbox', file: writeRes.path, target: cleanTarget };
 }
 
 function wakeOpenCodeAgent(targetName, message, callback) {

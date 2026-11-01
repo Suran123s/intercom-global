@@ -1,6 +1,7 @@
 // src/core/server.js - HTTP Intercom Daemon (Silent, No Audio, No Unsolicited Prompts)
 const http = require('http');
-const { readInbox, writeInbox } = require('./mesh');
+const { writeMessageSync, migrateLegacyMailboxSync } = require('./mesh');
+const { MessageEnvelope } = require('./message');
 const { handleRequest, sendError } = require('../routes/router');
 
 const AUTO_REPLY_ENABLED = process.argv.includes('--auto-reply') || process.env.INTERCOM_AUTO_REPLY === 'true';
@@ -23,12 +24,27 @@ function notifySystem(from, to, message) {
 }
 
 function dispatchMessage(from, to, message, isAutoReply = false) {
-  const timestamp = new Date().toISOString();
+  // Migrate any existing legacy monolithic mailbox
+  migrateLegacyMailboxSync(to);
 
-  const inbox = readInbox(to);
-  const msgObj = { id: Date.now(), from, to, message, timestamp, read: false };
-  inbox.push(msgObj);
-  writeInbox(to, inbox);
+  const envelope = MessageEnvelope.create({
+    sender: from,
+    recipient: to,
+    type: 'task_dispatch',
+    payload: { message }
+  });
+
+  writeMessageSync(to, envelope);
+
+  const msgObj = {
+    id: envelope.id,
+    from,
+    to,
+    message,
+    timestamp: envelope.timestamp,
+    read: false,
+    envelope: envelope.toJSON()
+  };
 
   // Broadcast to all live SSE consumers
   broadcastEvent('message', msgObj);

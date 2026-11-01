@@ -263,6 +263,232 @@ function clearMeshCache() {
 }
 
 /**
+ * Synchronous variant of discrete atomic message writing
+ * @param {string} recipient 
+ * @param {MessageEnvelope|object} envelopeData 
+ * @returns {{ messageId: string, path: string, envelope: MessageEnvelope }}
+ */
+function writeMessageSync(recipient, envelopeData) {
+  const cleanRecipient = validateAgentName(recipient);
+  const envelope = envelopeData instanceof MessageEnvelope
+    ? envelopeData
+    : (envelopeData && typeof envelopeData.toJSON === 'function'
+      ? envelopeData
+      : MessageEnvelope.create({ ...envelopeData, recipient: cleanRecipient }));
+
+  const inboxDir = getInboxDir(cleanRecipient);
+  const tmpFileName = `.tmp_${envelope.id}_${Date.now()}.tmp`;
+  const tmpFilePath = path.join(inboxDir, tmpFileName);
+  const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
+  const finalFilePath = path.join(inboxDir, finalFileName);
+
+  const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
+
+  retryNtfsOperationSync(() => {
+    fs.writeFileSync(tmpFilePath, serialized, 'utf8');
+  });
+
+  retryNtfsOperationSync(() => {
+    fs.renameSync(tmpFilePath, finalFilePath);
+  });
+
+  // Mirror to workspace inbox for Antigravity dual mailbox architecture
+  if (cleanRecipient.toLowerCase() === 'antigravity') {
+    try {
+      const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
+      if (workspaceInbox !== inboxDir) {
+        if (!fs.existsSync(workspaceInbox)) fs.mkdirSync(workspaceInbox, { recursive: true });
+        const wsTmp = path.join(workspaceInbox, tmpFileName);
+        const wsFinal = path.join(workspaceInbox, finalFileName);
+        retryNtfsOperationSync(() => {
+          fs.writeFileSync(wsTmp, serialized, 'utf8');
+        });
+        retryNtfsOperationSync(() => {
+          fs.renameSync(wsTmp, wsFinal);
+        });
+      }
+    } catch {}
+  }
+
+  inboxDirCache.delete(inboxDir);
+
+  return {
+    messageId: envelope.id,
+    path: finalFilePath,
+    envelope
+  };
+}
+
+/**
+ * Migrates a legacy monolithic mailbox file (mesh/<agent>.json) to discrete message files
+ * @param {string} agentName 
+ * @returns {number} count of migrated messages
+ */
+function migrateLegacyMailboxSync(agentName) {
+  const clean = sanitizeAgentName(agentName);
+  const legacyFile = getInboxFile(clean);
+  if (!fs.existsSync(legacyFile)) return 0;
+
+  let count = 0;
+  try {
+    const content = fs.readFileSync(legacyFile, 'utf8');
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      for (const item of parsed) {
+        const env = MessageEnvelope.create({
+          sender: item.from || 'legacy',
+          recipient: clean,
+          type: 'task_dispatch',
+          payload: { message: item.message || '' },
+          timestamp: item.timestamp || new Date().toISOString()
+        });
+        writeMessageSync(clean, env);
+        count++;
+      }
+    }
+    fs.unlinkSync(legacyFile);
+  } catch {}
+  return count;
+}
+
+/**
+ * Compacts and prunes empty/dead ephemeral mailboxes and orphaned temporary files in mesh/inbox/
+ * @param {object} options
+ * @param {boolean} [options.dryRun=false] - If true, calculates actions without modifying files
+ * @param {boolean} [options.pruneEmpty=true] - Remove empty mailbox directories
+ * @param {boolean} [options.removeEmpty] - Alias for pruneEmpty
+ * @param {boolean} [options.pruneTemp=true] - Remove orphaned .tmp files older than tempTtlMs
+ * @param {number} [options.tempTtlMs=60000] - Age threshold for orphaned .tmp files (default 60s)
+ * @param {string} [options.targetMailbox] - Specific mailbox to compact, or null for all
+ * @returns {Promise<{
+ *   examined: number,
+ *   prunedDirs: number,
+ *   prunedEmptyMailboxes: string[],
+ *   prunedTempFiles: number,
+ *   reclaimedBytes: number,
+ *   skippedLocked: string[],
+ *   dryRun: boolean
+ * }>}
+ */
+async function compactMailboxes(options = {}) {
+  const dryRun = options.dryRun === true;
+  const pruneEmpty = options.removeEmpty !== undefined ? Boolean(options.removeEmpty) : (options.pruneEmpty !== false);
+  const pruneTemp = options.pruneTemp !== false;
+  const tempTtlMs = options.tempTtlMs || 60000;
+  const targetMailbox = options.targetMailbox ? validateAgentName(options.targetMailbox) : null;
+
+  const inboxBase = path.join(MESH_DIR, 'inbox');
+  const locksDir = path.join(MESH_DIR, 'locks');
+  const report = {
+    examined: 0,
+    prunedDirs: 0,
+    prunedEmptyMailboxes: [],
+    prunedTempFiles: 0,
+    reclaimedBytes: 0,
+    skippedLocked: [],
+    dryRun
+  };
+
+  if (!fs.existsSync(inboxBase)) {
+    return report;
+  }
+
+  let dirEntries;
+  if (targetMailbox) {
+    const fullDir = path.join(inboxBase, targetMailbox);
+    try {
+      const s = await fs.promises.stat(fullDir);
+      dirEntries = s.isDirectory() ? [{ name: targetMailbox }] : [];
+    } catch {
+      dirEntries = [];
+    }
+  } else {
+    try {
+      const all = await fs.promises.readdir(inboxBase, { withFileTypes: true });
+      dirEntries = all.filter(d => d.isDirectory());
+    } catch {
+      dirEntries = [];
+    }
+  }
+
+  const now = Date.now();
+
+  for (const entry of dirEntries) {
+    const entryName = entry.name;
+    const fullDir = path.join(inboxBase, entryName);
+    report.examined++;
+
+    // Safety: Check if mailbox is currently CAS locked
+    const lockDir = path.join(locksDir, `${entryName}.lock`);
+    if (fs.existsSync(lockDir)) {
+      report.skippedLocked.push(entryName);
+      continue;
+    }
+
+    let files;
+    try {
+      files = await fs.promises.readdir(fullDir);
+    } catch {
+      continue;
+    }
+
+    let activeMessagesCount = 0;
+    let prunedTempInMailbox = 0;
+
+    for (const f of files) {
+      if (f.startsWith('.tmp') || f.endsWith('.tmp')) {
+        if (pruneTemp) {
+          const fullFilePath = path.join(fullDir, f);
+          try {
+            const fileStat = await fs.promises.stat(fullFilePath);
+            if (now - fileStat.mtimeMs > tempTtlMs) {
+              report.prunedTempFiles++;
+              prunedTempInMailbox++;
+              report.reclaimedBytes += fileStat.size;
+              if (!dryRun) {
+                await retryNtfsOperation(async () => {
+                  await fs.promises.unlink(fullFilePath);
+                });
+              }
+            }
+          } catch {}
+        }
+      } else if (/^\d+_[a-zA-Z0-9\-]+\.json$/.test(f)) {
+        activeMessagesCount++;
+      }
+    }
+
+    // Prune empty mailbox directories if 0 active messages remain
+    if (pruneEmpty && activeMessagesCount === 0) {
+      const isEmptyNow = dryRun ? (files.length - prunedTempInMailbox === 0) : true;
+      if (isEmptyNow) {
+        if (!dryRun) {
+          let remainingFiles = [];
+          try {
+            remainingFiles = await fs.promises.readdir(fullDir);
+          } catch {}
+
+          if (remainingFiles.length === 0) {
+            report.prunedEmptyMailboxes.push(entryName);
+            try {
+              await retryNtfsOperation(async () => {
+                await fs.promises.rmdir(fullDir);
+              });
+              inboxDirCache.delete(fullDir);
+            } catch {}
+          }
+        } else {
+          report.prunedEmptyMailboxes.push(entryName);
+        }
+      }
+    }
+  }
+
+  report.prunedDirs = report.prunedEmptyMailboxes.length;
+  return report;
+}
+
+/**
  * Synchronous variant of readInbox with discrete priority & legacy file fallback
  * @param {string} recipient 
  * @param {object} [options={}]
@@ -914,6 +1140,9 @@ async function broadcastToAgents(from, targets, message, customDispatcher) {
 module.exports = {
   // Core Interface Contracts
   writeMessage,
+  writeMessageSync,
+  migrateLegacyMailboxSync,
+  compactMailboxes,
   readInbox,
   readInboxSync,
   ackMessage,
