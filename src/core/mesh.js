@@ -88,6 +88,79 @@ function resolveSafePath(baseDir, userInput) {
   return resolvedTarget;
 }
 
+const ILLEGAL_CHARS_REGEX = /[<>:"/\\|?*\x00-\x1f\x7f]/g;
+const TRAILING_DOTS_SPACES_REGEX = /[\s.]+$/;
+const URL_ENCODED_REGEX = /(%2e|%2f|%5c|%00)/i;
+
+/**
+ * Rigorously sanitizes an input string into a safe Windows NTFS filename
+ * @param {string} name 
+ * @param {string} [fallback='safe_file'] 
+ * @returns {string} clean filename
+ */
+function sanitizeWindowsFilename(name, fallback = 'safe_file') {
+  if (typeof name !== 'string') return fallback;
+
+  let clean = name.replace(/\0/g, '').trim();
+  try {
+    clean = decodeURIComponent(clean);
+  } catch {}
+
+  clean = path.basename(clean.replace(/\\/g, '/'));
+  clean = clean.replace(ILLEGAL_CHARS_REGEX, '_');
+  clean = clean.replace(TRAILING_DOTS_SPACES_REGEX, '');
+
+  if (!clean || DOS_DEVICE_REGEX.test(clean)) {
+    clean = clean ? `safe_${clean}` : fallback;
+  }
+
+  if (clean.length > 255) {
+    clean = clean.slice(0, 255);
+    clean = clean.replace(TRAILING_DOTS_SPACES_REGEX, '');
+  }
+
+  return clean || fallback;
+}
+
+/**
+ * Rigorously validates and resolves a safe path within a base directory,
+ * preventing Windows path traversal, ADS streams, and directory jail breakouts.
+ * @param {string} baseDir 
+ * @param {string} userInput 
+ * @returns {string} safe absolute path
+ */
+function sanitizeWindowsPath(baseDir, userInput) {
+  if (typeof userInput !== 'string' || userInput.trim() === '') {
+    throw new SecurityError('Invalid input: path component must be a non-empty string');
+  }
+
+  const raw = userInput.trim();
+
+  if (URL_ENCODED_REGEX.test(raw)) {
+    throw new SecurityError(`Path traversal attack rejected: "${raw}" contains encoded traversal tokens`);
+  }
+
+  const colonIdx = raw.indexOf(':');
+  if (colonIdx !== -1 && colonIdx !== 1) {
+    throw new SecurityError(`NTFS Alternate Data Stream (ADS) attack rejected: "${raw}" contains illegal colon`);
+  }
+
+  if (PATH_TRAVERSAL_REGEX.test(raw)) {
+    throw new SecurityError(`Path traversal attack rejected: "${raw}" contains traversal tokens`);
+  }
+
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(resolvedBase, raw);
+  const normBase = (resolvedBase + path.sep).toLowerCase();
+  const normTarget = resolvedTarget.toLowerCase();
+
+  if (!normTarget.startsWith(normBase) && normTarget !== resolvedBase.toLowerCase()) {
+    throw new SecurityError(`Directory jail violation: "${userInput}" resolves outside "${baseDir}"`);
+  }
+
+  return resolvedTarget;
+}
+
 /**
  * Dual-sided 5-attempt exponential backoff retry loop on Windows NTFS EBUSY/EPERM/EACCES errors
  * Schedule: 20ms, 40ms, 80ms, 160ms, 320ms (+ randomized jitter 0-15ms)
@@ -160,7 +233,12 @@ function ensureMeshDirs() {
     path.join(MESH_DIR, 'locks'),
     path.join(MESH_DIR, 'archive'),
     path.join(MESH_DIR, 'registry'),
-    path.join(MESH_DIR, 'interrupts')
+    path.join(MESH_DIR, 'interrupts'),
+    path.join(MESH_DIR, 'handoffs'),
+    path.join(MESH_DIR, 'heartbeats'),
+    path.join(MESH_DIR, 'sessions'),
+    path.join(MESH_DIR, 'dlq'),
+    path.join(MESH_DIR, 'dlq', 'poison')
   ];
   for (const d of dirs) {
     if (!fs.existsSync(d)) {
@@ -618,6 +696,60 @@ function migrateLegacyMailboxSync(agentName) {
 }
 
 /**
+ * Checks if a message envelope is expired based on ttl or expiresAt
+ * @param {object} msg 
+ * @param {number} [now=Date.now()] 
+ * @returns {boolean}
+ */
+function isEnvelopeExpired(msg, now = Date.now()) {
+  if (!msg) return false;
+  if (typeof msg.isExpired === 'function') return msg.isExpired(now);
+  if (typeof msg.ttl === 'number' && msg.epochMs) {
+    if (now > msg.epochMs + msg.ttl) return true;
+  }
+  if (msg.expiresAt) {
+    const expMs = typeof msg.expiresAt === 'number' ? msg.expiresAt : Date.parse(msg.expiresAt);
+    if (expMs && now > expMs) return true;
+  }
+  return false;
+}
+
+/**
+ * Prunes expired messages from an inbox directory and optionally forwards them to DLQ
+ * @param {string} inboxDir 
+ * @param {string} [dlqDir=null] 
+ * @returns {{ active: object[], pruned: object[] }}
+ */
+function pruneExpiredInbox(inboxDir, dlqDir = null) {
+  if (!fs.existsSync(inboxDir)) return { active: [], pruned: [] };
+
+  const files = fs.readdirSync(inboxDir).filter((f) => f.endsWith('.json') && !f.startsWith('.tmp'));
+  const now = Date.now();
+  const active = [];
+  const pruned = [];
+
+  for (const f of files) {
+    const filePath = path.join(inboxDir, f);
+    try {
+      const msg = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (isEnvelopeExpired(msg, now)) {
+        if (dlqDir) {
+          if (!fs.existsSync(dlqDir)) fs.mkdirSync(dlqDir, { recursive: true });
+          msg.deadLetterReason = 'EXPIRED_TTL';
+          fs.writeFileSync(path.join(dlqDir, `expired_${f}`), JSON.stringify(msg, null, 2), 'utf8');
+        }
+        try { fs.unlinkSync(filePath); } catch {}
+        pruned.push(msg);
+      } else {
+        active.push(msg);
+      }
+    } catch {}
+  }
+
+  return { active, pruned };
+}
+
+/**
  * Compacts and prunes empty/dead ephemeral mailboxes and orphaned temporary files in mesh/inbox/
  * @param {object} options
  * @param {boolean} [options.dryRun=false] - If true, calculates actions without modifying files
@@ -720,6 +852,24 @@ async function compactMailboxes(options = {}) {
           } catch {}
         }
       } else if (/^\d+_[a-zA-Z0-9\-]+\.json$/.test(f)) {
+        if (options.pruneExpired !== false) {
+          const fullFilePath = path.join(fullDir, f);
+          try {
+            const raw = fs.readFileSync(fullFilePath, 'utf8');
+            const msg = JSON.parse(raw);
+            if (isEnvelopeExpired(msg, now)) {
+              const dlqDir = path.join(MESH_DIR, 'dlq');
+              if (!fs.existsSync(dlqDir)) fs.mkdirSync(dlqDir, { recursive: true });
+              msg.deadLetterReason = 'EXPIRED_TTL';
+              fs.writeFileSync(path.join(dlqDir, `expired_${f}`), JSON.stringify(msg, null, 2), 'utf8');
+              if (!dryRun) {
+                fs.unlinkSync(fullFilePath);
+              }
+              report.prunedExpired = (report.prunedExpired || 0) + 1;
+              continue;
+            }
+          } catch {}
+        }
         activeMessagesCount++;
       }
     }
@@ -1587,6 +1737,298 @@ async function broadcastToAgents(from, targets, message, customDispatcher) {
   return results;
 }
 
+// ============================================================================
+// #70: Peer Liveness Heartbeat Registry
+// ============================================================================
+
+class HeartbeatRegistry {
+  constructor(meshDir = process.env.INTERCOM_MESH_DIR || MESH_DIR) {
+    this.meshDir = meshDir || MESH_DIR;
+    this.heartbeatDir = path.join(this.meshDir, 'heartbeats');
+    if (!fs.existsSync(this.heartbeatDir)) {
+      try { fs.mkdirSync(this.heartbeatDir, { recursive: true }); } catch {}
+    }
+  }
+
+  touchHeartbeat(agent, metadata = {}) {
+    const clean = validateAgentName(agent);
+    const epochMs = Date.now();
+    const record = {
+      agent: clean,
+      epochMs,
+      timestamp: new Date(epochMs).toISOString(),
+      pid: metadata.pid || process.pid,
+      status: metadata.status || 'online',
+      role: metadata.role || 'worker',
+      capabilities: metadata.capabilities || []
+    };
+
+    const filePath = path.join(this.heartbeatDir, `${clean}.json`);
+    fs.writeFileSync(filePath, JSON.stringify(record, null, 2), 'utf8');
+    return record;
+  }
+
+  writeHeartbeat(agent, metadata = {}) {
+    return this.touchHeartbeat(agent, metadata);
+  }
+
+  getPeerStatus(agent, ttlMs = 30000, options = {}) {
+    const clean = validateAgentName(agent);
+    const filePath = path.join(this.heartbeatDir, `${clean}.json`);
+    if (!fs.existsSync(filePath)) {
+      return { status: 'unknown', online: false };
+    }
+
+    try {
+      const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const ageMs = Date.now() - record.epochMs;
+      let isOnline = ageMs <= ttlMs;
+      let status = isOnline ? record.status : 'stale';
+
+      if (options.checkPid && isOnline && record.pid) {
+        try {
+          process.kill(record.pid, 0);
+        } catch (e) {
+          if (e.code === 'ESRCH') {
+            isOnline = false;
+            status = 'DEAD_PID';
+          }
+        }
+      }
+
+      return {
+        ...record,
+        ageMs,
+        online: isOnline,
+        status
+      };
+    } catch {
+      return { status: 'error', online: false };
+    }
+  }
+
+  listLivePeers(ttlMs = 30000, options = {}) {
+    if (!fs.existsSync(this.heartbeatDir)) return [];
+    const files = fs.readdirSync(this.heartbeatDir).filter((f) => f.endsWith('.json') && !f.startsWith('.tmp'));
+    const live = [];
+
+    for (const f of files) {
+      const agent = f.replace(/\.json$/, '');
+      const st = this.getPeerStatus(agent, ttlMs, options);
+      if (st.online) {
+        live.push(st);
+      }
+    }
+    return live;
+  }
+
+  evictStalePeers(ttlMs = 60000, options = {}) {
+    if (!fs.existsSync(this.heartbeatDir)) return [];
+    const files = fs.readdirSync(this.heartbeatDir).filter((f) => f.endsWith('.json') && !f.startsWith('.tmp'));
+    const evicted = [];
+
+    for (const f of files) {
+      const filePath = path.join(this.heartbeatDir, f);
+      try {
+        const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const ageMs = Date.now() - record.epochMs;
+        let dead = ageMs > ttlMs;
+
+        if (options.checkPid && !dead && record.pid) {
+          try {
+            process.kill(record.pid, 0);
+          } catch (e) {
+            if (e.code === 'ESRCH') dead = true;
+          }
+        }
+
+        if (dead) {
+          try { fs.unlinkSync(filePath); } catch {}
+          evicted.push(record.agent);
+        }
+      } catch {}
+    }
+    return evicted;
+  }
+}
+
+// ============================================================================
+// #66: Zero-Loss Transactional Cross-Agent Handoff
+// ============================================================================
+
+class HandoffCoordinator {
+  constructor(meshDir = process.env.INTERCOM_MESH_DIR || MESH_DIR) {
+    this.meshDir = meshDir || MESH_DIR;
+    this.handoffsDir = path.join(this.meshDir, 'handoffs');
+    if (!fs.existsSync(this.handoffsDir)) {
+      try { fs.mkdirSync(this.handoffsDir, { recursive: true }); } catch {}
+    }
+    this.activeHandoffs = new Map();
+  }
+
+  async initiateHandoff(senderOrOptions, recipientArg, taskIdArg, contextArg = {}, timeoutMsArg = 5000) {
+    let sender, recipient, taskId, context, timeoutMs;
+    if (senderOrOptions && typeof senderOrOptions === 'object') {
+      sender = senderOrOptions.sender;
+      recipient = senderOrOptions.recipient;
+      taskId = senderOrOptions.taskId;
+      context = senderOrOptions.context || {};
+      timeoutMs = senderOrOptions.timeoutMs || 5000;
+    } else {
+      sender = senderOrOptions;
+      recipient = recipientArg;
+      taskId = taskIdArg;
+      context = contextArg || {};
+      timeoutMs = timeoutMsArg || 5000;
+    }
+
+    if (!sender || !recipient || !taskId) {
+      throw new Error('sender, recipient, and taskId are required for handoff');
+    }
+
+    const cleanSender = validateAgentName(sender);
+    const cleanRecipient = validateAgentName(recipient);
+    const handoffId = `hnd_${crypto.randomUUID().slice(0, 12)}`;
+    const now = Date.now();
+
+    const record = {
+      handoffId,
+      sender: cleanSender,
+      recipient: cleanRecipient,
+      taskId,
+      status: 'INITIATED',
+      context,
+      timeoutMs,
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + timeoutMs).toISOString()
+    };
+
+    this.activeHandoffs.set(handoffId, record);
+    const handoffPath = path.join(this.handoffsDir, `${handoffId}.json`);
+    fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2), 'utf8');
+
+    // Dispatch handoff request message to recipient inbox
+    await writeMessage(cleanRecipient, {
+      sender: cleanSender,
+      type: 'task_dispatch',
+      priority: 'HIGH',
+      payload: {
+        action: 'handoff_request',
+        handoffId,
+        sender: cleanSender,
+        taskId,
+        context
+      }
+    });
+
+    return record;
+  }
+
+  async confirmHandoff(handoffId, recipient, metadata = {}) {
+    const cleanRecipient = validateAgentName(recipient);
+    const record = this.getHandoff(handoffId);
+    if (!record) throw new Error(`Handoff '${handoffId}' not found`);
+    if (record.recipient !== cleanRecipient) {
+      throw new Error(`Unauthorized recipient '${cleanRecipient}' cannot confirm handoff assigned to '${record.recipient}'`);
+    }
+    if (record.status !== 'INITIATED') {
+      throw new Error(`Cannot confirm handoff in status '${record.status}'`);
+    }
+
+    if (Date.now() > new Date(record.expiresAt).getTime()) {
+      record.status = 'TIMED_OUT';
+      this.saveHandoff(record);
+      throw new Error(`Handoff '${handoffId}' has expired`);
+    }
+
+    record.status = 'CONFIRMED';
+    record.confirmedAt = new Date().toISOString();
+    record.recipientMetadata = metadata;
+    this.saveHandoff(record);
+
+    // Send confirmation ACK to sender
+    await writeMessage(record.sender, {
+      sender: cleanRecipient,
+      type: 'ack',
+      priority: 'HIGH',
+      payload: {
+        action: 'handoff_ack',
+        handoffId,
+        status: 'CONFIRMED',
+        recipient: cleanRecipient
+      }
+    });
+
+    return record;
+  }
+
+  async rejectHandoff(handoffId, recipient, reason = 'Worker capacity exceeded') {
+    const cleanRecipient = validateAgentName(recipient);
+    const record = this.getHandoff(handoffId);
+    if (!record) throw new Error(`Handoff '${handoffId}' not found`);
+
+    record.status = 'REJECTED';
+    record.rejectedAt = new Date().toISOString();
+    record.rejectReason = reason;
+    this.saveHandoff(record);
+
+    // Send rejection notice to sender so sender retains ownership
+    await writeMessage(record.sender, {
+      sender: cleanRecipient,
+      type: 'task_response',
+      priority: 'HIGH',
+      payload: {
+        action: 'handoff_nack',
+        handoffId,
+        status: 'REJECTED',
+        reason,
+        recipient: cleanRecipient
+      }
+    });
+
+    return record;
+  }
+
+  completeHandoff(handoffId, sender, result = {}) {
+    const cleanSender = validateAgentName(sender);
+    const record = this.getHandoff(handoffId);
+    if (!record) throw new Error(`Handoff '${handoffId}' not found`);
+    if (record.sender !== cleanSender) {
+      throw new Error(`Unauthorized sender '${cleanSender}' cannot complete handoff owned by '${record.sender}'`);
+    }
+    if (record.status !== 'CONFIRMED') {
+      throw new Error(`Cannot complete unconfirmed handoff in status '${record.status}'`);
+    }
+
+    record.status = 'COMPLETED';
+    record.completedAt = new Date().toISOString();
+    record.result = result;
+    this.saveHandoff(record);
+    return record;
+  }
+
+  getHandoff(handoffId) {
+    if (this.activeHandoffs.has(handoffId)) {
+      return this.activeHandoffs.get(handoffId);
+    }
+    const handoffPath = path.join(this.handoffsDir, `${handoffId}.json`);
+    if (fs.existsSync(handoffPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(handoffPath, 'utf8'));
+        this.activeHandoffs.set(handoffId, parsed);
+        return parsed;
+      } catch {}
+    }
+    return null;
+  }
+
+  saveHandoff(record) {
+    this.activeHandoffs.set(record.handoffId, record);
+    const handoffPath = path.join(this.handoffsDir, `${record.handoffId}.json`);
+    fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2), 'utf8');
+  }
+}
+
 module.exports = {
   // Core Interface Contracts
   writeMessage,
@@ -1607,6 +2049,17 @@ module.exports = {
   sanitizeAgentName,
   validateAgentName,
   resolveSafePath,
+  sanitizeWindowsFilename,
+  sanitizeWindowsPath,
+
+  // Milestone 3 Enhancements (#66, #68, #70, #71)
+  HandoffCoordinator,
+  HeartbeatRegistry,
+  pruneExpiredInbox,
+  isEnvelopeExpired,
+  get SubscriptionFilter() {
+    return require('./fast-queue').SubscriptionFilter;
+  },
 
   // Resiliency & Helpers
   LruCache,

@@ -89,6 +89,12 @@ function validateMessage(envelope) {
     errors.push('Field "metadata" must be an object if provided');
   }
 
+  // Optional: ttl / ttlMs
+  const ttlVal = envelope.ttl !== undefined ? envelope.ttl : envelope.ttlMs;
+  if (ttlVal !== undefined && (!Number.isInteger(ttlVal) || ttlVal <= 0)) {
+    errors.push('Field "ttl" must be a positive integer representing milliseconds');
+  }
+
   return {
     valid: errors.length === 0,
     errors
@@ -119,6 +125,20 @@ class MessageEnvelope {
     if (data.correlationId) this.correlationId = String(data.correlationId);
     if (data.parentId) this.parentId = String(data.parentId);
     if (data.metadata) this.metadata = { ...data.metadata };
+
+    const ttlVal = Number.isInteger(data.ttl) ? data.ttl : (Number.isInteger(data.ttlMs) ? data.ttlMs : undefined);
+    if (ttlVal !== undefined) {
+      this.ttl = ttlVal;
+      this.expiresAt = (this.epochMs || Date.now()) + ttlVal;
+    } else if (Number.isInteger(data.expiresAt)) {
+      this.expiresAt = data.expiresAt;
+    } else if (data.expiresAt) {
+      this.expiresAt = Date.parse(data.expiresAt) || undefined;
+    }
+  }
+
+  isExpired(now = Date.now()) {
+    return Boolean(this.expiresAt && now > this.expiresAt);
   }
 
   get from() { return this.sender; }
@@ -210,6 +230,8 @@ class MessageEnvelope {
     if (this.correlationId) obj.correlationId = this.correlationId;
     if (this.parentId) obj.parentId = this.parentId;
     if (this.metadata) obj.metadata = this.metadata;
+    if (this.ttl !== undefined) obj.ttl = this.ttl;
+    if (this.expiresAt !== undefined) obj.expiresAt = this.expiresAt;
     return obj;
   }
 

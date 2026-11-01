@@ -13,7 +13,8 @@ const {
   clearInbox,
   waitForUnread,
   listActiveMailboxes,
-  validateAgentName
+  validateAgentName,
+  HandoffCoordinator
 } = require('./core/mesh');
 const {
   registerAgent,
@@ -110,6 +111,14 @@ USAGE:
       send <#channel> <message> [--from <sender>]
       list [--json]
       read <#channel> [--limit <n>] [--json]
+
+  intercom handoff <init|accept|complete|reject|status> [options]
+    Zero-loss transactional cross-agent task handoff protocol:
+      init <toAgent> <taskId> [payloadJson] [--from <sender>] [--timeout <sec>]
+      accept <ticketId> [--agent <recipient>]
+      complete <ticketId> [resultJson] [--from <sender>]
+      reject <ticketId> [reason] [--agent <recipient>]
+      status <ticketId> [--json]
 
   intercom peers
     Lists all connected Fast-Path peers and registered agents.
@@ -884,6 +893,192 @@ async function run(rawArgv = process.argv.slice(2)) {
         }
 
         console.error(`Unknown channel subcommand: "${sub}". Use "send", "list", or "read".`);
+        process.exitCode = 1;
+        break;
+      }
+
+      case 'handoff': {
+        const sub = _[1];
+        const coordinator = new HandoffCoordinator(process.env.INTERCOM_MESH_DIR || MESH_DIR);
+
+        if (sub === 'init') {
+          const toAgent = _[2] || flags.to || flags.recipient;
+          const taskId = _[3] || flags.task || flags.taskId;
+          const rawPayload = _[4] || flags.payload || flags.context || '{}';
+
+          if (!toAgent || !taskId) {
+            console.error('Error: Recipient agent and taskId are required. Usage: intercom handoff init <toAgent> <taskId> [payloadJson]');
+            process.exitCode = 1;
+            break;
+          }
+
+          let context = {};
+          if (typeof rawPayload === 'string') {
+            try {
+              context = JSON.parse(rawPayload);
+            } catch {
+              context = { message: rawPayload };
+            }
+          } else if (typeof rawPayload === 'object') {
+            context = rawPayload;
+          }
+
+          const sender = flags.from || flags.sender || process.env.INTERCOM_AGENT || 'operator';
+          const timeoutMs = flags.timeout ? parseInt(flags.timeout, 10) * 1000 : 30000;
+
+          const ticket = await coordinator.initiateHandoff({
+            sender,
+            recipient: toAgent,
+            taskId,
+            context,
+            timeoutMs
+          });
+
+          if (flags.json) {
+            console.log(JSON.stringify(ticket, null, 2));
+          } else {
+            console.log(`[HANDOFF INITIATED] Ticket: ${ticket.handoffId}`);
+            console.log(`  Sender   : ${ticket.sender}`);
+            console.log(`  Recipient: ${ticket.recipient}`);
+            console.log(`  TaskId   : ${ticket.taskId}`);
+            console.log(`  Status   : ${ticket.status}`);
+            console.log(`  ExpiresAt: ${ticket.expiresAt}`);
+          }
+          break;
+        }
+
+        if (sub === 'accept' || sub === 'confirm') {
+          const ticketId = _[2] || flags.ticket || flags.ticketId || flags.id;
+          if (!ticketId) {
+            console.error('Error: TicketId is required. Usage: intercom handoff accept <ticketId>');
+            process.exitCode = 1;
+            break;
+          }
+
+          const existing = coordinator.getHandoff(ticketId);
+          if (!existing) {
+            console.error(`Error: Handoff ticket '${ticketId}' not found`);
+            process.exitCode = 1;
+            break;
+          }
+
+          const recipient = flags.agent || flags.recipient || flags.as || process.env.INTERCOM_AGENT || existing.recipient;
+          const metadata = flags.metadata ? JSON.parse(flags.metadata) : { confirmedBy: recipient, pid: process.pid };
+
+          const confirmed = await coordinator.confirmHandoff(ticketId, recipient, metadata);
+          if (flags.json) {
+            console.log(JSON.stringify(confirmed, null, 2));
+          } else {
+            console.log(`[HANDOFF ACCEPTED] Ticket: ${ticketId}`);
+            console.log(`  Status     : ${confirmed.status}`);
+            console.log(`  ConfirmedAt: ${confirmed.confirmedAt}`);
+          }
+          break;
+        }
+
+        if (sub === 'complete') {
+          const ticketId = _[2] || flags.ticket || flags.ticketId || flags.id;
+          const rawResult = _[3] || flags.result || '{}';
+          if (!ticketId) {
+            console.error('Error: TicketId is required. Usage: intercom handoff complete <ticketId> [resultJson]');
+            process.exitCode = 1;
+            break;
+          }
+
+          const existing = coordinator.getHandoff(ticketId);
+          if (!existing) {
+            console.error(`Error: Handoff ticket '${ticketId}' not found`);
+            process.exitCode = 1;
+            break;
+          }
+
+          let result = {};
+          if (typeof rawResult === 'string') {
+            try {
+              result = JSON.parse(rawResult);
+            } catch {
+              result = { message: rawResult };
+            }
+          } else if (typeof rawResult === 'object') {
+            result = rawResult;
+          }
+
+          const sender = flags.sender || flags.from || flags.as || process.env.INTERCOM_AGENT || existing.sender;
+          const completed = coordinator.completeHandoff(ticketId, sender, result);
+
+          if (flags.json) {
+            console.log(JSON.stringify(completed, null, 2));
+          } else {
+            console.log(`[HANDOFF COMPLETED] Ticket: ${ticketId}`);
+            console.log(`  Status     : ${completed.status}`);
+            console.log(`  CompletedAt: ${completed.completedAt}`);
+          }
+          break;
+        }
+
+        if (sub === 'reject') {
+          const ticketId = _[2] || flags.ticket || flags.ticketId || flags.id;
+          const reason = _[3] || flags.reason || 'Worker capacity exceeded';
+          if (!ticketId) {
+            console.error('Error: TicketId is required. Usage: intercom handoff reject <ticketId> [reason]');
+            process.exitCode = 1;
+            break;
+          }
+
+          const existing = coordinator.getHandoff(ticketId);
+          if (!existing) {
+            console.error(`Error: Handoff ticket '${ticketId}' not found`);
+            process.exitCode = 1;
+            break;
+          }
+
+          const recipient = flags.agent || flags.recipient || flags.as || process.env.INTERCOM_AGENT || existing.recipient;
+          const rejected = await coordinator.rejectHandoff(ticketId, recipient, reason);
+
+          if (flags.json) {
+            console.log(JSON.stringify(rejected, null, 2));
+          } else {
+            console.log(`[HANDOFF REJECTED] Ticket: ${ticketId}`);
+            console.log(`  Status    : ${rejected.status}`);
+            console.log(`  Reason    : ${rejected.rejectReason}`);
+          }
+          break;
+        }
+
+        if (sub === 'status') {
+          const ticketId = _[2] || flags.ticket || flags.ticketId || flags.id;
+          if (!ticketId) {
+            console.error('Error: TicketId is required. Usage: intercom handoff status <ticketId>');
+            process.exitCode = 1;
+            break;
+          }
+
+          const ticket = coordinator.getHandoff(ticketId);
+          if (!ticket) {
+            console.error(`Error: Handoff ticket '${ticketId}' not found`);
+            process.exitCode = 1;
+            break;
+          }
+
+          if (flags.json) {
+            console.log(JSON.stringify(ticket, null, 2));
+          } else {
+            console.log(`\n=== HANDOFF TICKET: ${ticket.handoffId} ===`);
+            console.log(`  Sender   : ${ticket.sender}`);
+            console.log(`  Recipient: ${ticket.recipient}`);
+            console.log(`  TaskId   : ${ticket.taskId}`);
+            console.log(`  Status   : ${ticket.status}`);
+            console.log(`  CreatedAt: ${ticket.createdAt}`);
+            console.log(`  ExpiresAt: ${ticket.expiresAt}`);
+            if (ticket.confirmedAt) console.log(`  Confirmed: ${ticket.confirmedAt}`);
+            if (ticket.completedAt) console.log(`  Completed: ${ticket.completedAt}`);
+            if (ticket.rejectReason) console.log(`  Rejected : ${ticket.rejectReason}`);
+            console.log('');
+          }
+          break;
+        }
+
+        console.error(`Unknown handoff subcommand: "${sub}". Use "init", "accept", "complete", "reject", or "status".`);
         process.exitCode = 1;
         break;
       }
