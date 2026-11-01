@@ -180,4 +180,23 @@ describe('Milestone 3 Suite 5: Fast-Path Queue & Subscription Filtering (#67, #6
     assert.equal(received.length, 1);
     assert.equal(received[0].payload.note, 'matched');
   });
+
+  // #68: Regex Metacharacter Escaping in Wildcard Patterns
+  test('#68: Wildcard pattern matching safely escapes regex metacharacters and prevents syntax errors', () => {
+    const unclosedPattern = 'worker_*(unclosed';
+    const msg1 = { sender: 'worker_01(unclosed', type: 'task_dispatch' };
+    const msg2 = { sender: 'worker_01', type: 'task_dispatch' };
+
+    assert.doesNotThrow(() => {
+      assert.equal(SubscriptionFilter.matches(msg1, { sender: unclosedPattern }), true);
+      assert.equal(SubscriptionFilter.matches(msg2, { sender: unclosedPattern }), false);
+    });
+
+    const complexPattern = 'agent+[test]*?^$';
+    const msg3 = { sender: 'agent+[test]extra?^$', type: 'task_dispatch' };
+    const msg4 = { sender: 'agent1[test]extra?^$', type: 'task_dispatch' };
+
+    assert.equal(SubscriptionFilter.matches(msg3, { sender: complexPattern }), true);
+    assert.equal(SubscriptionFilter.matches(msg4, { sender: complexPattern }), false);
+  });
 });

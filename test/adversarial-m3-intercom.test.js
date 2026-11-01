@@ -211,7 +211,7 @@ describe('Adversarial M3 - 1. Transactional Handoff Lifecycle Stress (#66)', () 
     );
   });
 
-  test('1.7 Empirical Critic Challenge: Adversarial reject on completed handoff & missing authorization check', async () => {
+  test('1.7 Remediated: Adversarial reject on completed handoff & unauthorized rejection strictly blocked', async () => {
     const sender = 'agent_valid_sender';
     const recipient = 'agent_valid_worker';
     const ticket = await coordinator.initiateHandoff({ sender, recipient, taskId: 'task_audit' });
@@ -221,18 +221,23 @@ describe('Adversarial M3 - 1. Transactional Handoff Lifecycle Stress (#66)', () 
 
     assert.equal(coordinator.getHandoff(ticket.handoffId).status, 'COMPLETED');
 
-    // Empirical observation of rejectHandoff behavior:
-    // In current implementation, rejectHandoff lacks `status !== 'INITIATED'` and recipient checks.
-    // We document and verify the exact empirical behavior:
-    await coordinator.rejectHandoff(ticket.handoffId, 'stranger_agent', 'malicious overwrite attempt');
-    const finalRecord = coordinator.getHandoff(ticket.handoffId);
+    // Unauthorized stranger attempting to reject must throw
+    await assert.rejects(
+      async () => await coordinator.rejectHandoff(ticket.handoffId, 'stranger_agent', 'malicious overwrite attempt'),
+      /Unauthorized recipient 'stranger_agent' cannot reject handoff assigned to 'agent_valid_worker'/i
+    );
 
-    // Document finding: rejectHandoff overwrote status to REJECTED because guard is missing
-    assert.equal(finalRecord.status, 'REJECTED');
-    assert.equal(finalRecord.rejectReason, 'malicious overwrite attempt');
+    // Legitimate recipient attempting to reject an already completed handoff must throw
+    await assert.rejects(
+      async () => await coordinator.rejectHandoff(ticket.handoffId, recipient, 'post-completion reject'),
+      /Cannot reject handoff in status 'COMPLETED'/i
+    );
+
+    const finalRecord = coordinator.getHandoff(ticket.handoffId);
+    assert.equal(finalRecord.status, 'COMPLETED');
   });
 
-  test('1.8 Empirical Critic Challenge: getHandoff path traversal breakout observation', () => {
+  test('1.8 Remediated: getHandoff path traversal breakout strictly blocked and sanitized', () => {
     // Attempt relative directory traversal in getHandoff
     // Plant a canary JSON file outside handoffs/ in tempDir
     const canaryPath = path.join(tempDir, 'canary_secret.json');
@@ -240,9 +245,7 @@ describe('Adversarial M3 - 1. Transactional Handoff Lifecycle Stress (#66)', () 
 
     // Attempt traversal from handoffs/ to tempDir via ../canary_secret
     const breakoutResult = coordinator.getHandoff('../canary_secret');
-    assert.ok(breakoutResult !== null, 'Breakout reads outside handoffs directory if unvalidated');
-    assert.equal(breakoutResult.canaryId, 'secret_123');
-    assert.equal(breakoutResult.leaked, true);
+    assert.equal(breakoutResult, null, 'Breakout traversal must return null and not read outside handoffs directory');
   });
 });
 
@@ -453,6 +456,13 @@ describe('Adversarial M3 - 2. Fast-Queue Event Flood & Disk Fallback (#67, #68)'
     assert.equal(SubscriptionFilter.matches(msg, {}), true);
     assert.equal(SubscriptionFilter.matches(msg, null), true);
     assert.equal(SubscriptionFilter.matches(msg, { predicate: () => { throw new Error('Boom'); } }), false);
+
+    // Regex metacharacter escaping in wildcard patterns (prevents SyntaxError crashes)
+    assert.equal(SubscriptionFilter.matches(msg, { senders: ['worker_*(unclosed'] }), false);
+    assert.equal(SubscriptionFilter.matches({ sender: 'worker_alpha_99(unclosed' }, { senders: ['worker_*(unclosed'] }), true);
+    assert.equal(SubscriptionFilter.matches({ sender: 'worker_alpha_99' }, { senders: ['worker_*(unclosed'] }), false);
+    assert.equal(SubscriptionFilter.matches({ sender: 'worker_alpha_99' }, { excludeSenders: ['worker_*(unclosed'] }), true);
+    assert.equal(SubscriptionFilter.matches({ sender: 'worker_alpha_99(unclosed' }, { excludeSenders: ['worker_*(unclosed'] }), false);
   });
 });
 

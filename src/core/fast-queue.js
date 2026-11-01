@@ -62,9 +62,15 @@ class SubscriptionFilter {
         : [filter.sender || filter.senders];
       const sender = msg.sender || msg.from || '';
       const matchSender = allowed.some((pattern) => {
+        if (typeof pattern !== 'string') return false;
         if (pattern.includes('*')) {
-          const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
-          return regex.test(sender);
+          const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+          try {
+            const regex = new RegExp('^' + escaped + '$');
+            return regex.test(sender);
+          } catch {
+            return false;
+          }
         }
         return sender === pattern;
       });
@@ -78,9 +84,15 @@ class SubscriptionFilter {
         : [filter.excludeSenders || filter.exclude];
       const sender = msg.sender || msg.from || '';
       const isExcluded = excluded.some((pattern) => {
+        if (typeof pattern !== 'string') return false;
         if (pattern.includes('*')) {
-          const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
-          return regex.test(sender);
+          const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+          try {
+            const regex = new RegExp('^' + escaped + '$');
+            return regex.test(sender);
+          } catch {
+            return false;
+          }
         }
         return sender === pattern;
       });

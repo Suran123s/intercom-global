@@ -1904,7 +1904,7 @@ class HandoffCoordinator {
     };
 
     this.activeHandoffs.set(handoffId, record);
-    const handoffPath = path.join(this.handoffsDir, `${handoffId}.json`);
+    const handoffPath = resolveSafePath(this.handoffsDir, `${handoffId}.json`);
     fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2), 'utf8');
 
     // Dispatch handoff request message to recipient inbox
@@ -1966,6 +1966,12 @@ class HandoffCoordinator {
     const cleanRecipient = validateAgentName(recipient);
     const record = this.getHandoff(handoffId);
     if (!record) throw new Error(`Handoff '${handoffId}' not found`);
+    if (record.recipient !== cleanRecipient) {
+      throw new Error(`Unauthorized recipient '${cleanRecipient}' cannot reject handoff assigned to '${record.recipient}'`);
+    }
+    if (record.status !== 'INITIATED') {
+      throw new Error(`Cannot reject handoff in status '${record.status}'`);
+    }
 
     record.status = 'REJECTED';
     record.rejectedAt = new Date().toISOString();
@@ -2008,23 +2014,27 @@ class HandoffCoordinator {
   }
 
   getHandoff(handoffId) {
-    if (this.activeHandoffs.has(handoffId)) {
-      return this.activeHandoffs.get(handoffId);
+    if (typeof handoffId !== 'string' || !handoffId.trim()) return null;
+    const cleanId = sanitizeWindowsFilename(handoffId.trim());
+    if (this.activeHandoffs.has(cleanId)) {
+      return this.activeHandoffs.get(cleanId);
     }
-    const handoffPath = path.join(this.handoffsDir, `${handoffId}.json`);
-    if (fs.existsSync(handoffPath)) {
-      try {
+    try {
+      const handoffPath = resolveSafePath(this.handoffsDir, `${cleanId}.json`);
+      if (fs.existsSync(handoffPath)) {
         const parsed = JSON.parse(fs.readFileSync(handoffPath, 'utf8'));
-        this.activeHandoffs.set(handoffId, parsed);
+        this.activeHandoffs.set(cleanId, parsed);
         return parsed;
-      } catch {}
-    }
+      }
+    } catch {}
     return null;
   }
 
   saveHandoff(record) {
-    this.activeHandoffs.set(record.handoffId, record);
-    const handoffPath = path.join(this.handoffsDir, `${record.handoffId}.json`);
+    if (!record || !record.handoffId) return;
+    const cleanId = sanitizeWindowsFilename(record.handoffId);
+    this.activeHandoffs.set(cleanId, record);
+    const handoffPath = resolveSafePath(this.handoffsDir, `${cleanId}.json`);
     fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2), 'utf8');
   }
 }

@@ -149,4 +149,51 @@ describe('Milestone 3 Suite 4: Zero-Loss Atomic Cross-Agent Handoff (#66)', () =
     const record = coordinator.getHandoff(handoff.handoffId);
     assert.equal(record.status, 'TIMED_OUT');
   });
+
+  // #66: Unauthorized and Non-INITIATED Rejection Protection
+  test('#66: Unauthorized agent cannot reject handoff and non-INITIATED handoff cannot be rejected', async () => {
+    const sender = 'agent_auth_s';
+    const recipient = 'agent_auth_r';
+    const handoff = await coordinator.initiateHandoff({
+      sender,
+      recipient,
+      taskId: 'task_auth_reject'
+    });
+
+    // Stranger agent cannot reject
+    await assert.rejects(
+      async () => await coordinator.rejectHandoff(handoff.handoffId, 'impostor_worker', 'denied'),
+      /Unauthorized recipient 'impostor_worker' cannot reject handoff assigned to 'agent_auth_r'/i
+    );
+
+    // Confirm handoff
+    await coordinator.confirmHandoff(handoff.handoffId, recipient);
+
+    // Cannot reject a CONFIRMED handoff
+    await assert.rejects(
+      async () => await coordinator.rejectHandoff(handoff.handoffId, recipient, 'post-confirm reject'),
+      /Cannot reject handoff in status 'CONFIRMED'/i
+    );
+
+    // Complete handoff
+    coordinator.completeHandoff(handoff.handoffId, sender);
+
+    // Cannot reject a COMPLETED handoff
+    await assert.rejects(
+      async () => await coordinator.rejectHandoff(handoff.handoffId, recipient, 'post-complete reject'),
+      /Cannot reject handoff in status 'COMPLETED'/i
+    );
+  });
+
+  // #66 / #73: Directory Traversal Jail Protection in getHandoff
+  test('#66 / #73: getHandoff strictly sanitizes ID and prevents relative directory breakout', () => {
+    const secretPath = path.join(tempDir, 'outside_secret.json');
+    fs.writeFileSync(secretPath, JSON.stringify({ secret: 'critical_data' }), 'utf8');
+
+    assert.equal(coordinator.getHandoff('../outside_secret'), null);
+    assert.equal(coordinator.getHandoff('../../outside_secret'), null);
+    assert.equal(coordinator.getHandoff(''), null);
+    assert.equal(coordinator.getHandoff(null), null);
+    assert.equal(coordinator.getHandoff(undefined), null);
+  });
 });

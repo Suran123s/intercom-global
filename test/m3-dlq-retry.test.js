@@ -61,6 +61,10 @@ describe('Milestone 3 Suite 6: Dead-Letter Auto-Retry Daemon (#69)', () => {
     // High attempt clamped to maxDelayMs = 500
     const delayMax = daemon.calculateBackoff(10);
     assert.equal(delayMax, 500, 'Backoff must clamp to maxDelayMs');
+
+    // NaN or non-finite attempt safely falls back to base delay
+    const delayNaN = daemon.calculateBackoff(NaN);
+    assert.ok(delayNaN >= 20 && delayNaN <= 35, 'NaN retryCount safely falls back to base attempt');
   });
 
   // #69: Successful Transient Retry

@@ -49,7 +49,8 @@ function isTransientFailure(reason = '') {
 }
 
 function computeBackoffDelay(retryCount = 0, baseDelayMs = 50, maxDelayMs = 2000) {
-  const exp = Math.min(retryCount, 8);
+  const count = Number.isFinite(retryCount) ? Math.max(0, retryCount) : 0;
+  const exp = Math.min(count, 8);
   const raw = baseDelayMs * Math.pow(2, exp);
   const jitter = Math.floor(Math.random() * 15);
   return Math.min(raw + jitter, maxDelayMs);
