@@ -160,6 +160,7 @@ class SubscriptionFilter {
 class FastQueue extends EventEmitter {
   constructor(options = {}) {
     super();
+    this.setMaxListeners(100);
     this.maxQueueDepth = options.maxQueueDepth || options.defaultMaxQueue || 500;
     this.localAgents = new Set();
     this.agentQueues = new Map();

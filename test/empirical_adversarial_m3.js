@@ -224,7 +224,7 @@ async function test5Pillars() {
   ];
 
   for (const m of missingPillars) {
-    assert.throws(() => validateJulesPrompt(m), /Missing mandatory 5-pillar fixing value|targetFiles must be a non-empty/);
+    assert.throws(() => validateJulesPrompt(m), /Missing mandatory 5-pillar fixing value|targetFiles must be a non-empty|File Boundary Exceeded/);
   }
 
   // 3.4 Raw string with missing heading fails

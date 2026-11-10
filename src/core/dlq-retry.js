@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { MESH_DIR } = require('../config');
+const { retryNtfsOperationSync } = require('./mesh');
 
 const TRANSIENT_PATTERNS = [
   /EBUSY/i,
@@ -106,7 +107,7 @@ class DlqRetryDaemon {
       enqueuedAt: record.enqueuedAt || new Date().toISOString()
     };
     const filePath = path.join(this.dlqDir, `${id}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(dlqItem, null, 2), 'utf8');
+    retryNtfsOperationSync(() => fs.writeFileSync(filePath, JSON.stringify(dlqItem, null, 2), 'utf8'));
     return dlqItem;
   }
 
@@ -131,7 +132,7 @@ class DlqRetryDaemon {
       // 1. Permanent / Fatal Error -> move to poison immediately
       if (!transient) {
         try {
-          fs.renameSync(filePath, path.join(this.poisonDir, file));
+          retryNtfsOperationSync(() => fs.renameSync(filePath, path.join(this.poisonDir, file)));
         } catch {}
         this.stats.poisoned++;
         continue;
@@ -146,7 +147,7 @@ class DlqRetryDaemon {
       // 3. Exceeded max retries -> move to poison
       if ((item.retryCount || 0) >= this.maxRetries) {
         try {
-          fs.renameSync(filePath, path.join(this.poisonDir, file));
+          retryNtfsOperationSync(() => fs.renameSync(filePath, path.join(this.poisonDir, file)));
         } catch {}
         this.stats.poisoned++;
         continue;
@@ -166,7 +167,9 @@ class DlqRetryDaemon {
           });
         }
         // Success: remove from DLQ
-        try { fs.unlinkSync(filePath); } catch {}
+        try {
+          retryNtfsOperationSync(() => fs.unlinkSync(filePath));
+        } catch {}
         this.stats.retried++;
       } catch (err) {
         // Failure: increment retryCount and update backoff
@@ -175,7 +178,7 @@ class DlqRetryDaemon {
         const delay = this.calculateBackoff(item.retryCount);
         item.nextRetryAt = Date.now() + delay;
         try {
-          fs.writeFileSync(filePath, JSON.stringify(item, null, 2), 'utf8');
+          retryNtfsOperationSync(() => fs.writeFileSync(filePath, JSON.stringify(item, null, 2), 'utf8'));
         } catch {}
       }
     }
@@ -189,6 +192,7 @@ class DlqRetryDaemon {
         await this.processDlqOnce();
       } catch {}
     }, intervalMs);
+    this.timer.unref?.();
   }
 
   stop() {

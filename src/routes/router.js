@@ -125,10 +125,15 @@ async function handleEventsStream(req, res, ctx) {
   });
   res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
   ctx.sseClients.add(res);
-  req.on('close', () => {
+
+  const cleanup = () => {
     ctx.sseClients.delete(res);
     try { res.end(); } catch {}
-  });
+  };
+
+  req.on('close', cleanup);
+  req.on('error', cleanup);
+  res.on('error', cleanup);
 }
 
 // 5. Standard Intercom REST Send

@@ -11,7 +11,7 @@ const path = require('path');
 const os = require('os');
 const { MESH_DIR } = require('../../src/config');
 
-const EPHEMERAL_PREFIX_REGEX = /^(test|worker|stress|a2a|wake|ephem|fuzz|dry-agent|tmp_|agent[-_]|alpha_|architect_|beta_|coordinator_|reviewer_|challenger_|auditor_|batch[-_]|brand[-_]|cli[-_]|ended[-_]|epipe[-_]|live[-_]|task[-_]|sess[-_]|subworker[-_]|slow[-_]|executor[-_]|explorer[-_]?|crash[-_]|unit[-_]|recursion[-_]|burst[-_]|chrono[-_]|adv[-_]|sse[-_]|resilience[-_]|interrupt[-_]|mtime[-_]|locked[-_]|fallback[-_]|orchestrator[-_]|peer[-_]|merge[-_]|fast-path[-_]?|inbox[-_]|operator|boss[-_]|general|mimo[-_]|external_daemon[-_]?|reviewer$|opencode-coordinator$|[ab]$)/i;
+const EPHEMERAL_PREFIX_REGEX = /^(test|worker|stress|a2a|wake|ephem|fuzz|dry-agent|tmp_|agent[-_]|alpha_|architect_|beta_|coordinator_|reviewer_|challenger_|auditor_|batch[-_]|brand[-_]|cli[-_]|ended[-_]|epipe[-_]|live[-_]|task[-_]|sess[-_]|subworker[-_]|slow[-_]|executor[-_]|explorer[-_]?|crash[-_]|unit[-_]|recursion[-_]|burst[-_]|chrono[-_]|adv[-_]|sse[-_]|resilience[-_]|interrupt[-_]|mtime[-_]|locked[-_]|fallback[-_]|orchestrator[-_]|peer[-_]|merge[-_]|fast-path[-_]?|inbox[-_]|operator|boss[-_]|general|mimo[-_]|external_daemon[-_]?|reviewer$|opencode-coordinator$|offline[-_]|online[-_]|simulated[-_]|tester[-_]|[ab]$)/i;
 const PERMANENT_AGENTS = new Set(['suran', 'aditya', 'akash', 'keshav', 'madhav', 'pal', 'satyam', 'antigravity', 'opencode', 'claude']);
 
 /**
@@ -56,10 +56,11 @@ function cleanAgentMailbox(agentName, baseMeshDir = MESH_DIR) {
 }
 
 /**
- * Scans and cleans all mailboxes matching ephemeral test prefixes (e.g. 'test-', 'ephem-').
+ * Scans and cleans all mailboxes matching ephemeral test prefixes (e.g. 'test-', 'ephem-')
+ * as well as orphaned temporary files in the inbox root.
  * @param {RegExp} [pattern=EPHEMERAL_PREFIX_REGEX]
  * @param {string} [baseMeshDir]
- * @returns {number} count of pruned test mailboxes
+ * @returns {number} count of pruned test mailboxes and temp files
  */
 function cleanEphemeralMailboxes(pattern = EPHEMERAL_PREFIX_REGEX, baseMeshDir = MESH_DIR) {
   const inboxBase = path.join(baseMeshDir, 'inbox');
@@ -69,9 +70,59 @@ function cleanEphemeralMailboxes(pattern = EPHEMERAL_PREFIX_REGEX, baseMeshDir =
   try {
     const entries = fs.readdirSync(inboxBase, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.isDirectory() && pattern.test(entry.name) && !PERMANENT_AGENTS.has(entry.name.toLowerCase())) {
-        safeRmDir(path.join(inboxBase, entry.name));
-        pruned++;
+      const fullPath = path.join(inboxBase, entry.name);
+      if (entry.isDirectory()) {
+        if (pattern.test(entry.name) && !PERMANENT_AGENTS.has(entry.name.toLowerCase())) {
+          safeRmDir(fullPath);
+          pruned++;
+        }
+      } else if (entry.isFile() && (entry.name.startsWith('.tmp') || entry.name.endsWith('.tmp'))) {
+        try {
+          fs.unlinkSync(fullPath);
+          pruned++;
+        } catch {}
+      }
+    }
+  } catch {}
+  return pruned;
+}
+
+/**
+ * Safely cleans old test-generated messages in 'antigravity/' mailbox (e.g. older than maxAgeMs,
+ * orphaned .tmp files, or test dispatch responses).
+ * @param {number} [maxAgeMs=3600000]
+ * @param {string} [baseMeshDir=MESH_DIR]
+ * @returns {number} count of pruned messages
+ */
+function cleanAntigravityTestInbox(maxAgeMs = 3600000, baseMeshDir = MESH_DIR) {
+  const agDir = path.join(baseMeshDir, 'inbox', 'antigravity');
+  if (!fs.existsSync(agDir)) return 0;
+
+  let pruned = 0;
+  const now = Date.now();
+  try {
+    const files = fs.readdirSync(agDir);
+    for (const f of files) {
+      const fullPath = path.join(agDir, f);
+      // Prune orphaned temporary files immediately
+      if (f.startsWith('.tmp') || f.endsWith('.tmp')) {
+        try {
+          fs.unlinkSync(fullPath);
+          pruned++;
+        } catch {}
+        continue;
+      }
+
+      if (f.endsWith('.json')) {
+        try {
+          const stat = fs.statSync(fullPath);
+          const isOld = (now - stat.mtimeMs) > maxAgeMs;
+          const isTestFile = f.startsWith('test_') || f.startsWith('test-') || f.startsWith('sync-');
+          if (isOld || isTestFile) {
+            fs.unlinkSync(fullPath);
+            pruned++;
+          }
+        } catch {}
       }
     }
   } catch {}
@@ -135,26 +186,19 @@ function cleanTestHeartbeats(pattern = /^(test|ephem|temp|stress)-/i, baseMeshDi
  * Sweeps and cleans all test artifacts across inbox, legacy files, locks, and heartbeats.
  * @param {RegExp} [pattern=EPHEMERAL_PREFIX_REGEX]
  * @param {string} [baseMeshDir=MESH_DIR]
+ * @param {number} [agMaxAgeMs=3600000]
  * @returns {number} count of pruned items
  */
-function cleanAllTestArtifacts(pattern = EPHEMERAL_PREFIX_REGEX, baseMeshDir = MESH_DIR) {
+function cleanAllTestArtifacts(pattern = EPHEMERAL_PREFIX_REGEX, baseMeshDir = MESH_DIR, agMaxAgeMs = 3600000) {
   let pruned = 0;
 
-  // 1. Clean test inboxes
-  const inboxBase = path.join(baseMeshDir, 'inbox');
-  if (fs.existsSync(inboxBase)) {
-    try {
-      const entries = fs.readdirSync(inboxBase, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory() && pattern.test(entry.name) && !PERMANENT_AGENTS.has(entry.name.toLowerCase())) {
-          safeRmDir(path.join(inboxBase, entry.name));
-          pruned++;
-        }
-      }
-    } catch {}
-  }
+  // 1. Clean test inboxes and orphaned tmp files
+  pruned += cleanEphemeralMailboxes(pattern, baseMeshDir);
 
-  // 2. Clean legacy root JSON test files
+  // 2. Clean antigravity test inbox
+  pruned += cleanAntigravityTestInbox(agMaxAgeMs, baseMeshDir);
+
+  // 3. Clean legacy root JSON test files
   try {
     const rootFiles = fs.readdirSync(baseMeshDir);
     for (const f of rootFiles) {
@@ -170,10 +214,10 @@ function cleanAllTestArtifacts(pattern = EPHEMERAL_PREFIX_REGEX, baseMeshDir = M
     }
   } catch {}
 
-  // 3. Clean test locks
+  // 4. Clean test locks
   pruned += cleanStaleLocks(1000, baseMeshDir);
 
-  // 4. Clean test heartbeats
+  // 5. Clean test heartbeats
   pruned += cleanTestHeartbeats(pattern, baseMeshDir);
 
   return pruned;
@@ -189,6 +233,7 @@ function teardownAll(options = {}) {
     cleanAgentMailbox(options.agent, baseMeshDir);
   }
   cleanEphemeralMailboxes(options.pattern, baseMeshDir);
+  cleanAntigravityTestInbox(options.agMaxAgeMs ?? 3600000, baseMeshDir);
   cleanStaleLocks(options.lockMaxAgeMs || 2000, baseMeshDir);
   cleanTestHeartbeats(options.pattern, baseMeshDir);
 }
@@ -197,6 +242,7 @@ module.exports = {
   safeRmDir,
   cleanAgentMailbox,
   cleanEphemeralMailboxes,
+  cleanAntigravityTestInbox,
   cleanStaleLocks,
   cleanTestHeartbeats,
   cleanAllTestArtifacts,
