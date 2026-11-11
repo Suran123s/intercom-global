@@ -24,7 +24,7 @@
 | **Dead Letter Queue (DLQ)** | Discrete DLQ (`mesh/dlq/<id>.json`) with background retry daemon and poison-pill isolation |
 | **Mailbox Compaction** | Atomic pruning of empty ephemeral mailboxes and orphaned `.tmp` files (`{{CLI_COMMAND}} compact`) |
 | **Daemon Manager** | Background HTTP/WebSocket daemon with PID supervision (`{{CLI_COMMAND}} daemon start/stop/status`) |
-| **Live TUI Dashboard** | `intercom-tui` — blessed split-pane terminal dashboard with live file watcher |
+| **Live TUI Dashboard** | `intercom-tui` — OpenCode-inspired minimalist dashboard with Zen focus mode, 4-tab workflow, and Readline editing |
 | **Web Dashboard** | `examples/live-mesh-dashboard.html` — GitHub-dark SSE-powered UI |
 | **MCP Server** | `{{MCP_TOOLS_COUNT}}` tools (`{{MCP_TOOLS_LIST}}`) for Cursor / Claude Desktop / Antigravity via stdio (`{{MCP_SERVER_NAME}}`) |
 | **A2A Protocol** | Google A2A v1.0 agent card + task dispatch (`/.well-known/agent.json`) |
@@ -260,6 +260,59 @@ Start the daemon first: `{{CLI_COMMAND}} daemon start` (default `{{DAEMON_URL}}`
 │    Throughput Counters · Latency Histograms · Mailbox/DLQ Gauges       │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 🖥️ Clean TUI Guidelines & OpenCode Minimalist Standard
+
+The Intercom Global TUI (`{{CLI_COMMAND}} tui` or `bin/intercom-tui.js`) adheres to the **OpenCode Minimalist Standard**, emphasizing focus, whitespace, and serenity over noisy wall-to-wall border grids:
+
+1. **Focused Tabbed Layout**: Interface partitioned into 4 clean primary tabs:
+   - `[1] 📥 Inbox`: Peer mailboxes, unread counts, and chronological message stream.
+   - `[2] 📢 Channels`: Dedicated broadcast channels (`#backend`, `#frontend`, `#devops`) with threaded chat.
+   - `[3] 🩺 Mesh Health`: Real-time node status, lock states, NTFS latency, and DLQ health.
+   - `[4] ⚡ Activity`: Live event stream and transactional handoff tracking.
+2. **Zen / Focus Mode (`z` / `Z`)**:
+   - Single-key instant toggle that strips away KPI metric headers, borders, and secondary panels.
+   - Focuses strictly on conversation history and active message composition for distraction-free developer workflows.
+3. **Ergonomic Line Editing & Readline Shortcuts**:
+   - `Ctrl+A` / `Home`: Jump cursor to start of line.
+   - `Ctrl+E` / `End`: Jump cursor to end of line.
+   - `Ctrl+K`: Kill line from cursor to end.
+   - `Ctrl+U`: Clear entire input from cursor to start.
+   - `Ctrl+W`: Delete previous word before cursor.
+   - `Alt+B` / `Ctrl+Left`: Backward word navigation.
+   - `Alt+F` / `Ctrl+Right`: Forward word navigation.
+   - `Alt+D` / `Ctrl+Delete`: Forward word deletion.
+4. **Visual Focus Rings & Clickable Hitboxes**:
+   - Active cards and inputs feature clear high-contrast focus rings.
+   - Footer action pills (`[ ↵ Send ]`, `[ Tab Next ]`, `[ Esc Back ]`) register exact mouse hitboxes for point-and-click usability.
+
+---
+
+## 🌐 Peer Discovery Standards & Mesh Communication Patterns
+
+Intercom Global implements an enterprise-grade, deterministic mesh protocol across all `{{SUPPORTED_HARNESSES}}` environments:
+
+### 1. Peer Discovery & Liveness Heartbeats
+- **Dynamic Registry & Inboxes**: Agents register in `mesh/registry/<agent>.json` and maintain active inboxes under `mesh/inbox/<agent>/`.
+- **Heartbeat Manifests**: Active companions emit periodic heartbeats to `mesh/heartbeats/<agent>.json` recording timestamp, operational state (`idle`, `busy`, `waiting`), and active task references. Heartbeats older than 300s are automatically marked stale.
+- **Ephemeral Mailbox Pruning**: Discovery scans cleanly filter out temporary test mailboxes (`test_`, `tmp_`, `fuzz_`, or numeric PID suffixes), ensuring production rosters remain tidy.
+- **Autonomous CAS Cleanup**: Stale directory locks and expired `.tmp` envelope files are safely pruned using Compare-And-Swap (CAS) TTL recovery (`{{CLI_COMMAND}} compact`).
+
+### 2. Mesh Communication Patterns
+- **Point-to-Point (P2P) Atomic Envelopes**:
+  - Discrete message files (`mesh/inbox/<agent>/<timestamp>_<uuid>.json`) written atomically via temp-file swap.
+  - Zero lock contention between independent recipients.
+- **Channel Pub/Sub**:
+  - Discrete broadcast topics (`mesh/channels/<name>/<timestamp>_<uuid>.json`) with deduplicated subscriber delivery.
+- **Transactional Zero-Loss Handoffs**:
+  - Cross-agent delegation protocol (`mesh/handoffs/<ticketId>.json`) requiring recipient acceptance verification before releasing sender tasks.
+- **Dual-Speed Dispatch**:
+  - **Fast-Path**: In-memory Server-Sent Events (SSE) stream fanout with sub-millisecond latency (≤1ms) for real-time daemon subscribers.
+  - **Safe-Path**: NTFS discrete file-mesh providing indestructible persistence across process restarts and network interruptions.
+- **Dead Letter Queue (DLQ)**:
+  - Poison-pill isolation (`mesh/dlq/<uuid>.json`) preventing broken payloads from blocking subsequent messages, backed by an autonomous retry daemon.
 
 ---
 

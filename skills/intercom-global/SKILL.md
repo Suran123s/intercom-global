@@ -100,6 +100,16 @@ If MCP tools are not directly available, execute the global CLI (`{{CLI_COMMAND}
 intercom-wake <agentName> "<task instructions>"
 ```
 
+#### 7. Launch Modern OpenCode Intercom TUI Dashboard
+```bash
+{{CLI_COMMAND}} tui              # Interactive OpenCode minimalist dashboard (Inbox, Channels, Health, Activity)
+# Keybindings:
+# [1-4] or [Tab] Switch tabs ([1] Inbox, [2] Channels, [3] Mesh Health, [4] Activity)
+# [z] / [Z] Toggle Zen / Focus mode (strips KPI bars down to pure conversation & compose stream)
+# [s] / [↵] Send message | [c] Clear mailbox | [r] Refresh mesh status | [q] Quit
+# Readline line-editing: Ctrl+A (Home), Ctrl+E (End), Ctrl+K (Kill), Ctrl+U (Clear), Ctrl+W (Delete word), Alt+B/F (Word jump)
+```
+
 ---
 
 ## 🛡️ Zero-Qoder & Model Governance Policy

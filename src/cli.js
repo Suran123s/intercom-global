@@ -147,6 +147,9 @@ USAGE:
 
   intercom mcp
     Launches Model Context Protocol (MCP) stdio server for AI IDEs.
+
+  intercom tui
+    Launches modern OpenCode-inspired 4-tab interactive terminal UI dashboard.
 ================================================================================
 `);
 }
@@ -154,7 +157,7 @@ USAGE:
 const CLI_COMMANDS = [
   'send', 'watch', 'daemon', 'register', 'interrupt', 'ack', 'compact',
   'dlq', 'channel', 'handoff', 'peers', 'jules', 'governance', 'metrics',
-  'doctor', 'sync', 'mcp'
+  'doctor', 'sync', 'mcp', 'tui'
 ];
 
 async function run(rawArgv = process.argv.slice(2)) {
@@ -562,6 +565,11 @@ async function run(rawArgv = process.argv.slice(2)) {
         try {
           scheduleBackgroundSync({ mode: 'subprocess' });
         } catch {}
+        break;
+      }
+
+      case 'tui': {
+        require('../bin/intercom-tui');
         break;
       }
 
