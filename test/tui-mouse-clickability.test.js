@@ -1,263 +1,286 @@
 /**
  * test/tui-mouse-clickability.test.js
  *
- * Full Mouse Clickability & Master-Detail Navigation Verification Suite.
- * Validates:
- * 1. SGR Mouse tracking escape sequence and coordinate parsing.
- * 2. Left Navigation category hitboxes ([ Inbox ], [ Channels ], [ Peers ], [ Health ]).
- * 3. Peer mailbox list clickable hitboxes (antigravity, opencode, jules, sentinel, coordinator).
- * 4. Topic channels clickable hitboxes (#general, #alerts, #handoffs).
- * 5. Footer buttons clickable hitboxes ([ ↵ Send ], [ Clear ], [ Refresh ], [ Quit ]).
- * 6. String width and Unicode wide-character boundary alignment (zero border misalignment).
- * 7. Pure messaging layout invariant (no task flags, no dispatch buttons).
+ * Wave 6 Standalone Intercom TUI — Minimalist UX, SGR Mouse Clickability & Layout Suite.
+ *
+ * Verifies:
+ * 1. SGR 1006 Extended Mouse Tracking startup/exit escapes & raw sequence decoding.
+ * 2. Full Row-1 Top Bar (top-left sub-tabs, [ + New ], close ×, Tab key, top-right [ ☰ Menu ]).
+ * 3. Eliminated fixed left-sidebar clutter by default & Centered `✉ Intercom` Composer.
+ * 4. Collapsible RIGHT-side sidebar (hidden by default; right-aligned hitboxes when opened).
+ * 5. Target Selector Dropdown (`To: [ @target ▾ ]`) & Live `/` Slash-Command Dropdown.
+ * 6. Info [ ↻ Refresh ], Settings telemetry toggles & toggleable Lower-Corner Stats.
+ * 7. Deep dark charcoal background palette (`48;5;234m` / `48;5;233m`) & Pure Messaging Invariant.
  */
 
-const { describe, test } = require("node:test");
+const { describe, it, beforeEach, after } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
 const path = require("path");
 
-describe("Intercom Global TUI — Full Mouse Clickability & Layout Suite", () => {
-  const tuiPath = path.join(__dirname, "..", "bin", "intercom-tui.js");
-  const tuiSource = fs.readFileSync(tuiPath, "utf8");
+const tui = require("../bin/intercom-tui.js");
 
-  // 1. SGR Mouse Protocol Initialization
-  describe("1. SGR Mouse Protocol Initialization", () => {
-    test("Enables SGR 1006 extended mouse tracking on startup", () => {
-      assert.ok(
-        tuiSource.includes("\\x1b[?1000h\\x1b[?1002h\\x1b[?1006h"),
-        "Must send VT100/xterm 1006 SGR mouse tracking escape sequence"
+const TUI_PATH = path.resolve(__dirname, "..", "bin", "intercom-tui.js");
+const stripAnsi = (str) => String(str || "").replace(/\x1b\[[0-9;]*m/g, "");
+
+describe("Intercom Global TUI — Wave 6 Minimalist UX & Full Mouse Clickability Suite", () => {
+  after(() => {
+    tui.destroyScreen();
+  });
+
+  beforeEach(() => {
+    tui.clearHitboxes();
+    tui.setState({
+      activeNav: 0,
+      rightSidebarOpen: false,
+      selectedType: "peer",
+      selectedAgent: "jules",
+      selectedChannel: "general",
+      agentList: ["antigravity", "opencode", "jules", "sentinel", "coordinator"],
+      channelList: ["general", "alerts", "handoffs"],
+      agentIdx: 2,
+      channelIdx: 0,
+      subTabs: [{ id: "home", kind: "home", label: "✦ Home", closable: false }],
+      activeSubTabIndex: 0,
+      composerBuffer: "",
+      composerFocused: true,
+      targetDropdownOpen: false,
+      targetDropdownIndex: 0,
+      slashMenuDismissed: false,
+      slashSelectedIndex: 0,
+      settings: {
+        showCornerStats: true,
+        readReceipts: true,
+        showTimestamps: true,
+        darkTheme: true,
+        sidebarDefaultOpen: false
+      },
+      selectedSettingIndex: 0,
+      meshStats: { peers: 5, unread: 2, channels: 3, dlq: 0 }
+    });
+  });
+
+  describe("1. SGR Mouse Protocol Initialization & Source Escapes", () => {
+    it("Enables SGR 1006 extended mouse tracking on startup", () => {
+      const src = fs.readFileSync(TUI_PATH, "utf8");
+      assert.match(src, /\\x1b\[\?1000h/, "Must enable SGR basic mouse tracking");
+      assert.match(src, /\\x1b\[\?1002h/, "Must enable cell motion mouse tracking");
+      assert.match(src, /\\x1b\[\?1006h/, "Must enable SGR 1006 extended mouse coordinates");
+    });
+
+    it("Cleans up SGR mouse modes on exit", () => {
+      const src = fs.readFileSync(TUI_PATH, "utf8");
+      assert.match(src, /\\x1b\[\?1000l/);
+      assert.match(src, /\\x1b\[\?1002l/);
+      assert.match(src, /\\x1b\[\?1006l/);
+    });
+
+    it("Decodes raw SGR mouse sequences accurately via parseSgrSequence & sgrRegex", () => {
+      const rawPress = "\x1b[<0;24;12M";
+      const rawWheel = "\x1b[<64;40;15M";
+      const rawRelease = "\x1b[<0;24;12m";
+
+      const press = tui.parseSgrSequence(rawPress);
+      assert.equal(press.length, 1);
+      assert.deepEqual(press[0], { rawBtn: 0, col: 24, row: 12, isRelease: false });
+
+      const wheel = tui.parseSgrSequence(rawWheel);
+      assert.equal(wheel.length, 1);
+      assert.equal(wheel[0].rawBtn, 64);
+
+      const rel = tui.parseSgrSequence(rawRelease);
+      assert.equal(rel[0].isRelease, true);
+    });
+  });
+
+  describe("2. Row-1 Full Top Bar (Top-Left Sub-Tabs & Top-Right [ ☰ Menu ])", () => {
+    it("Renders top-left sub-tabs, [ + New ], and top-right [ ☰ Menu ] on Row 1", () => {
+      const frame = tui.renderFrame(100, 30);
+      assert.equal(frame.length, 30);
+      const topLine = stripAnsi(frame[0]);
+
+      assert.ok(topLine.includes("[ ✦ Home ]"), "Row 1 must include [ ✦ Home ] sub-tab");
+      assert.ok(topLine.includes("[ + New ]"), "Row 1 must include [ + New ] button");
+      assert.ok(topLine.includes("[ ☰ Menu ]"), "Row 1 must include top-right [ ☰ Menu ] button");
+
+      const hits = tui.getHitboxes().filter((h) => h.row === 1);
+      assert.ok(hits.some((h) => h.action === "switch_subtab"), "Must register switch_subtab hitbox");
+      assert.ok(hits.some((h) => h.action === "new_subtab"), "Must register new_subtab hitbox");
+      const menuHit = hits.find((h) => h.action === "toggle_sidebar");
+      assert.ok(menuHit, "Must register toggle_sidebar hitbox");
+      assert.ok(menuHit.startCol > 70, "Menu button must be right-aligned on Row 1");
+    });
+
+    it("Clicking [ + New ], sub-tab close ×, and pressing Tab manages sub-tabs cleanly", async () => {
+      tui.renderFrame(100, 30);
+      const newHit = tui.getHitboxes().find((h) => h.action === "new_subtab");
+      assert.ok(newHit);
+      await tui.handleHit(newHit.row, newHit.startCol + 1);
+
+      let state = tui.getState();
+      assert.equal(state.subTabs.length, 2, "Must open a second sub-tab");
+      assert.equal(state.activeSubTabIndex, 1);
+
+      // Tab key cycles back to Home (index 0) and forward again
+      await tui.handleKey("", { name: "tab" });
+      state = tui.getState();
+      assert.equal(state.activeSubTabIndex, 0, "Tab must cycle to [ ✦ Home ]");
+      assert.equal(state.activeNav, 0);
+
+      // Re-render to inspect closable sub-tab hitboxes
+      tui.renderFrame(100, 30);
+      const closeHit = tui.getHitboxes().find((h) => h.action === "close_subtab");
+      assert.ok(closeHit, "Closable conversation sub-tab must expose × hitbox");
+      await tui.handleHit(closeHit.row, closeHit.startCol);
+
+      state = tui.getState();
+      assert.equal(state.subTabs.length, 1, "Closing sub-tab removes it while keeping Home");
+      assert.equal(state.subTabs[0].kind, "home");
+    });
+  });
+
+  describe("3. Eliminated Fixed Left-Sidebar & Centered Composer UX", () => {
+    it("Hides sidebar by default and centers composer box on Home view", () => {
+      assert.equal(tui.getState().rightSidebarOpen, false, "rightSidebarOpen must default to false");
+      assert.deepEqual(tui.renderSidebar(), [], "renderSidebar must return [] when collapsed");
+
+      const frame = tui.renderFrame(100, 30);
+      const plainFrame = frame.map(stripAnsi).join("\n");
+
+      assert.ok(!plainFrame.includes("MAILBOXES"), "Fixed left-sidebar clutter must be hidden by default");
+      assert.ok(plainFrame.includes("✉ Intercom"), "Centered Home view must show ✉ Intercom heading");
+      assert.ok(plainFrame.includes("To: [ @jules ▾ ]"), "Centered composer must render target selector pill");
+      assert.ok(plainFrame.includes("[ ↵ Send ]"), "Centered composer must render [ ↵ Send ] button");
+
+      const hits = tui.getHitboxes();
+      const targetHit = hits.find((h) => h.action === "toggle_target_dropdown");
+      const sendHit = hits.find((h) => h.action === "btn_send");
+      const focusHit = hits.find((h) => h.action === "focus_compose");
+      assert.ok(targetHit && sendHit && focusHit, "Composer must expose clickable target, send, and input hitboxes");
+      // Centered horizontally: target dropdown should start away from col 1 edge
+      assert.ok(focusHit.startCol > 10, `Composer box must be horizontally centered (startCol=${focusHit.startCol})`);
+    });
+  });
+
+  describe("4. Collapsible RIGHT-Side Sidebar (Menu Button & Ctrl+B)", () => {
+    it("Opens on the RIGHT side via [ ☰ Menu ] click or Ctrl+B and exposes clickable nav, peers, and channels", async () => {
+      tui.renderFrame(100, 30);
+      const menuHit = tui.getHitboxes().find((h) => h.action === "toggle_sidebar");
+      await tui.handleHit(menuHit.row, menuHit.startCol);
+
+      assert.equal(tui.getState().rightSidebarOpen, true);
+      tui.renderFrame(100, 30);
+
+      const hits = tui.getHitboxes();
+      const navHits = hits.filter((h) => h.action === "nav");
+      const peerHits = hits.filter((h) => h.action === "select_agent");
+      const chHits = hits.filter((h) => h.action === "select_channel");
+
+      assert.equal(navHits.length, 7, "Right sidebar must expose all 7 navigation categories");
+      assert.equal(peerHits.length, 5, "Right sidebar must expose all 5 agent peers");
+      assert.equal(chHits.length, 3, "Right sidebar must expose all 3 topic channels");
+
+      // Verify strict RIGHT-side placement (cols > 50 on a 100-col screen)
+      for (const h of [...navHits, ...peerHits, ...chHits]) {
+        assert.ok(h.startCol > 60, `Sidebar hitbox ${h.action} must render on RIGHT side (startCol=${h.startCol})`);
+      }
+
+      // Clicking a peer opens Inbox thread and sub-tab
+      const opencodeHit = peerHits.find((h) => h.payload.name === "opencode");
+      assert.ok(opencodeHit);
+      await tui.handleHit(opencodeHit.row, opencodeHit.startCol + 2);
+      assert.equal(tui.getState().selectedAgent, "opencode");
+      assert.equal(tui.getState().activeNav, 1);
+
+      // Ctrl+B closes right sidebar
+      await tui.handleKey("", { name: "b", ctrl: true });
+      assert.equal(tui.getState().rightSidebarOpen, false);
+    });
+  });
+
+  describe("5. Target Selector Dropdown & Live `/` Slash-Command Dropdown", () => {
+    it("Clicking To: [ @target ▾ ] opens real dropdown with Peers, Channels & Refresh", async () => {
+      tui.renderFrame(100, 30);
+      const toggleHit = tui.getHitboxes().find((h) => h.action === "toggle_target_dropdown");
+      await tui.handleHit(toggleHit.row, toggleHit.startCol + 1);
+      assert.equal(tui.getState().targetDropdownOpen, true);
+
+      const frame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("Select Target"), "Target dropdown overlay must render");
+      assert.ok(frame.includes("↻ Refresh"), "Target dropdown must include [ ↻ Refresh ]");
+
+      const alertsHit = tui.getHitboxes().find(
+        (h) => h.action === "select_target_option" && h.payload.type === "channel" && h.payload.name === "alerts"
       );
+      assert.ok(alertsHit, "Must register hitbox for #alerts inside target dropdown");
+      await tui.handleHit(alertsHit.row, alertsHit.startCol + 1);
+
+      const state = tui.getState();
+      assert.equal(state.selectedType, "channel");
+      assert.equal(state.selectedChannel, "alerts");
+      assert.equal(state.targetDropdownOpen, false);
     });
 
-    test("Cleans up SGR mouse modes on exit", () => {
-      assert.ok(
-        tuiSource.includes("\\x1b[?1000l\\x1b[?1002l\\x1b[?1006l"),
-        "Must disable mouse tracking escape sequences upon cleanExit"
+    it("Typing `/` displays live filterable slash-command menu navigable by arrows/click/Enter", async () => {
+      tui.setState({ composerBuffer: "/s" });
+      const filtered = tui.getFilteredSlashCommands("/s");
+      assert.ok(filtered.some((c) => c.cmd === "/settings"), "Filter `/s` must include /settings");
+      assert.ok(!filtered.some((c) => c.cmd === "/peers"), "Filter `/s` must exclude /peers");
+
+      const frame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("/ Commands"), "Composer starting with `/` must render live slash dropdown");
+      assert.ok(frame.includes("/settings"), "Filtered slash command must be visible in dropdown");
+
+      const setHit = tui.getHitboxes().find(
+        (h) => h.action === "select_slash_command" && h.payload.cmd === "/settings"
       );
-    });
+      assert.ok(setHit, "Slash command row must have clickable hitbox");
+      await tui.handleHit(setHit.row, setHit.startCol + 1);
 
-    test("Decodes raw SGR mouse sequence correctly via regex", () => {
-      const sgrRegex = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
-      const testSequence = String.fromCharCode(27) + "[<0;15;6M";
-      const matches = [...testSequence.matchAll(sgrRegex)];
-
-      assert.equal(matches.length, 1);
-      assert.equal(matches[0][1], "0", "Button code 0 for left click");
-      assert.equal(matches[0][2], "15", "Col 15");
-      assert.equal(matches[0][3], "6", "Row 6");
-      assert.equal(matches[0][4], "M", "Press event ('M')");
+      assert.equal(tui.getState().activeNav, 5, "Selecting /settings opens Settings view");
+      assert.equal(tui.getState().composerBuffer, "", "Executing non-arg slash command clears prompt");
     });
   });
 
-  // 2. Hitbox Testing and Left Nav Categories
-  describe("2. Left Navigation Categories Clickability", () => {
-    // Replicate hitbox engine from intercom-tui.js
-    let hitboxes = [];
-    function registerHitbox(row, startCol, endCol, action, payload = {}) {
-      hitboxes.push({ row, startCol, endCol, action, payload });
-    }
-    function hitTest(row, col) {
-      for (const hb of hitboxes) {
-        if (hb.row === row && col >= hb.startCol && col <= hb.endCol) {
-          return hb;
-        }
-      }
-      return null;
-    }
+  describe("6. Info Refresh, Settings Toggles & Toggleable Lower-Corner Stats", () => {
+    it("Info view renders mesh stats and clickable [ ↻ Refresh ] button", async () => {
+      tui.setState({ activeNav: 4 }); // Info
+      const frame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("Intercom Mesh Health & System Info"));
+      assert.ok(frame.includes("[ ↻ Refresh ]"));
+      assert.ok(tui.getHitboxes().some((h) => h.action === "btn_refresh"));
+    });
 
-    test("Registers hitboxes for all 4 navigation categories", () => {
-      hitboxes = [];
-      const NAV_TABS = ["Inbox", "Channels", "Peers", "Health"];
-      const sW = 26;
+    it("Settings view toggles Lower-Corner Stats ON/OFF interactively", async () => {
+      let frame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("Peers: 5 · Unread: 2 · Ch: 3 · DLQ: 0"), "Lower-corner stats visible when enabled");
 
-      // Simulate renderSidebar line offsets
-      // Header is row 1, top border is row 2
-      let lineCount = 1; // top border pushed
-      for (let i = 0; i < NAV_TABS.length; i++) {
-        const screenRow = 2 + lineCount;
-        registerHitbox(screenRow, 1, sW, "nav", { index: i });
-        lineCount++;
-      }
+      tui.setState({ activeNav: 5 }); // Settings
+      tui.renderFrame(100, 30);
+      const statsToggleHit = tui.getHitboxes().find(
+        (h) => h.action === "toggle_setting" && h.payload.key === "showCornerStats"
+      );
+      assert.ok(statsToggleHit, "Corner Stats toggle row must be clickable");
+      await tui.handleHit(statsToggleHit.row, statsToggleHit.startCol + 2);
 
-      // Assert each tab is clickable
-      const hitInbox = hitTest(3, 10);
-      assert.ok(hitInbox, "Click at row 3 col 10 must hit Inbox");
-      assert.equal(hitInbox.action, "nav");
-      assert.equal(hitInbox.payload.index, 0);
-
-      const hitChannels = hitTest(4, 5);
-      assert.ok(hitChannels, "Click at row 4 col 5 must hit Channels");
-      assert.equal(hitChannels.payload.index, 1);
-
-      const hitPeers = hitTest(5, 12);
-      assert.ok(hitPeers, "Click at row 5 col 12 must hit Peers");
-      assert.equal(hitPeers.payload.index, 2);
-
-      const hitHealth = hitTest(6, 20);
-      assert.ok(hitHealth, "Click at row 6 col 20 must hit Health");
-      assert.equal(hitHealth.payload.index, 3);
+      assert.equal(tui.getState().settings.showCornerStats, false);
+      frame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(!frame.includes("Peers: 5 · Unread: 2"), "Lower-corner stats hidden when toggled OFF");
     });
   });
 
-  // 3. Clickable Peer Mailbox List
-  describe("3. Clickable Peer Mailbox List", () => {
-    let hitboxes = [];
-    function registerHitbox(row, startCol, endCol, action, payload = {}) {
-      hitboxes.push({ row, startCol, endCol, action, payload });
-    }
-    function hitTest(row, col) {
-      for (const hb of hitboxes) {
-        if (hb.row === row && col >= hb.startCol && col <= hb.endCol) {
-          return hb;
-        }
-      }
-      return null;
-    }
-
-    test("Clicking any peer immediately routes to select_agent and opens their mailbox", () => {
-      hitboxes = [];
-      const peers = ["antigravity", "opencode", "jules", "sentinel", "coordinator"];
-      const sW = 26;
-      let lineCount = 6; // after top border + 4 nav tabs + peers header
-
-      for (let i = 0; i < peers.length; i++) {
-        const screenRow = 2 + lineCount;
-        registerHitbox(screenRow, 1, sW, "select_agent", { name: peers[i], index: i });
-        lineCount++;
-      }
-
-      // Test click on opencode (index 1, row = 2 + 7 = 9)
-      const hit = hitTest(9, 10);
-      assert.ok(hit, "Must hit opencode peer row");
-      assert.equal(hit.action, "select_agent");
-      assert.equal(hit.payload.name, "opencode");
-      assert.equal(hit.payload.index, 1);
-
-      // Test click on jules (index 2, row = 2 + 8 = 10)
-      const hitJules = hitTest(10, 8);
-      assert.ok(hitJules);
-      assert.equal(hitJules.payload.name, "jules");
-
-      // Test click on sentinel (index 3, row = 2 + 9 = 11)
-      const hitSentinel = hitTest(11, 15);
-      assert.ok(hitSentinel);
-      assert.equal(hitSentinel.payload.name, "sentinel");
-    });
-  });
-
-  // 4. Clickable Topic Channels
-  describe("4. Clickable Topic Channels", () => {
-    let hitboxes = [];
-    function registerHitbox(row, startCol, endCol, action, payload = {}) {
-      hitboxes.push({ row, startCol, endCol, action, payload });
-    }
-    function hitTest(row, col) {
-      for (const hb of hitboxes) {
-        if (hb.row === row && col >= hb.startCol && col <= hb.endCol) {
-          return hb;
-        }
-      }
-      return null;
-    }
-
-    test("Clicking #general or #alerts opens that channel stream", () => {
-      hitboxes = [];
-      const channels = ["general", "alerts", "handoffs"];
-      const sW = 26;
-      let lineCount = 12; // after header + nav + peers + channels header
-
-      for (let i = 0; i < channels.length; i++) {
-        const screenRow = 2 + lineCount;
-        registerHitbox(screenRow, 1, sW, "select_channel", { name: channels[i], index: i });
-        lineCount++;
-      }
-
-      const hitGeneral = hitTest(14, 5);
-      assert.ok(hitGeneral);
-      assert.equal(hitGeneral.action, "select_channel");
-      assert.equal(hitGeneral.payload.name, "general");
-
-      const hitAlerts = hitTest(15, 7);
-      assert.ok(hitAlerts);
-      assert.equal(hitAlerts.action, "select_channel");
-      assert.equal(hitAlerts.payload.name, "alerts");
-    });
-  });
-
-  // 5. Clickable Footer Buttons
-  describe("5. Clickable Footer Buttons", () => {
-    let hitboxes = [];
-    function registerHitbox(row, startCol, endCol, action, payload = {}) {
-      hitboxes.push({ row, startCol, endCol, action, payload });
-    }
-    function hitTest(row, col) {
-      for (const hb of hitboxes) {
-        if (hb.row === row && col >= hb.startCol && col <= hb.endCol) {
-          return hb;
-        }
-      }
-      return null;
-    }
-
-    test("Registers exact hitboxes for Send, Clear, Refresh, and Quit buttons", () => {
-      hitboxes = [];
-      const rows = 24;
-      const btnRow = rows - 1; // 23
-
-      const buttons = [
-        { label: "↵ Send",  action: "btn_send",    width: 10 },
-        { label: "Clear",   action: "btn_clear",   width: 9 },
-        { label: "Refresh", action: "btn_refresh", width: 11 },
-        { label: "Quit",    action: "btn_quit",    width: 8 }
-      ];
-
-      let currentCol = 3;
-      for (const btn of buttons) {
-        const startCol = currentCol;
-        const endCol   = currentCol + btn.width - 1;
-        registerHitbox(btnRow, startCol, endCol, btn.action, {});
-        currentCol = endCol + 3;
-      }
-
-      // Click on Send [ ↵ Send ] (cols 3..12)
-      const hitSend = hitTest(23, 6);
-      assert.ok(hitSend, "Must hit Send button");
-      assert.equal(hitSend.action, "btn_send");
-
-      // Click on Clear [ Clear ] (cols 15..23)
-      const hitClear = hitTest(23, 18);
-      assert.ok(hitClear, "Must hit Clear button");
-      assert.equal(hitClear.action, "btn_clear");
-
-      // Click on Refresh [ Refresh ] (cols 26..36)
-      const hitRefresh = hitTest(23, 30);
-      assert.ok(hitRefresh, "Must hit Refresh button");
-      assert.equal(hitRefresh.action, "btn_refresh");
-
-      // Click on Quit [ Quit ] (cols 39..46)
-      const hitQuit = hitTest(23, 42);
-      assert.ok(hitQuit, "Must hit Quit button");
-      assert.equal(hitQuit.action, "btn_quit");
-
-      // Click in the gap between Send and Clear (col 13) should not trigger
-      const hitGap = hitTest(23, 13);
-      assert.equal(hitGap, null, "Click in gap must not hit any button");
-    });
-  });
-
-  // 6. Deep Dark Background Styling & Anti-Clutter Invariant
-  describe("6. Aesthetics & Pure Messaging Invariants", () => {
-    test("Uses deep dark charcoal background palette (color 234 / #0d1117)", () => {
-      assert.ok(tuiSource.includes("48;5;234m"), "Must include 234 charcoal background");
-      assert.ok(tuiSource.includes("48;5;233m"), "Must include 233 sidebar background");
+  describe("7. Aesthetics & Pure Messaging Invariants", () => {
+    it("Uses deep dark charcoal background palette (color 234 / #0d1117)", () => {
+      const src = fs.readFileSync(TUI_PATH, "utf8");
+      assert.ok(src.includes("48;5;234m"), "Main panel must use #0d1117 / xterm-234 background");
+      assert.ok(src.includes("48;5;233m"), "Sidebar / header must use deep contrast 233 background");
     });
 
-    test("Maintains pure messaging focus without dispatch or execution flags", () => {
-      // Invariant: no task dispatch, no harness execution flags in pure intercom
-      assert.ok(!tuiSource.includes("--async-execution"), "Pure intercom must not contain async-execution flags");
-      assert.ok(!tuiSource.includes("execute_dispatch"), "Pure intercom must not contain execute_dispatch");
-      assert.ok(!tuiSource.includes("task_flags"), "Pure intercom must not contain task_flags");
+    it("Maintains 100% pure messaging focus without delegation or execution flags", () => {
+      const src = fs.readFileSync(TUI_PATH, "utf8");
+      assert.ok(!src.includes("--async-execution"), "TUI must never contain --async-execution");
+      assert.ok(!src.includes("execute_dispatch"), "TUI must never contain execute_dispatch");
+      assert.ok(!src.includes("task_flags"), "TUI must never contain task_flags");
     });
   });
 });
