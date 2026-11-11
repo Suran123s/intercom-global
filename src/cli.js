@@ -142,11 +142,20 @@ USAGE:
   intercom doctor
     Executes comprehensive health, permissions, and network diagnostics.
 
+  intercom sync [--force] [--hydrate [file]] [--write] [--vars] [--url <url>] [--json]
+    Scrapes & purifies live model/harness registries, updates TTL cache, and hydrates .md variables.
+
   intercom mcp
     Launches Model Context Protocol (MCP) stdio server for AI IDEs.
 ================================================================================
 `);
 }
+
+const CLI_COMMANDS = [
+  'send', 'watch', 'daemon', 'register', 'interrupt', 'ack', 'compact',
+  'dlq', 'channel', 'handoff', 'peers', 'jules', 'governance', 'metrics',
+  'doctor', 'sync', 'mcp'
+];
 
 async function run(rawArgv = process.argv.slice(2)) {
   const { _, flags } = parseArgs(rawArgv);
@@ -540,9 +549,19 @@ async function run(rawArgv = process.argv.slice(2)) {
         break;
       }
 
+      case 'sync': {
+        const { runSyncCli } = require('../scripts/live-scrape-sync');
+        await runSyncCli(rawArgv.slice(1));
+        break;
+      }
+
       case 'mcp': {
         const { startMcpServer } = require('./mcp/server');
+        const { scheduleBackgroundSync } = require('./live-scraper');
         startMcpServer();
+        try {
+          scheduleBackgroundSync({ mode: 'subprocess' });
+        } catch {}
         break;
       }
 
@@ -1201,7 +1220,9 @@ async function runDoctor() {
 module.exports = {
   run,
   runDoctor,
-  parseArgs
+  parseArgs,
+  showHelp,
+  CLI_COMMANDS
 };
 
 if (require.main === module) {

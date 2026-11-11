@@ -11,6 +11,7 @@ const governance = require('./core/governance');
 const antigravityBridge = require('./bridges/antigravity-bridge');
 const cli = require('./cli');
 const mcp = require('./mcp/server');
+const liveScraper = require('./live-scraper');
 
 module.exports = {
   config,
@@ -23,9 +24,11 @@ module.exports = {
   julesBridge,
   antigravityBridge,
   governance,
+  liveScraper,
   ...julesDelegator,
   ...governance,
   ...antigravityBridge,
+  ...liveScraper,
   ...cli,
   ...mcp
 };

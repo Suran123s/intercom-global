@@ -21,18 +21,7 @@ const {
 const { interruptAgent } = require('../core/interrupter');
 const { PORT } = require('../config');
 
-function startMcpServer() {
-  // CRITICAL INVARIANT: Isolate stdout strictly for MCP JSON-RPC protocol
-  const originalLog = console.log;
-  console.log = (...args) => console.error(...args);
-  console.info = (...args) => console.error(...args);
-
-  const server = new Server(
-    { name: "intercom-global", version: "2.0.0" },
-    { capabilities: { tools: {} } }
-  );
-
-  const tools = [
+const MCP_TOOLS = [
     {
       name: "send_message",
       description: "Dispatch a message or task to another AI companion or supervisor across IDEs and terminal harnesses",
@@ -178,10 +167,21 @@ function startMcpServer() {
         properties: {}
       }
     }
-  ];
+];
+
+function startMcpServer() {
+  // CRITICAL INVARIANT: Isolate stdout strictly for MCP JSON-RPC protocol
+  const originalLog = console.log;
+  console.log = (...args) => console.error(...args);
+  console.info = (...args) => console.error(...args);
+
+  const server = new Server(
+    { name: "intercom-global", version: "2.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools
+    tools: MCP_TOOLS
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -427,7 +427,8 @@ function startMcpServer() {
 }
 
 module.exports = {
-  startMcpServer
+  startMcpServer,
+  MCP_TOOLS
 };
 
 if (require.main === module) {

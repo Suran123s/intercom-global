@@ -28,7 +28,8 @@
     "daemon": "node bin/intercom.js daemon",
     "doctor": "node bin/intercom.js doctor",
     "mcp": "node bin/intercom-mcp.js",
-    "peers": "node bin/intercom.js peers"
+    "peers": "node bin/intercom.js peers",
+    "sync": "node scripts/live-scrape-sync.js"
   },
   "repository": {
     "type": "git",
