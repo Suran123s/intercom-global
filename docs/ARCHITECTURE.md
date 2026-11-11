@@ -1,9 +1,10 @@
 # 🌐 Universal Cross-IDE & Cross-Harness Intercom Architecture (`intercom-global`)
 
-> **Package**: `@advance/intercom-global`  
+> **Package**: `{{PROJECT_NAME}}`  
 > **Status**: Production Architecture Specification  
-> **Target Runtimes**: Google Antigravity, Cursor, Windsurf, VS Code / Cline, Claude Code, OpenCode CLI, Alibaba Qoder, Google Jules  
-> **Document Version**: 2.0.0  
+> **Target Runtimes**: `{{SUPPORTED_HARNESSES}}` (Active detected: `{{ACTIVE_HARNESSES}}`)  
+> **Document Version**: {{PROJECT_VERSION}}  
+> **Snapshot Date**: {{CURRENT_DATE}} (Last Synced: {{LAST_SYNCED_AT}})  
 > **Author**: Teamwork Architecture Group (Milestone 1)  
 
 ---
@@ -39,7 +40,7 @@ Prior implementations of cross-agent communication frameworks suffered from fata
 ### 1.2 The Solution: `intercom-global` Architecture
 
 `intercom-global` resolves these fundamental tensions through a **Defense-in-Depth, Dual-Transport Architecture**:
-- **Fast-Path**: High-velocity local loopback HTTP/WebSocket daemon (`127.0.0.1:4150`) delivering messages and interruption events in **$\le 5\text{ms}$**.
+- **Fast-Path**: High-velocity local loopback HTTP/WebSocket daemon (`{{DAEMON_URL}}`) delivering messages and interruption events in **$\le 5\text{ms}$**.
 - **Safe-Path**: Zero-dependency **Discrete Atomic File-Mesh** (`mesh/inbox/<recipient>/<timestamp>_<uuid>.json`) guaranteeing **100% zero-drop delivery** through mathematically independent, append-only file operations.
 - **Heterogeneous Interruption Engine**: Environment-native interruption adapting to each platform's lifecycle (stdin injection, ConPTY emulation, SSE cancellations, MCP tool interrupts).
 - **Google Jules Cloud Delegation**: Single-file heavy-lift routing (>100 LOC modifications, complex AST rewrites, test suites) with strict 1–3 file bounds and concurrency gating.
@@ -87,8 +88,8 @@ The framework decouples message transmission into two complementary planes: the 
 ### 2.1 Fast-Path Transport (HTTP / WebSockets / Named Pipes)
 
 The Fast-Path is active whenever an agent or daemon is running and reachable on loopback:
-- **Port Allocation**: Dedicated loopback HTTP and WebSocket server listening on `127.0.0.1:4150` (configurable via `INTERCOM_PORT`).
-- **Full-Duplex WebSockets**: Persistent duplex channel `ws://127.0.0.1:4150/ws?agent=<agentName>` allowing immediate push notifications with $<2\text{ms}$ latency.
+- **Port Allocation**: Dedicated loopback HTTP and WebSocket server listening on `127.0.0.1:{{DAEMON_PORT}}` (configurable via `INTERCOM_PORT`).
+- **Full-Duplex WebSockets**: Persistent duplex channel `ws://127.0.0.1:{{DAEMON_PORT}}/ws?agent=<agentName>` allowing immediate push notifications with $<2\text{ms}$ latency.
 - **Server-Sent Events (SSE)**: Unidirectional streaming endpoint `GET /api/events?agent=<agentName>` for lightweight clients and browser-based interfaces.
 - **Named Pipes (Windows)**: High-speed local Win32 Named Pipe (`\\.\pipe\intercom-<agentName>`) using length-prefixed binary framing for environments where TCP sockets are restricted.
 - **Unix Domain Sockets (POSIX)**: Local socket file (`/tmp/intercom-<agentName>.sock`) on Linux/macOS.
@@ -112,7 +113,7 @@ When an agent process is paused, restarting, executing a long-running compile st
 ├── locks/
 │   └── registry.lock/                   # Directory CAS lock (with TTL)
 └── archive/
-    └── 2026-10-24/
+    └── {{CURRENT_DATE}}/
         └── worker_m1/                   # Acknowledged/processed messages
 ```
 
@@ -143,7 +144,7 @@ The following matrix provides the definitive, production-grade mapping of Inter-
 
 | Target Environment | Primary IPC Transport | Fallback IPC Mechanism | Interruption Capability & Latency | Windows Compatibility & Runtime Caveats | Security & Path Isolation |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1. Google Antigravity** | Model Context Protocol (`intercom-mcp`) via stdio + Local HTTP Daemon (`:4150`) | Discrete File-Mesh (`.agents/mesh/`) with `/schedule` polling timers | **Active Supervisor Steer**: `<50ms` via `manage_task(Action="send_input")` or `send_message`. Reactive wakeup via scheduler. | Fully compatible. Node.js runtime executes natively on Windows 10/11. Powershell shell runner. | Strict workspace sandboxing; path validation enforces containment within authorized project roots. |
+| **1. Google Antigravity** | Model Context Protocol (`intercom-mcp`) via stdio + Local HTTP Daemon (`:{{DAEMON_PORT}}`) | Discrete File-Mesh (`.agents/mesh/`) with `/schedule` polling timers | **Active Supervisor Steer**: `<50ms` via `manage_task(Action="send_input")` or `send_message`. Reactive wakeup via scheduler. | Fully compatible. Node.js runtime executes natively on Windows 10/11. Powershell shell runner. | Strict workspace sandboxing; path validation enforces containment within authorized project roots. |
 | **2. Cursor IDE** | Stdio MCP Server (`intercom-mcp`) + `@cursor/sdk` integration | Reactive Mailbox Watcher (`intercom watch` with FS events) | **Tool Cancellation**: `<20ms` via MCP JSON-RPC `$/cancelRequest` (do NOT inject raw `\x03` into stdio). Mailbox wakeup: `<80ms`. | Fully compatible. VS Code Electron backend manages pipes and subagent stdio cleanly. | Cursor workspace isolation; token-authenticated MCP endpoints. |
 | **3. Windsurf (Cascade)** | Cascade MCP Server (`serverUrl` or stdio in `mcp_config.json`) | Atomic Mailbox Watcher (`mesh/inbox/`) | **Cascade Tool Abort**: `<30ms` via MCP abort signal or JSON-RPC cancel (no raw `\x03`). Mailbox wakeup: `<100ms`. | Fully compatible. Windsurf requires explicit `serverUrl` or absolute path to node binary in config. | Loopback `127.0.0.1` binding; Cascade user permission gates preserved. |
 | **4. VS Code / Cline / Roo Code** | VS Code Extension Host IPC (Named Pipes `\\.\pipe\vscode-ipc-*`) + Stdio MCP | FileSystemWatcher API (`vscode.workspace.createFileSystemWatcher`) | **Webview / Runner Abort**: `<15ms` via AbortController in Extension Host. MCP hook: `<30ms` via `$/cancelRequest`. | Fully compatible. Native Win32 Named Pipes supported directly by VS Code core. | Extension Host sandbox isolation; URI scheme validation. |
@@ -213,7 +214,7 @@ A critical engineering distinction must be enforced between interactive terminal
        ```
      - **Out-of-Band HTTP/WS Daemon Abort**: If the JSON-RPC channel is congested by large payload transfers, issue an out-of-band abort request to the local daemon:
        ```http
-       POST http://127.0.0.1:4150/api/interrupt
+       POST {{DAEMON_URL}}/api/interrupt
        Content-Type: application/json
 
        { "agent": "cursor", "action": "CANCEL_ACTIVE_REQUEST", "reason": "User redirection" }
@@ -389,30 +390,31 @@ To achieve deterministic inter-process communication with external terminal harn
   vscode.commands.executeCommand("roo-cline.newTask", "Task specification from Intercom");
   ```
 
-#### 4.6.3 OpenCode CLI & REST Server Protocol
+#### 4.6.3 OpenCode CLI & REST Server Protocol (`{{DEFAULT_HARNESS}}`)
 - **Daemon Mode**:
   `opencode serve --port 4096 --hostname 127.0.0.1`
 - **Session API Contract**:
-  - `POST /session`: Creates a new session `{ id: "sess_123" }`.
+  - `POST /session`: Creates a new session `{ id: "{{SAMPLE_SESSION_ID}}" }`.
   - `POST /session/:id/prompt_async`: Queues a prompt non-blockingly and returns HTTP 204 No Content.
   - `GET /session/:id/message`: Streams Server-Sent Events (SSE) of model tokens and tool invocations.
 - **CLI Batch Syntax**:
   ```bash
-  opencode run --auto --model "opencode/glm-5.3-flash-free" --print-logs "<prompt>"
+  opencode run --auto --model "{{DEFAULT_MODEL}}" --print-logs "<prompt>"
   ```
 - **Session Resumption**:
   - `opencode run -c "<prompt>"`: Resumes the most recent session.
   - `opencode run --session "<id>" "<prompt>"`: Resumes an explicit session ID.
 
-#### 4.6.4 Alibaba Qoder Engine Adapter
+#### 4.6.4 Alibaba Qoder Engine Adapter (Zero-Qoder Restricted)
+- **Zero-Qoder Invariant**: `qoder` is barred from automatic routing and default fallback chains (`{{FALLBACK_CHAIN}}`). Explicit invocations must restrict `-m` strictly to verified free-tier models (`{{QODER_ALLOWED_MODELS}}`).
 - **Binary**: `qoder` (Go/C++ Native)
-- **Headless Non-Interactive Invocation**:
+- **Headless Non-Interactive Invocation (Explicit Free-Tier Only)**:
   ```bash
-  qoder -p -m "qwen3.8-flash" --dangerously-skip-permissions -o json "<prompt>"
+  qoder -p -m "{{DEFAULT_QODER_FREE_MODEL}}" --dangerously-skip-permissions -o json "<prompt>"
   ```
 - **Git Worktree Isolation**:
   ```bash
-  qoder --worktree "worker-task-1" -p "Refactor module and verify tests"
+  qoder --worktree "worker-task-1" -m "{{DEFAULT_QODER_FREE_MODEL}}" -p "Refactor module and verify tests"
   ```
 - **Settings Injection Schema (`--settings <path>`)**:
   ```json
@@ -424,7 +426,7 @@ To achieve deterministic inter-process communication with external terminal harn
     },
     "model": {
       "preferences": {
-        "qwen3.8-flash": {
+        "{{DEFAULT_QODER_FREE_MODEL}}": {
           "reasoning": { "effort": "high" }
         }
       }
@@ -528,7 +530,7 @@ When the worker completes or requires architectural guidance:
 
 ## 6. Google Jules Cloud Delegation Integration Architecture
 
-To conserve local developer machine resources, protect subagent context windows, and offload massive refactoring jobs, `intercom-global` integrates **Google Jules** (powered by Gemini 3.6 Flash on Google Cloud VMs).
+To conserve local developer machine resources, protect subagent context windows, and offload massive refactoring jobs, `{{PROJECT_NAME}}` integrates **Google Jules** (powered by `{{DEFAULT_JULES_MODEL}}` on Google Cloud VMs).
 
 ```
                               Task Analysis & Classification
@@ -623,9 +625,9 @@ Because multiple autonomous agents operate concurrently across different IDE pro
     "dailyCap": 100,
     "dispatches": [
       {
-        "dispatchId": "d9e2a1b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
-        "sessionId": "jules-session-1730000000",
-        "timestamp": "2026-10-24T12:00:00.000Z",
+        "dispatchId": "{{SAMPLE_TASK_ID}}",
+        "sessionId": "{{SAMPLE_SESSION_ID}}",
+        "timestamp": "{{CURRENT_ISO_TIMESTAMP}}",
         "epochMs": 1729771200000,
         "targetFile": "src/core/mesh.js",
         "status": "COMPLETED"
@@ -926,65 +928,63 @@ The Agent State Card enables dynamic service discovery and capabilities matching
 
 ## 10. CLI Command Suite & Developer Workflows
 
-The `@advance/intercom-global` CLI provides a unified control interface for developers and automated CI scripts:
+The `{{PROJECT_NAME}}` CLI (`{{CLI_COMMAND}}`, v{{PROJECT_VERSION}}) provides `{{CLI_COMMANDS_COUNT}}` commands as a unified control interface for developers and automated CI scripts:
 
 ```bash
 # 1. Start the high-performance local daemon
-intercom daemon --port 4150
+{{CLI_COMMAND}} daemon start --port {{DAEMON_PORT}}
 
 # 2. Dispatch a task to an agent (automatic Fast-Path or Safe-Path routing)
-intercom send --to worker_m1 --type task_dispatch --priority HIGH \
-  --message "Implement zero-loss discrete mesh transport in src/core/mesh.js" \
-  --files "src/core/mesh.js"
+{{CLI_COMMAND}} send worker_m1 "Implement zero-loss discrete mesh transport in src/core/mesh.js" \
+  --from orchestrator --type task_dispatch --priority HIGH --correlation-id {{SAMPLE_TASK_ID}}
 
 # 3. Interactively watch and stream messages for the current agent
-intercom watch --agent worker_m1
+{{CLI_COMMAND}} watch worker_m1
 
 # 4. Issue a real-time preemption interrupt
-intercom interrupt --agent worker_m1 --reason "Halt edits, critical regression detected in build"
+{{CLI_COMMAND}} interrupt worker_m1 --reason "Halt edits, critical regression detected in build"
 
-# 5. Launch Model Context Protocol (MCP) server for IDE integration
-intercom mcp
+# 5. Launch Model Context Protocol (MCP) server ({{MCP_TOOLS_COUNT}} tools) for IDE integration
+{{CLI_COMMAND}} mcp
 
-# 6. Dispatch a heavy single-file task to Google Jules
-intercom jules dispatch --file src/core/mesh.js --goal "Implement CAS locking"
+# 6. Sync live purified model & harness registries
+{{CLI_COMMAND}} sync --force
 
-# 7. Run self-healing connectivity diagnostics
-intercom doctor
+# 7. Dispatch a heavy single-file task to Google Jules ({{DEFAULT_JULES_MODEL}})
+{{CLI_COMMAND}} jules dispatch --file src/core/mesh.js --summary "Implement CAS locking"
+
+# 8. Run self-healing connectivity diagnostics
+{{CLI_COMMAND}} doctor
 ```
 
-### Diagnostics Output Example (`intercom doctor`)
+### Diagnostics Output Example (`{{CLI_COMMAND}} doctor`)
 ```text
 ================================================================================
              INTERCOM GLOBAL MESH HEALTH & CONNECTIVITY DIAGNOSTICS
 ================================================================================
-Timestamp: 2026-10-24T12:38:00.000Z
-Platform : win32 (x64) | Node.js v20.18.0
+Timestamp: {{CURRENT_ISO_TIMESTAMP}}
+Platform : win32 (x64) | Node.js {{NODE_VERSION}} (min {{NODE_MIN_VERSION}})
 
 [DAEMON & NETWORK STATUS]
-  Local HTTP Daemon (:4150)    : ONLINE (PID 14280, Uptime: 4h 12m)
-  WebSocket Endpoint           : READY (ws://127.0.0.1:4150/ws)
+  Local HTTP Daemon (:{{DAEMON_PORT}})    : ONLINE ({{DAEMON_URL}})
+  SSE Event Stream             : READY ({{DAEMON_URL}}/api/intercom/events)
   Windows Named Pipes          : ACTIVE (\\.\pipe\intercom-mesh)
 
 [DISCRETE FILE-MESH STORAGE]
   Mesh Directory               : C:\Users\Suran\.intercom-global\mesh
-  Registry Active Agents       : 4 agents registered
-    - orchestrator (IDE: Antigravity, PID: 18420, Status: BUSY)
-    - worker_m1    (IDE: Antigravity, PID: 19844, Status: ACTIVE)
-    - explorer_1   (IDE: Cursor,      PID: 22104, Status: IDLE)
-    - qoder_bridge (IDE: Qoder,       PID: 23150, Status: IDLE)
-  Inbox Queues                 : 0 pending messages across all mailboxes
-  CAS Locks                    : CLEAN (0 active locks)
+  Registry Active Peers        : {{ACTIVE_PEERS_COUNT}} active peers ({{ACTIVE_PEERS_LIST}})
+  Pending Tasks                : {{ACTIVE_TASKS_COUNT}} active / {{TOTAL_TASKS_COUNT}} total (sample: {{SAMPLE_TASK_ID}})
+  Live Registry Cache          : {{LIVE_MODEL_COUNT}} purified models ({{TOP_FREE_MODELS_COUNT}} free, synced {{LAST_SYNCED_AT}})
+  Active Harnesses             : {{ACTIVE_HARNESSES}} (Fallback: {{FALLBACK_CHAIN}})
 
 [EXTERNAL CLOUD & HARNESS INTEGRATIONS]
-  Google Jules CLI             : DETECTED (jules v1.4.2)
-  Jules Active Sessions        : 2 / 15 concurrent (HEALTHY)
-  Jules Daily Dispatches       : 14 / 100 quota (HEALTHY)
-  OpenCode REST Bridge         : READY (http://127.0.0.1:4096)
-  Claude Code Stdin Pipe       : READY
+  Google Jules ({{DEFAULT_JULES_MODEL}}) : {{ACTIVE_SESSIONS_COUNT}} / 15 active sessions (sample: {{SAMPLE_SESSION_ID}})
+  OpenCode REST Bridge         : READY (http://127.0.0.1:4096, default model: {{DEFAULT_MODEL}})
+  Claude Code Stdin Pipe       : READY (default model: {{DEFAULT_CLAUDE_MODEL}})
 
 [SYSTEM INTEGRITY VERIFICATION]
   Zero-Kill Protocol Guard     : ENFORCED
+  Zero-Qoder Credit Guard      : ENFORCED (Allowlist: {{QODER_ALLOWED_MODELS}})
   NTFS Safe-Rename Retries     : ENABLED (5 attempts, jitter backoff)
   Path Traversal Sandboxing    : SECURE (All paths locked to workspace)
 ================================================================================

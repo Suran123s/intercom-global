@@ -1,8 +1,10 @@
 # 🌐 Real-World Multi-Agent Recipes & Harness Orchestration
 
-> **Package**: `@advance/intercom-global`  
+> **Package**: `{{PROJECT_NAME}}` (v{{PROJECT_VERSION}})  
+> **Snapshot Date**: `{{CURRENT_DATE}}` · **Last Live Sync**: `{{LAST_SYNCED_AT}}`  
 > **Status**: Production Reference & Executable Recipes  
-> **Target Engines**: Claude Code CLI, Roo-Code / Cline, OpenCode CLI, Alibaba Qoder, Google Jules, Google Antigravity, Cursor, Windsurf  
+> **Target Engines**: `{{SUPPORTED_HARNESSES}}` (active detected: `{{ACTIVE_HARNESSES}}`)  
+> **Default Models**: Primary `{{DEFAULT_MODEL}}` · Fallback `{{DEFAULT_FALLBACK_MODEL}}` · Claude `{{DEFAULT_CLAUDE_MODEL}}` · Jules `{{DEFAULT_JULES_MODEL}}`
 
 This guide provides battle-tested recipes, command flows, and architectural scripts for coordinating heterogeneous AI agents across real-world terminal harnesses, Visual Studio Code extension hosts, and cloud VM execution clusters.
 
@@ -60,7 +62,7 @@ An external orchestrator running in a terminal or daemon needs to programmatical
 ### Architecture Flow:
 ```mermaid
 sequenceDiagram
-    participant Intercom as Intercom Daemon (:4150)
+    participant Intercom as Intercom Daemon (:{{DAEMON_PORT}})
     participant Extension as Roo-Code Extension Host
     participant Webview as React Chat Panel
     participant Disk as tasks/<id>/ui_messages.json
@@ -132,10 +134,12 @@ curl -N "http://127.0.0.1:4096/session/${SESSION_ID}/events"
 
 ---
 
-## 4. 🛡️ Pattern 4: Alibaba Qoder Git Worktree Isolation & Settings Injection
+## 4. 🛡️ Pattern 4: Explicit Free-Tier Qoder Worktree Isolation (Zero-Qoder Safe)
 
 ### The Real-World Scenario:
-You want to dispatch an autonomous defect investigation to Alibaba Qoder using Qwen 3.8 Flash with full thinking effort, while guaranteeing that Qoder runs in an isolated Git worktree so that uncommitted changes in your main workspace are never touched or corrupted.
+> **Zero-Qoder Invariant**: `qoder` is barred from all automatic routing and default fallback chains (`{{FALLBACK_CHAIN}}`). Only invoke explicitly using verified free-tier models (`{{QODER_ALLOWED_MODELS}}`).
+
+When explicitly dispatching an isolated defect investigation using `{{DEFAULT_QODER_FREE_MODEL}}` with full thinking effort, guarantee that it runs in an isolated Git worktree so uncommitted changes in your main workspace are never corrupted.
 
 ### Configuration (`qoder-settings.json`):
 ```json
@@ -147,7 +151,7 @@ You want to dispatch an autonomous defect investigation to Alibaba Qoder using Q
   },
   "model": {
     "preferences": {
-      "qwen3.8-flash": {
+      "{{DEFAULT_QODER_FREE_MODEL}}": {
         "reasoning": { "effort": "high" }
       }
     }
@@ -157,9 +161,9 @@ You want to dispatch an autonomous defect investigation to Alibaba Qoder using Q
 
 ### Command Execution:
 ```bash
-# Spawns Qoder in isolated Git worktree 'agent-cell-1' with thinking tokens enabled
+# Spawns Qoder explicitly with verified free-tier model ({{DEFAULT_QODER_FREE_MODEL}}) in isolated Git worktree
 qoder --worktree agent-cell-1 \
-  -m "qwen3.8-flash" \
+  -m "{{DEFAULT_QODER_FREE_MODEL}}" \
   --settings ./qoder-settings.json \
   --dangerously-skip-permissions \
   -p "Investigate memory leak in WebSocket connection pool, apply surgical fix, and verify test suite"
@@ -267,9 +271,9 @@ node examples/github-pr-review-swarm.js
 
 Monitor all multi-agent messages, broadcasts, and topic channels live in your browser:
 
-1. Start the Intercom HTTP & SSE Daemon:
+1. Start the Intercom HTTP & SSE Daemon (`{{DAEMON_URL}}`):
    ```powershell
-   intercom server
+   {{CLI_COMMAND}} daemon start
    ```
 2. Open `examples/live-mesh-dashboard.html` in your browser.
 3. Watch live message streams flow between agents in real time, with instant dispatch capabilities from the UI.
@@ -285,14 +289,14 @@ To prevent multiple agents working concurrently from clobbering each other's wor
 git worktree add ../feature-backend feature/backend-api
 git worktree add ../feature-security feature/security-audit
 
-# 2. Run OpenCode in the backend worktree
-intercom bridge --agent opencode -- "cd ../feature-backend; opencode"
+# 2. Run {{DEFAULT_HARNESS}} in the backend worktree (model: {{DEFAULT_MODEL}})
+node src/bridges/session-bridge.js --agent {{DEFAULT_HARNESS}} -- "cd ../feature-backend; {{DEFAULT_HARNESS}}"
 
 # 3. Run Hermes in the security worktree
-intercom bridge --agent hermes -- "cd ../feature-security; hermes chat"
+node src/bridges/session-bridge.js --agent hermes -- "cd ../feature-security; hermes chat"
 
-# 4. Notify when ready to merge
-intercom broadcast --from opencode --to "antigravity,hermes" --msg "Backend branch ready for review"
+# 4. Notify active peers ({{ACTIVE_PEERS_LIST}})
+{{CLI_COMMAND}} send hermes "Backend branch ready for review ({{SAMPLE_TASK_ID}})" --from {{DEFAULT_HARNESS}}
 ```
 
 ---
