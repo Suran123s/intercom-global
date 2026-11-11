@@ -223,12 +223,8 @@ function retryNtfsOperationSync(fn, maxAttempts = 5) {
         try {
           Atomics.wait(agWaitInt32, 0, 0, delay);
         } catch {
-          const start = Date.now();
-          while (Date.now() - start < delay) {}
+          // Never busy-spin CPU if Atomics.wait is unsupported in this execution context
         }
-      } else {
-        const start = Date.now();
-        while (Date.now() - start < delay) {}
       }
     }
   }

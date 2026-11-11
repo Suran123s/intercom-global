@@ -322,7 +322,7 @@ function startMcpServer() {
 
       if (name === "list_agents") {
         const active = await listActiveAgents();
-        const mailboxes = await listActiveMailboxes();
+        const mailboxes = await listActiveMailboxes({ excludeEphemeral: args.include_ephemeral !== true });
 
         let filtered = active;
         if (args.role) filtered = filtered.filter(a => a.role === args.role);
@@ -395,7 +395,7 @@ function startMcpServer() {
 
       if (name === "intercom_list_peers") {
         const active = await listActiveAgents();
-        const mailboxes = await listActiveMailboxes();
+        const mailboxes = await listActiveMailboxes({ excludeEphemeral: args.include_ephemeral !== true });
         const allPeers = Array.from(new Set([
           ...active.map(a => a.name),
           ...mailboxes.map(m => m.name)

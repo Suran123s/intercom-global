@@ -1150,14 +1150,22 @@ async function startFileMeshWatcher(agentName) {
   while (true) {
     try {
       const msgs = await waitForUnread(agentName, 5000);
+      let newCount = 0;
       for (const m of msgs) {
         if (!seenIds.has(m.id)) {
           seenIds.add(m.id);
+          if (seenIds.size > 5000) {
+            const oldest = seenIds.values().next().value;
+            seenIds.delete(oldest);
+          }
           printMessage(m);
+          newCount++;
         }
       }
+      // Yield even on 0ms waitForUnread() returns (e.g. unacknowledged mail still on disk) to prevent 100% CPU spin
+      await new Promise((r) => setTimeout(r, newCount === 0 ? 500 : 50));
     } catch (e) {
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 }

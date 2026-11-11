@@ -161,6 +161,26 @@ function sanitizeWindowsPath(baseDir, userInput) {
   return resolvedTarget;
 }
 
+let _sharedSleepInt32 = null;
+/**
+ * Non-spinning synchronous sleep using Atomics.wait (never burns CPU in a tight Date.now() loop).
+ * @param {number} ms
+ */
+function sleepSyncSafe(ms) {
+  const delayMs = Math.max(0, Math.min(Math.round(Number(ms) || 0), 30000));
+  if (delayMs <= 0) return;
+  if (!_sharedSleepInt32) {
+    try {
+      _sharedSleepInt32 = new Int32Array(new SharedArrayBuffer(4));
+    } catch {}
+  }
+  if (_sharedSleepInt32) {
+    try {
+      Atomics.wait(_sharedSleepInt32, 0, 0, delayMs);
+    } catch {}
+  }
+}
+
 /**
  * Dual-sided 5-attempt exponential backoff retry loop on Windows NTFS EBUSY/EPERM/EACCES errors
  * Schedule: 20ms, 40ms, 80ms, 160ms, 320ms (+ randomized jitter 0-15ms)
@@ -208,17 +228,7 @@ function retryNtfsOperationSync(fn, maxAttempts = 5) {
       const baseDelay = delays[attempt - 1] || 320;
       const jitter = Math.floor(Math.random() * 16);
       const totalDelay = baseDelay + jitter;
-      if (waitInt32View) {
-        try {
-          Atomics.wait(waitInt32View, 0, 0, totalDelay);
-        } catch {
-          const start = Date.now();
-          while (Date.now() - start < totalDelay) {}
-        }
-      } else {
-        const start = Date.now();
-        while (Date.now() - start < totalDelay) {}
-      }
+      sleepSyncSafe(totalDelay);
     }
   }
 }
@@ -1315,13 +1325,7 @@ function acquireLockSync(resourceName, ttlMs = 3000, options = {}) {
 
       // Jitter sleep
       const jitter = Math.floor(Math.random() * 25) + 15;
-      if (waitInt32View) {
-        try { Atomics.wait(waitInt32View, 0, 0, jitter); } catch {
-          const s = Date.now(); while (Date.now() - s < jitter) {}
-        }
-      } else {
-        const s = Date.now(); while (Date.now() - s < jitter) {}
-      }
+      sleepSyncSafe(jitter);
     }
   }
 
@@ -1492,29 +1496,50 @@ async function clearInbox(agentName) {
  * Lists all active mailboxes and message counts
  * @returns {Promise<Array<{ name: string, total: number, unread: number }>>}
  */
-async function listActiveMailboxes() {
+const EPHEMERAL_MAILBOX_REGEX = /^(?:(?:test|worker|stress|wake|ephem|fuzz|dry[-_]agent|tmp|agent|alpha|architect|beta|coordinator|reviewer|challenger|auditor|discrete|tui[-_]churn|target_agent|locktest|a2a[-_]http|cron|benchmark|subagent|batch|brand|ended|epipe|burst|chrono|adv|sse|resilience|interrupt|mtime|locked|fallback|merge|offline|online|simulated|tester|explorer|executor|subworker|unit|recursion|crash|mimo|external_daemon|orchestrator|peer|task[-_]unit)[_-])|^(?:test|worker|fuzz|ephem|tester|\d+)$|[_-]\d{8,}$|[_-][0-9a-f]{5,}$/i;
+
+function isEphemeralMailboxName(name) {
+  return EPHEMERAL_MAILBOX_REGEX.test(String(name || ''));
+}
+
+async function listActiveMailboxes(options = {}) {
+  const excludeEphemeral = Boolean(options && options.excludeEphemeral);
   const inboxBase = path.join(MESH_DIR, 'inbox');
   const mailboxes = [];
   const seen = new Set();
 
   if (fs.existsSync(inboxBase)) {
     try {
-      const dirs = await fs.promises.readdir(inboxBase);
-      for (const d of dirs) {
-        const fullDir = path.join(inboxBase, d);
-        try {
-          const stat = await fs.promises.stat(fullDir);
-          if (stat.isDirectory()) {
-            const files = await fs.promises.readdir(fullDir);
-            const msgs = files.filter(f => /^\d+_[a-zA-Z0-9\-]+\.json$/.test(f));
-            mailboxes.push({
-              name: d,
-              total: msgs.length,
-              unread: msgs.length
-            });
-            seen.add(d);
+      const entries = await fs.promises.readdir(inboxBase, { withFileTypes: true });
+      const dirEntries = entries.filter((entry) => {
+        if (!entry.isDirectory()) return false;
+        if (excludeEphemeral && isEphemeralMailboxName(entry.name)) return false;
+        return true;
+      });
+
+      const BATCH_SIZE = 48;
+      for (let i = 0; i < dirEntries.length; i += BATCH_SIZE) {
+        const batch = dirEntries.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(
+          batch.map(async (entry) => {
+            try {
+              const files = await fs.promises.readdir(path.join(inboxBase, entry.name));
+              let msgCount = 0;
+              for (const f of files) {
+                if (/^\d+_[a-zA-Z0-9\-]+\.json$/.test(f)) msgCount++;
+              }
+              return { name: entry.name, total: msgCount, unread: msgCount };
+            } catch {
+              return null;
+            }
+          })
+        );
+        for (const item of batchResults) {
+          if (item) {
+            mailboxes.push(item);
+            seen.add(item.name);
           }
-        } catch {}
+        }
       }
     } catch {}
   }
@@ -1526,6 +1551,7 @@ async function listActiveMailboxes() {
       for (const rf of rootFiles) {
         if (rf.endsWith('.json') && rf !== 'dlq.json' && rf !== 'daemon.pid') {
           const name = rf.replace('.json', '');
+          if (excludeEphemeral && isEphemeralMailboxName(name)) continue;
           if (!seen.has(name)) {
             try {
               const content = JSON.parse(await fs.promises.readFile(path.join(MESH_DIR, rf), 'utf8'));
@@ -2081,6 +2107,9 @@ module.exports = {
   clearInbox,
   clearInboxSync,
   listActiveMailboxes,
+  isEphemeralMailboxName,
+  EPHEMERAL_MAILBOX_REGEX,
+  sleepSyncSafe,
   getInboxDir,
 
   // Legacy Helpers

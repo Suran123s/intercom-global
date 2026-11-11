@@ -1577,7 +1577,7 @@ function renderFrame(colsArg, rowsArg) {
 async function loadLists() {
   let totalUnread = 0;
   try {
-    const rawPeers = await listActiveMailboxes();
+    const rawPeers = await listActiveMailboxes({ excludeEphemeral: true });
     const diskMap = new Map(rawPeers.map((p) => [p.name.toLowerCase(), p]));
     const allPeers = [];
     for (const kp of KNOWN_DEFAULT_PEERS) {
