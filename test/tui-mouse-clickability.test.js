@@ -56,6 +56,14 @@ describe("Intercom Global TUI — Wave 6 Minimalist UX & Full Mouse Clickability
         sidebarDefaultOpen: false
       },
       selectedSettingIndex: 0,
+      scrollOffset: 0,
+      selectedMessageIndex: -1,
+      peerFilterActive: false,
+      peerFilterQuery: "",
+      composerFocusZone: "input",
+      zenMode: false,
+      agentMeta: {},
+      activityLog: [],
       meshStats: { peers: 5, unread: 2, channels: 3, dlq: 0 }
     });
   });
@@ -281,6 +289,337 @@ describe("Intercom Global TUI — Wave 6 Minimalist UX & Full Mouse Clickability
       assert.ok(!src.includes("--async-execution"), "TUI must never contain --async-execution");
       assert.ok(!src.includes("execute_dispatch"), "TUI must never contain execute_dispatch");
       assert.ok(!src.includes("task_flags"), "TUI must never contain task_flags");
+    });
+  });
+
+  describe("8. Hitbox Precision, Narrow Panes & Dropdown Z-Order Fixes", () => {
+    it("Info view [ View Activity ] trailing bracket is clickable and opens Activity view", async () => {
+      tui.setState({
+        activeNav: 4,
+        activityLog: ["[10:00:00] Sent -> @jules: ping"]
+      });
+      const frame = tui.renderFrame(100, 30).map(stripAnsi);
+      const actHit = tui.getHitboxes().find((h) => h.action === "open_activity");
+      assert.ok(actHit, "open_activity hitbox must be registered");
+
+      const rowStr = frame[actHit.row - 1];
+      assert.equal(rowStr.slice(actHit.startCol - 1, actHit.endCol), "[ View Activity ]");
+
+      // Specifically test the trailing `]` column
+      const matched = tui.hitTest(actHit.row, actHit.endCol);
+      assert.ok(matched && matched.action === "open_activity", "Trailing ] of [ View Activity ] must hit open_activity");
+      await tui.handleHit(actHit.row, actHit.endCol);
+      assert.equal(tui.getState().activeNav, 7);
+    });
+
+    it("Narrow panes (cols < 60, mainWidth < 55) render responsive labels without overflowing sidebar or shifting hitboxes", () => {
+      tui.setState({
+        activeNav: 1,
+        rightSidebarOpen: true,
+        selectedAgent: "very_long_peer_agent_name",
+        threadMessages: {
+          "peer:very_long_peer_agent_name": [
+            { from: "very_long_peer_agent_name", message: "Checking narrow pane layout alignment", timestamp: "2026-11-25T10:00:00Z", read: false }
+          ]
+        }
+      });
+
+      const frame = tui.renderFrame(50, 24);
+      const sidebarW = Math.min(28, Math.max(18, Math.floor(50 * 0.26)));
+      const mainWidth = 50 - sidebarW;
+      assert.ok(mainWidth < 55, `Expected mainWidth < 55, got ${mainWidth}`);
+
+      for (const line of frame) {
+        assert.equal(tui.stringWidth(line), 50, "Every frame row must fit exact 50 cols without overflowing sidebar");
+      }
+
+      const mainHits = tui.getHitboxes().filter((h) =>
+        ["btn_refresh", "btn_mark_read", "btn_send", "btn_clear", "toggle_target_dropdown"].includes(h.action)
+      );
+      assert.ok(mainHits.length >= 4, "All thread/composer buttons must register hitboxes on narrow panes");
+      for (const h of mainHits) {
+        assert.ok(h.startCol >= 1 && h.endCol <= mainWidth, `Hitbox ${h.action} (${h.startCol}..${h.endCol}) must not cross sidebar col ${mainWidth}`);
+        const plainRow = stripAnsi(frame[h.row - 1]);
+        const slice = plainRow.slice(h.startCol - 1, h.endCol);
+        assert.ok(slice.includes("[") && slice.includes("]"), `Hitbox ${h.action} must align with rendered brackets, got "${slice}"`);
+      }
+    });
+
+    it("Active-thread Target Dropdown never overlaps Row 0 [ ↻ Refresh ] and preserves z-order", () => {
+      tui.setState({
+        activeNav: 1,
+        selectedAgent: "jules",
+        targetDropdownOpen: true,
+        agentList: ["antigravity", "opencode", "jules", "sentinel", "coordinator", "hermes", "claude", "codex"],
+        threadMessages: {
+          "peer:jules": [
+            { from: "jules", message: "Message 1", timestamp: "2026-11-25T10:00:00Z", read: false },
+            { from: "jules", message: "Message 2", timestamp: "2026-11-25T10:01:00Z", read: false }
+          ]
+        }
+      });
+
+      const frame = tui.renderFrame(90, 18).map(stripAnsi);
+      assert.ok(frame[1].includes("[ ↻ Refresh ]"), "Row 2 (thread header) must keep [ ↻ Refresh ] visible");
+
+      const refHit = tui.getHitboxes().find((h) => h.action === "btn_refresh" && h.row === 2);
+      assert.ok(refHit, "Row 2 must expose btn_refresh hitbox");
+      const topMatch = tui.hitTest(refHit.row, refHit.startCol + 1);
+      assert.equal(topMatch.action, "btn_refresh", "Target dropdown must not steal clicks on Row 2 [ ↻ Refresh ]");
+
+      const dropHit = tui.getHitboxes().find((h) => h.action === "select_target_option");
+      assert.ok(dropHit, "Target dropdown options must register hitboxes");
+      assert.ok(dropHit.row > 2, "Dropdown options must stay below thread header Row 2");
+      assert.equal(tui.hitTest(dropHit.row, dropHit.startCol + 1).action, "select_target_option");
+    });
+
+    it("Help view passes screenStartRow, exposes [ × Close ] + clickable slash rows, includes /activity & /zen, and fixes Home hint", async () => {
+      assert.ok(tui.SLASH_COMMANDS.some((c) => c.cmd === "/activity"));
+      assert.ok(tui.SLASH_COMMANDS.some((c) => c.cmd === "/zen"));
+
+      const homeFrame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(homeFrame.includes("Esc then z"), "Home hint must read 'Esc then z'");
+      assert.ok(!homeFrame.includes("[Esc+z]"), "Home hint must not contain [Esc+z] typo");
+
+      tui.setState({ activeNav: 6 });
+      const helpFrame = tui.renderFrame(100, 30).map(stripAnsi);
+      const helpText = helpFrame.join("\n");
+      assert.ok(helpText.includes("[ × Close ]"), "Help view must render [ × Close ] button");
+      assert.ok(helpText.includes("/activity"), "Help view must list /activity");
+      assert.ok(helpText.includes("/zen"), "Help view must list /zen");
+
+      const closeHit = tui.getHitboxes().find((h) => h.action === "close_help");
+      assert.ok(closeHit, "Help view must register close_help hitbox");
+      assert.equal(helpFrame[closeHit.row - 1].slice(closeHit.startCol - 1, closeHit.endCol), "[ × Close ]");
+
+      const actSlashHit = tui.getHitboxes().find(
+        (h) => h.action === "select_slash_command" && h.payload.cmd === "/activity"
+      );
+      assert.ok(actSlashHit, "Help view must register clickable slash-command row for /activity");
+      await tui.handleHit(actSlashHit.row, actSlashHit.startCol + 2);
+      assert.equal(tui.getState().activeNav, 7, "Clicking /activity row in Help opens Activity view");
+
+      tui.setState({ activeNav: 6 });
+      tui.renderFrame(100, 30);
+      const closeHit2 = tui.getHitboxes().find((h) => h.action === "close_help");
+      await tui.handleHit(closeHit2.row, closeHit2.endCol);
+      assert.notEqual(tui.getState().activeNav, 6, "Clicking [ × Close ] exits Help view");
+    });
+
+    it("Row-1 sub-tabs render ◀ / ▶ overflow indicators and sidebar nav syncs activeSubTabIndex", async () => {
+      const manyTabs = [
+        { id: "home", kind: "home", target: null, label: "✦ Home", closable: false },
+        { id: "peer:antigravity", kind: "peer", target: "antigravity", label: "@antigravity", closable: true },
+        { id: "peer:opencode", kind: "peer", target: "opencode", label: "@opencode", closable: true },
+        { id: "peer:jules", kind: "peer", target: "jules", label: "@jules", closable: true },
+        { id: "peer:sentinel", kind: "peer", target: "sentinel", label: "@sentinel", closable: true },
+        { id: "peer:coordinator", kind: "peer", target: "coordinator", label: "@coordinator", closable: true },
+        { id: "channel:general", kind: "channel", target: "general", label: "#general", closable: true }
+      ];
+      tui.setState({ subTabs: manyTabs, activeSubTabIndex: 0, subTabScrollOffset: 0 });
+      let top = stripAnsi(tui.renderFrame(75, 24)[0]);
+      assert.ok(top.includes("▶"), "Overflowing sub-tabs must render ▶ indicator");
+
+      const nextInd = tui.getHitboxes().find((h) => h.action === "scroll_subtabs" && h.payload.delta === 1);
+      assert.ok(nextInd, "Must register scroll_subtabs forward hitbox");
+      await tui.handleHit(nextInd.row, nextInd.startCol + 1);
+
+      top = stripAnsi(tui.renderFrame(75, 24)[0]);
+      assert.ok(top.includes("◀"), "Scrolled sub-tabs must render ◀ indicator");
+
+      // Navigating via sidebar nav to Inbox or Channels must sync activeSubTabIndex away from Home
+      tui.setState({ rightSidebarOpen: true, activeNav: 0, activeSubTabIndex: 0, selectedAgent: "jules" });
+      tui.renderFrame(100, 30);
+      const inboxNav = tui.getHitboxes().find((h) => h.action === "nav" && h.payload.index === 1);
+      await tui.handleHit(inboxNav.row, inboxNav.startCol + 2);
+      assert.equal(tui.getState().activeNav, 1);
+      assert.notEqual(tui.getState().activeSubTabIndex, 0, "Sidebar nav to Inbox must sync activeSubTabIndex");
+    });
+  });
+
+  describe("9. Visual Contrast & Light Theme Readability", () => {
+    it("fitToWidth restores surface background after inner ANSI resets", () => {
+      const bg = "\x1b[48;5;234m";
+      const out = tui.fitToWidth("\x1b[97mHello\x1b[0m", 12, bg);
+      assert.ok(out.includes(`\x1b[0m${bg}`), "fitToWidth must restore bg after inner reset");
+      assert.equal(tui.stringWidth(out), 12);
+    });
+
+    it("LIGHT_THEME uses fgOnActive on ON pill and fgMuted on [READ] and dropdown headers", () => {
+      tui.setState({
+        activeNav: 5,
+        settings: { darkTheme: false, readReceipts: true, showTimestamps: true, showCornerStats: true }
+      });
+      const settingsFrame = tui.renderFrame(100, 30).join("\n");
+      assert.ok(settingsFrame.includes("\x1b[48;5;32m\x1b[1m\x1b[97m ON  "), "Light theme ON pill must use fgOnActive (97m) on bgActiveNav");
+      assert.ok(!settingsFrame.includes("\x1b[48;5;32m\x1b[1m\x1b[38;5;28m ON"), "Light theme ON pill must not use dark green on blue");
+
+      tui.setState({
+        activeNav: 1,
+        selectedAgent: "jules",
+        targetDropdownOpen: true,
+        threadMessages: {
+          "peer:jules": [{ from: "jules", message: "Ack", timestamp: "2026-11-25T10:00:00Z", read: true }]
+        }
+      });
+      const threadFrame = tui.renderFrame(100, 30).join("\n");
+      assert.ok(threadFrame.includes("\x1b[38;5;240m[READ]"), "Light theme [READ] receipt must use theme.fgMuted");
+      assert.ok(threadFrame.includes("\x1b[38;5;240m\x1b[1mPEERS"), "Light theme dropdown PEERS header must use theme.fgMuted");
+      assert.ok(threadFrame.includes("\x1b[38;5;240m\x1b[1mCHANNELS"), "Light theme dropdown CHANNELS header must use theme.fgMuted");
+    });
+  });
+
+  describe("10. Functional Controls: Unread Badges, Mark Read, Scroll/Filter, Channels, Reply/Forward & Focus Ring", () => {
+    it("Shows unread count badge on @peer sub-tab and marks inbox read via [ ✓ Mark Read ] and /read", async () => {
+      tui.setState({
+        activeNav: 1,
+        selectedAgent: "jules",
+        subTabs: [
+          { id: "home", kind: "home", target: null, label: "✦ Home", closable: false },
+          { id: "peer:jules", kind: "peer", target: "jules", label: "@jules", closable: true }
+        ],
+        activeSubTabIndex: 1,
+        agentMeta: { jules: { total: 2, unread: 2, online: true } },
+        threadMessages: {
+          "peer:jules": [
+            { from: "jules", message: "First unread", timestamp: "2026-11-25T10:00:00Z", read: false },
+            { from: "jules", message: "Second unread", timestamp: "2026-11-25T10:01:00Z", read: false }
+          ]
+        }
+      });
+
+      let frame = tui.renderFrame(100, 30).map(stripAnsi);
+      assert.ok(frame[0].includes("@jules (2)"), "Row-1 @peer sub-tab must show unread count badge");
+      assert.ok(frame[1].includes("[ ✓ Mark Read ]"), "Peer thread header must show [ ✓ Mark Read ] button");
+
+      const markHit = tui.getHitboxes().find((h) => h.action === "btn_mark_read");
+      assert.ok(markHit);
+      await tui.handleHit(markHit.row, markHit.startCol + 1);
+
+      frame = tui.renderFrame(100, 30).map(stripAnsi);
+      assert.ok(!frame[0].includes("@jules (2)"), "Unread badge clears after Mark Read");
+      assert.ok(frame.join("\n").includes("[READ]"), "Messages display [READ] after Mark Read");
+
+      // Also verify /read slash command
+      tui.setState({
+        agentMeta: { jules: { total: 1, unread: 1, online: true } },
+        threadMessages: { "peer:jules": [{ from: "jules", message: "New ping", read: false }] }
+      });
+      await tui.executeSlashCommand("/read");
+      assert.equal(tui.getState().meshStats.unread, 0);
+    });
+
+    it("Peers and Activity lists scroll with overflow hints, and Peers view filters by /", async () => {
+      const manyPeers = Array.from({ length: 25 }, (_, i) => `peer_${String(i).padStart(2, "0")}`);
+      manyPeers.push("jules_special");
+      tui.setState({ activeNav: 3, agentList: manyPeers, selectedAgent: "peer_00", scrollOffset: 0 });
+
+      let frame = tui.renderFrame(90, 18).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("↓"), "Peers list must render ↓ overflow hint");
+
+      await tui.handleMouseWheel(65);
+      assert.ok(tui.getState().scrollOffset > 0, "Mouse wheel down scrolls Peers list");
+      frame = tui.renderFrame(90, 18).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("↑"), "Scrolled Peers list must render ↑ overflow hint");
+
+      // Activate Peer Filter with / and type "jules"
+      await tui.handleKey("/", { name: "/" });
+      assert.equal(tui.getState().peerFilterActive, true);
+      for (const ch of "jules") {
+        await tui.handleKey(ch, { name: ch });
+      }
+      assert.equal(tui.getState().peerFilterQuery, "jules");
+      frame = tui.renderFrame(90, 18).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("@jules_special"), "Filtered Peers view shows matching peer");
+      assert.ok(!frame.includes("@peer_00"), "Filtered Peers view hides non-matching peers");
+
+      // Activity view scrolling
+      const logs = Array.from({ length: 25 }, (_, i) => `[10:00:${String(i).padStart(2, "0")}] Event ${i}`);
+      tui.setState({ activeNav: 7, activityLog: logs, scrollOffset: 0 });
+      let actFrame = tui.renderFrame(90, 18).map(stripAnsi).join("\n");
+      assert.ok(actFrame.includes("↓"), "Activity list must render ↓ overflow hint");
+      await tui.handleMouseWheel(65);
+      assert.ok(tui.getState().scrollOffset > 0);
+      actFrame = tui.renderFrame(90, 18).map(stripAnsi).join("\n");
+      assert.ok(actFrame.includes("↑"), "Scrolled Activity list must render ↑ overflow hint");
+    });
+
+    it("Channels bar exposes [ + Channel ] and /channel <name> quick-opens channel", async () => {
+      tui.setState({ activeNav: 2, selectedType: "channel", selectedChannel: "general" });
+      const frame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("[ #general ]"), "Channels bar renders channel pills");
+      assert.ok(frame.includes("[ + Channel ]"), "Channels bar renders [ + Channel ] button");
+
+      const addChHit = tui.getHitboxes().find((h) => h.action === "new_channel_prompt");
+      assert.ok(addChHit);
+      await tui.handleHit(addChHit.row, addChHit.startCol + 1);
+      assert.equal(tui.getState().composerBuffer, "/channel ");
+
+      const res = await tui.executeSlashCommand("/channel devops");
+      assert.equal(res.action, "slash_channel_open");
+      const st = tui.getState();
+      assert.equal(st.selectedChannel, "devops");
+      assert.ok(st.channelList.includes("devops"));
+      assert.ok(st.subTabs.some((t) => t.id === "channel:devops"));
+    });
+
+    it("Thread view supports Message Selection, [ ↩ Reply ] / [ ↪ Forward ], and Tab focus ring", async () => {
+      tui.setState({
+        activeNav: 1,
+        selectedAgent: "jules",
+        subTabs: [
+          { id: "home", kind: "home", target: null, label: "✦ Home", closable: false },
+          { id: "peer:jules", kind: "peer", target: "jules", label: "@jules", closable: true }
+        ],
+        activeSubTabIndex: 1,
+        threadMessages: {
+          "peer:jules": [
+            { from: "jules", message: "Deploy check complete", timestamp: "2026-11-25T10:00:00Z", read: false }
+          ]
+        }
+      });
+
+      tui.renderFrame(100, 30);
+      const msgHit = tui.getHitboxes().find((h) => h.action === "select_message");
+      assert.ok(msgHit, "Message bubble must expose select_message hitbox");
+      await tui.handleHit(msgHit.row, msgHit.startCol + 2);
+      assert.equal(tui.getState().selectedMessageIndex, 0);
+
+      const frame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(frame.includes("[ ↩ Reply ]"), "Selected message must show [ ↩ Reply ]");
+      assert.ok(frame.includes("[ ↪ Forward ]"), "Selected message must show [ ↪ Forward ]");
+
+      const replyHit = tui.getHitboxes().find((h) => h.action === "reply_message");
+      assert.ok(replyHit);
+      await tui.handleHit(replyHit.row, replyHit.startCol + 1);
+      assert.equal(tui.getState().composerBuffer, "@jules ");
+
+      tui.renderFrame(100, 30);
+      const fwdHit = tui.getHitboxes().find((h) => h.action === "forward_message");
+      assert.ok(fwdHit);
+      await tui.handleHit(fwdHit.row, fwdHit.startCol + 1);
+      assert.equal(tui.getState().composerBuffer, "/msg  [Fwd from @jules]: Deploy check complete");
+      assert.equal(tui.getState().composerCursor, 5);
+
+      // Tab focus ring between Composer Input -> To: -> Send -> Clear -> Input
+      tui.setState({ composerBuffer: "hello world", composerFocusZone: "input", composerFocused: true });
+      await tui.handleKey("", { name: "tab" });
+      assert.equal(tui.getState().composerFocusZone, "target");
+      await tui.handleKey("", { name: "tab" });
+      assert.equal(tui.getState().composerFocusZone, "send");
+      await tui.handleKey("", { name: "tab" });
+      assert.equal(tui.getState().composerFocusZone, "clear");
+      await tui.handleKey("", { name: "tab" });
+      assert.equal(tui.getState().composerFocusZone, "input");
+
+      // Shift+Tab steps backward and Enter on target opens dropdown
+      await tui.handleKey("", { name: "tab", shift: true });
+      assert.equal(tui.getState().composerFocusZone, "clear");
+      await tui.handleKey("", { name: "left" }); // send
+      await tui.handleKey("", { name: "left" }); // target
+      assert.equal(tui.getState().composerFocusZone, "target");
+      await tui.handleKey("", { name: "return" });
+      assert.equal(tui.getState().targetDropdownOpen, true);
     });
   });
 });

@@ -31,6 +31,9 @@ const {
   sendChannelMessage,
   listChannels,
   writeMessage,
+  readInboxSync,
+  updateDiscreteEnvelopeSync,
+  checkAndMarkRead,
   HeartbeatRegistry,
   validateAgentName
 } = require("../src/core/mesh");
@@ -142,16 +145,19 @@ const KNOWN_DEFAULT_PEERS = ["antigravity", "opencode", "jules", "sentinel", "co
 const KNOWN_DEFAULT_CHANNELS = ["general", "alerts", "handoffs"];
 
 const SLASH_COMMANDS = Object.freeze([
-  { cmd: "/msg",      syntax: "/msg <peer> <text>",     desc: "Message an agent peer directly",                  hasArgs: true },
-  { cmd: "/channel",  syntax: "/channel <name> <text>", desc: "Broadcast to a topic channel",                    hasArgs: true },
-  { cmd: "/peers",    syntax: "/peers",                 desc: "Open active Peer Mailboxes directory",            hasArgs: false },
-  { cmd: "/info",     syntax: "/info",                  desc: "Open Intercom Mesh Health & System Info",         hasArgs: false },
-  { cmd: "/settings", syntax: "/settings",              desc: "Toggle UI/UX & Telemetry settings",               hasArgs: false },
-  { cmd: "/refresh",  syntax: "/refresh",               desc: "Refresh peers, channels & mesh health manually",  hasArgs: false },
-  { cmd: "/clear",    syntax: "/clear",                 desc: "Clear current inbox or prompt",                   hasArgs: false },
-  { cmd: "/menu",     syntax: "/menu",                  desc: "Toggle right-side sidebar menu",                  hasArgs: false },
-  { cmd: "/new",      syntax: "/new",                   desc: "Open new conversation sub-tab",                   hasArgs: false },
-  { cmd: "/help",     syntax: "/help",                  desc: "Show Intercom shortcuts & slash commands",        hasArgs: false }
+  { cmd: "/msg",      syntax: "/msg <peer> <text>",       desc: "Message an agent peer directly",                  hasArgs: true },
+  { cmd: "/channel",  syntax: "/channel <name> [text]",   desc: "Open or broadcast to a topic channel",            hasArgs: true },
+  { cmd: "/peers",    syntax: "/peers",                   desc: "Open active Peer Mailboxes directory",            hasArgs: false },
+  { cmd: "/info",     syntax: "/info",                    desc: "Open Intercom Mesh Health & System Info",         hasArgs: false },
+  { cmd: "/settings", syntax: "/settings",                desc: "Toggle UI/UX & Telemetry settings",               hasArgs: false },
+  { cmd: "/refresh",  syntax: "/refresh",                 desc: "Refresh peers, channels & mesh health manually",  hasArgs: false },
+  { cmd: "/clear",    syntax: "/clear",                   desc: "Clear current inbox or prompt",                   hasArgs: false },
+  { cmd: "/menu",     syntax: "/menu",                    desc: "Toggle right-side sidebar menu",                  hasArgs: false },
+  { cmd: "/new",      syntax: "/new",                     desc: "Open new conversation sub-tab",                   hasArgs: false },
+  { cmd: "/activity", syntax: "/activity",                desc: "Open Mesh Activity Stream",                       hasArgs: false },
+  { cmd: "/zen",      syntax: "/zen",                     desc: "Toggle Zen / Focus Mode",                         hasArgs: false },
+  { cmd: "/read",     syntax: "/read",                    desc: "Mark current peer inbox messages as read",        hasArgs: false },
+  { cmd: "/help",     syntax: "/help",                    desc: "Show Intercom shortcuts & slash commands",        hasArgs: false }
 ]);
 
 const SETTINGS_OPTIONS = Object.freeze([
@@ -175,6 +181,7 @@ let settings = {
 let selectedSettingIndex = 0;
 
 let activeNav          = 0;          // 0=Home, 1=Inbox, 2=Channels, 3=Peers, 4=Info, 5=Settings, 6=Help, 7=Activity
+let lastNonHelpNav     = 0;          // Tracks previous non-Help view for Help [ × Close ]
 let rightSidebarOpen   = Boolean(settings.sidebarDefaultOpen);
 let zenMode            = false;      // Focus/Zen mode toggled via z/Z (or Ctrl+Z)
 let selectedType       = "peer";     // "peer" | "channel"
@@ -194,11 +201,14 @@ let subTabs = [
   { id: "peer:antigravity", kind: "peer",    target: "antigravity", label: "@antigravity", closable: true },
   { id: "channel:general",  kind: "channel", target: "general",     label: "#general",     closable: true }
 ];
-let activeSubTabIndex  = 0;
+let activeSubTabIndex         = 0;
+let subTabScrollOffset        = 0;
+let ensureActiveSubTabVisible = false;
 
 let composerBuffer     = "";
 let composerCursor     = 0;
 let composerFocused    = true;
+let composerFocusZone  = "input";    // "input" | "target" | "send" | "clear"
 
 let targetDropdownOpen  = false;
 let targetDropdownIndex = 0;
@@ -207,6 +217,10 @@ let slashSelectedIndex = 0;
 let slashMenuDismissed = false;
 
 let scrollOffset       = 0;
+let selectedMessageIndex = -1;
+let peerFilterActive   = false;
+let peerFilterQuery    = "";
+let peerFilterCursor   = 0;
 let lastStatusNotice   = "Pure Mesh Messaging · Press / for commands";
 let meshStats          = { peers: KNOWN_DEFAULT_PEERS.length, unread: 0, channels: KNOWN_DEFAULT_CHANNELS.length, dlq: 0 };
 let meshInfoCache      = { services: {}, mailboxes: [], channels: [], dlq: [], updatedAt: null };
@@ -424,20 +438,30 @@ function padEnd(str, targetLen, char = " ") {
   return str + (diff > 0 ? char.repeat(diff) : "");
 }
 
+function restoreBgAfterReset(str, bg) {
+  if (!bg) return str;
+  return String(str).replace(/\x1b\[0?m/g, `${A.reset}${bg}`);
+}
+
 function fitToWidth(str, width, bg = "") {
   const targetW = Math.max(0, width || 0);
   if (targetW === 0) return "";
   const s = String(str || "");
   const vLen = stringWidth(s);
-  if (vLen === targetW) return bg ? `${bg}${s}${A.reset}` : s;
+  if (vLen === targetW) {
+    const body = bg ? restoreBgAfterReset(s, bg) : s;
+    return bg ? `${bg}${body}${A.reset}` : body;
+  }
   if (vLen < targetW) {
-    const padded = s + " ".repeat(targetW - vLen);
+    const body = bg ? restoreBgAfterReset(s, bg) : s;
+    const padded = body + " ".repeat(targetW - vLen);
     return bg ? `${bg}${padded}${A.reset}` : padded;
   }
   const clipped = clipAnsi(s, targetW);
   const clippedW = stringWidth(clipped);
+  const body = bg ? restoreBgAfterReset(clipped, bg) : clipped;
   const tail = clippedW < targetW ? " ".repeat(targetW - clippedW) : "";
-  return bg ? `${bg}${clipped}${bg}${tail}${A.reset}` : `${clipped}${tail}`;
+  return bg ? `${bg}${body}${tail}${A.reset}` : `${body}${tail}`;
 }
 
 function wrapText(text, maxW) {
@@ -701,22 +725,29 @@ function renderCursorText(text, cursorPos, maxLen, isActive, placeholder = "") {
 // ─────────────────────────────────────────────────────────────────
 //  Hitbox registry (populated during each render)
 // ─────────────────────────────────────────────────────────────────
-let hitboxes = []; // { row, endRow, startCol, endCol, action, payload }
+let hitboxes = []; // { row, endRow, startCol, endCol, action, payload, z }
 
-function registerHitbox(row, startCol, endCol, action, payload = {}, endRow = row) {
-  hitboxes.push({ row, endRow, startCol, endCol, action, payload });
+function registerHitbox(row, startCol, endCol, action, payload = {}, endRow = row, z = 0) {
+  if (endCol < startCol) return;
+  hitboxes.push({ row, endRow, startCol, endCol, action, payload, z });
 }
 
 function hitTest(row, col) {
-  // Scan backwards so top-most overlays (dropdowns) match before underlying surfaces
+  // Scan backwards so top-most overlays (highest z, then latest registered) match first
+  let best = null;
+  let bestZ = -Infinity;
   for (let i = hitboxes.length - 1; i >= 0; i--) {
     const hb = hitboxes[i];
     const maxRow = hb.endRow || hb.row;
     if (row >= hb.row && row <= maxRow && col >= hb.startCol && col <= hb.endCol) {
-      return hb;
+      const z = hb.z || 0;
+      if (z > bestZ) {
+        best = hb;
+        bestZ = z;
+      }
     }
   }
-  return null;
+  return best;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -847,6 +878,24 @@ function getActiveSubTab() {
 
 function syncComposerFocusForNav(navIndex) {
   composerFocused = navIndex <= 2;
+  if (composerFocused) composerFocusZone = "input";
+}
+
+function getPeerUnreadCount(name) {
+  if (!name) return 0;
+  const meta = agentMetaMap.get(name);
+  if (meta && typeof meta.unread === "number") return Math.max(0, meta.unread);
+  const cached = threadCache.get(`peer:${name}`);
+  if (cached && Array.isArray(cached.messages)) {
+    return cached.messages.filter((m) => !(m.read || (m.metadata && m.metadata.read))).length;
+  }
+  return 0;
+}
+
+function getFilteredAgents() {
+  const q = String(peerFilterQuery || "").trim().toLowerCase();
+  if (!q) return agentList;
+  return agentList.filter((name) => String(name).toLowerCase().includes(q));
 }
 
 function ensureTargetSubTab(kind, target, activate = true) {
@@ -859,13 +908,18 @@ function ensureTargetSubTab(kind, target, activate = true) {
   }
   if (activate) {
     activeSubTabIndex = idx;
+    ensureActiveSubTabVisible = true;
+    selectedMessageIndex = -1;
+    scrollOffset = 0;
     if (kind === "peer") {
       selectedType = "peer";
       selectedAgent = target;
       const pIdx = agentList.indexOf(target);
       if (pIdx >= 0) agentIdx = pIdx;
       activeNav = 1; // Inbox
+      lastNonHelpNav = 1;
       composerFocused = true;
+      composerFocusZone = "input";
       syncWatchedInboxDir();
     } else if (kind === "channel") {
       selectedType = "channel";
@@ -873,7 +927,9 @@ function ensureTargetSubTab(kind, target, activate = true) {
       const cIdx = channelList.indexOf(target);
       if (cIdx >= 0) channelIdx = cIdx;
       activeNav = 2; // Channels
+      lastNonHelpNav = 2;
       composerFocused = true;
+      composerFocusZone = "input";
     }
   }
   return idx;
@@ -885,16 +941,20 @@ function switchSubTab(indexOrId) {
     : subTabs.findIndex((t) => t.id === indexOrId);
   if (idx < 0 || idx >= subTabs.length) idx = 0;
   activeSubTabIndex = idx;
+  ensureActiveSubTabVisible = true;
   const tab = subTabs[idx];
   scrollOffset = 0;
+  selectedMessageIndex = -1;
   if (!tab || tab.kind === "home") {
     activeNav = 0;
+    lastNonHelpNav = 0;
   } else if (tab.kind === "peer") {
     selectedType = "peer";
     selectedAgent = tab.target || selectedAgent;
     const pIdx = agentList.indexOf(selectedAgent);
     if (pIdx >= 0) agentIdx = pIdx;
     activeNav = 1;
+    lastNonHelpNav = 1;
     syncWatchedInboxDir();
   } else if (tab.kind === "channel") {
     selectedType = "channel";
@@ -902,8 +962,10 @@ function switchSubTab(indexOrId) {
     const cIdx = channelList.indexOf(selectedChannel);
     if (cIdx >= 0) channelIdx = cIdx;
     activeNav = 2;
+    lastNonHelpNav = 2;
   }
   composerFocused = true;
+  composerFocusZone = "input";
   return tab;
 }
 
@@ -922,6 +984,7 @@ function closeSubTab(indexOrId) {
   } else if (activeSubTabIndex === idx) {
     activeSubTabIndex = Math.max(0, idx - 1);
   }
+  subTabScrollOffset = Math.max(0, Math.min(subTabScrollOffset, Math.max(0, subTabs.length - 1)));
   switchSubTab(activeSubTabIndex);
   return true;
 }
@@ -1030,48 +1093,142 @@ function formatCornerStats() {
 function renderTopBar(cols) {
   const theme = getTheme();
   const row = 1;
-  const menuText = rightSidebarOpen ? "[ ☰ Menu · Open ]" : "[ ☰ Menu ]";
+  const compact = cols < 60;
+  const menuText = rightSidebarOpen
+    ? (compact ? "[ ☰·Open ]" : "[ ☰ Menu · Open ]")
+    : (compact ? "[ ☰ ]" : "[ ☰ Menu ]");
   const menuW = stringWidth(menuText);
   const menuStartCol = Math.max(2, cols - menuW);
   const menuEndCol = menuStartCol + menuW - 1;
 
-  // Build sub-tabs left-to-right within available left area
-  const maxLeftCols = Math.max(18, menuStartCol - 3);
-  let leftPlainCol = 2; // 1-based start after 1 leading space
-  let leftRendered = " ";
+  // Build sub-tab descriptors with unread count badges for @peer tabs
+  const maxLeftCols = Math.max(12, menuStartCol - 2);
+  const newText = compact ? "[+]" : "[ + New ]";
+  const newW = stringWidth(newText);
 
-  for (let i = 0; i < subTabs.length; i++) {
-    const tab = subTabs[i];
+  const tabSpecs = subTabs.map((tab, i) => {
     const safeLabel = sanitizeTerminalText(tab.label);
     const isActive = i === activeSubTabIndex && (activeNav === 0 || activeNav === 1 || activeNav === 2);
     const pillBg = isActive ? theme.bgActiveNav : theme.bgSelected;
     const pillFg = isActive ? `${A.bold}${theme.fgOnActive}` : theme.fgSubtle;
+    const unread = tab.kind === "peer" ? getPeerUnreadCount(tab.target) : 0;
+    const unreadPlain = unread > 0 ? ` (${unread})` : "";
+    const unreadStyled = unread > 0
+      ? ` ${isActive ? `${A.bold}${theme.fgOnActive}` : theme.fgWarn}(${unread})${pillFg}`
+      : "";
 
     if (!tab.closable) {
       const text = `[ ${safeLabel} ]`;
-      const w = stringWidth(text);
-      if (leftPlainCol + w > maxLeftCols) break;
-      registerHitbox(row, leftPlainCol, leftPlainCol + w - 1, "switch_subtab", { index: i, id: tab.id });
-      leftRendered += `${pillBg}${pillFg}${text}${A.reset}${theme.bgHeader} `;
-      leftPlainCol += w + 1;
+      return {
+        index: i,
+        tab,
+        closable: false,
+        text,
+        totalW: stringWidth(text),
+        pillBg,
+        pillFg
+      };
+    }
+    const mainPlain = `[ ${safeLabel}${unreadPlain} `;
+    const closePart = `× ]`;
+    const mainW = stringWidth(mainPlain);
+    const closeW = stringWidth(closePart);
+    return {
+      index: i,
+      tab,
+      closable: true,
+      mainStyled: `[ ${safeLabel}${unreadStyled} `,
+      closePart,
+      mainW,
+      closeW,
+      totalW: mainW + closeW,
+      pillBg,
+      pillFg
+    };
+  });
+
+  // Check if all sub-tabs + [ + New ] fit without overflow
+  const totalNeededCols = 1 + tabSpecs.reduce((acc, s) => acc + s.totalW + 1, 0) + newW;
+  const hasOverflow = totalNeededCols > maxLeftCols;
+
+  let winStart = 0;
+  let winEnd = tabSpecs.length;
+
+  if (hasOverflow && tabSpecs.length > 0) {
+    subTabScrollOffset = Math.max(0, Math.min(subTabScrollOffset, tabSpecs.length - 1));
+    if (ensureActiveSubTabVisible && activeSubTabIndex < subTabScrollOffset) {
+      subTabScrollOffset = Math.max(0, activeSubTabIndex);
+    }
+
+    const computeWindowEnd = (startIdx) => {
+      const leftIndW = startIdx > 0 ? 4 : 0; // "[◀] "
+      const availForTabs = Math.max(8, maxLeftCols - 2 - leftIndW - 4 - newW); // reserve "[▶] " + newW
+      let used = 0;
+      let end = startIdx;
+      while (end < tabSpecs.length) {
+        const w = tabSpecs[end].totalW + 1;
+        if (end > startIdx && used + w > availForTabs) break;
+        used += w;
+        end++;
+      }
+      return Math.max(startIdx + 1, end);
+    };
+
+    winStart = subTabScrollOffset;
+    winEnd = computeWindowEnd(winStart);
+    if (ensureActiveSubTabVisible) {
+      while (activeSubTabIndex >= winEnd && winStart < activeSubTabIndex) {
+        winStart++;
+        winEnd = computeWindowEnd(winStart);
+      }
+      subTabScrollOffset = winStart;
+    }
+  } else {
+    subTabScrollOffset = 0;
+  }
+  ensureActiveSubTabVisible = false;
+
+  let leftPlainCol = 2; // 1-based start after 1 leading space
+  let leftRendered = " ";
+
+  if (hasOverflow && winStart > 0) {
+    const prevInd = "[◀]";
+    const prevW = stringWidth(prevInd);
+    if (leftPlainCol + prevW <= maxLeftCols) {
+      registerHitbox(row, leftPlainCol, leftPlainCol + prevW - 1, "scroll_subtabs", { delta: -1 });
+      leftRendered += `${theme.bgSelected}${theme.fgAccent}${prevInd}${A.reset}${theme.bgHeader} `;
+      leftPlainCol += prevW + 1;
+    }
+  }
+
+  for (let i = winStart; i < winEnd; i++) {
+    const spec = tabSpecs[i];
+    if (!spec.closable) {
+      if (leftPlainCol + spec.totalW > maxLeftCols) break;
+      registerHitbox(row, leftPlainCol, leftPlainCol + spec.totalW - 1, "switch_subtab", { index: spec.index, id: spec.tab.id });
+      leftRendered += `${spec.pillBg}${spec.pillFg}${spec.text}${A.reset}${theme.bgHeader} `;
+      leftPlainCol += spec.totalW + 1;
     } else {
-      const mainPart = `[ ${safeLabel} `;
-      const closePart = `× ]`;
-      const mainW = stringWidth(mainPart);
-      const closeW = stringWidth(closePart);
-      if (leftPlainCol + mainW + closeW > maxLeftCols) continue;
+      if (leftPlainCol + spec.totalW > maxLeftCols) break;
+      registerHitbox(row, leftPlainCol, leftPlainCol + spec.mainW - 1, "switch_subtab", { index: spec.index, id: spec.tab.id });
+      registerHitbox(row, leftPlainCol + spec.mainW, leftPlainCol + spec.totalW - 1, "close_subtab", { index: spec.index, id: spec.tab.id });
 
-      registerHitbox(row, leftPlainCol, leftPlainCol + mainW - 1, "switch_subtab", { index: i, id: tab.id });
-      registerHitbox(row, leftPlainCol + mainW, leftPlainCol + mainW + closeW - 1, "close_subtab", { index: i, id: tab.id });
+      leftRendered += `${spec.pillBg}${spec.pillFg}${spec.mainStyled}${theme.fgMuted}${spec.closePart}${A.reset}${theme.bgHeader} `;
+      leftPlainCol += spec.totalW + 1;
+    }
+  }
 
-      leftRendered += `${pillBg}${pillFg}${mainPart}${theme.fgMuted}${closePart}${A.reset}${theme.bgHeader} `;
-      leftPlainCol += mainW + closeW + 1;
+  if (hasOverflow && winEnd < tabSpecs.length) {
+    const nextInd = "[▶]";
+    const nextW = stringWidth(nextInd);
+    if (leftPlainCol + nextW <= maxLeftCols) {
+      registerHitbox(row, leftPlainCol, leftPlainCol + nextW - 1, "scroll_subtabs", { delta: 1 });
+      leftRendered += `${theme.bgSelected}${theme.fgAccent}${nextInd}${A.reset}${theme.bgHeader} `;
+      leftPlainCol += nextW + 1;
     }
   }
 
   // [ + New ] button
-  const newText = "[ + New ]";
-  const newW = stringWidth(newText);
   if (leftPlainCol + newW <= maxLeftCols) {
     registerHitbox(row, leftPlainCol, leftPlainCol + newW - 1, "new_subtab", {});
     leftRendered += `${theme.bgSelected}${theme.fgAccent}${newText}${A.reset}${theme.bgHeader}`;
@@ -1094,8 +1251,10 @@ function renderTopBar(cols) {
 // ─────────────────────────────────────────────────────────────────
 function renderSidebar(widthOpt, heightOpt, startRow = 2, colsOpt) {
   const theme = getTheme();
-  const cols = Math.max(80, colsOpt || screen.cols || screen.width || 80);
-  const rows = Math.max(24, screen.rows || 24);
+  const screenCols = (screen.cols && screen.cols > 1) ? screen.cols : ((screen.width && screen.width > 1) ? screen.width : 80);
+  const screenRows = (screen.rows && screen.rows > 1) ? screen.rows : 24;
+  const cols = colsOpt ? Math.max(36, colsOpt) : Math.max(80, screenCols);
+  const rows = heightOpt ? Math.max(12, heightOpt + 2) : Math.max(24, screenRows);
   const sW = widthOpt || Math.min(28, Math.max(22, Math.floor(cols * 0.26)));
   const sH = heightOpt || Math.max(18, rows - 2);
 
@@ -1271,9 +1430,9 @@ function buildTargetDropdownBox(dropW, maxBoxRows = 18) {
   const actItems = items.filter((it) => it.type === "action");
 
   // Reserve room for Channels & [ ↻ Refresh ] + headers/borders so Channels never clip on busy meshes
-  const maxChannelsShow = Math.min(chItems.length, 4);
+  const maxChannelsShow = Math.min(chItems.length, maxBoxRows < 12 ? 2 : 4);
   const chromeRows = 2 + (peerItems.length > 0 ? 1 : 0) + (maxChannelsShow > 0 ? 1 : 0) + (actItems.length > 0 ? 1 : 0);
-  const peerBudget = Math.max(3, Math.min(peerItems.length, maxBoxRows - chromeRows - maxChannelsShow - actItems.length));
+  const peerBudget = Math.max(1, Math.min(peerItems.length, maxBoxRows - chromeRows - maxChannelsShow - actItems.length));
 
   let peerStart = 0;
   if (clampedIdx < peerItems.length && clampedIdx >= peerBudget) {
@@ -1303,11 +1462,11 @@ function buildTargetDropdownBox(dropW, maxBoxRows = 18) {
     if (it.type === "peer" && !addedPeersHeader) {
       addedPeersHeader = true;
       const moreTag = peerItems.length > peerBudget ? ` (${peerStart + 1}-${peerStart + peerBudget}/${peerItems.length})` : "";
-      lines.push(`${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}${fitToWidth(` ${A.dim}${A.bold}PEERS${moreTag}${A.reset}`, inner, theme.bgDropdown)}${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}`);
+      lines.push(`${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}${fitToWidth(` ${theme.fgMuted}${A.bold}PEERS${moreTag}${A.reset}`, inner, theme.bgDropdown)}${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}`);
     } else if (it.type === "channel" && !addedChannelsHeader) {
       addedChannelsHeader = true;
       const moreCh = chItems.length > maxChannelsShow ? ` (${chStart + 1}-${chStart + maxChannelsShow}/${chItems.length})` : "";
-      lines.push(`${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}${fitToWidth(` ${A.dim}${A.bold}CHANNELS${moreCh}${A.reset}`, inner, theme.bgDropdown)}${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}`);
+      lines.push(`${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}${fitToWidth(` ${theme.fgMuted}${A.bold}CHANNELS${moreCh}${A.reset}`, inner, theme.bgDropdown)}${theme.bgDropdown}${theme.fgAccent}${B.v}${A.reset}`);
     } else if (it.type === "action") {
       lines.push(`${theme.bgDropdown}${theme.fgAccent}${B.vl}${B.h.repeat(inner)}${B.vr}${A.reset}`);
     }
@@ -1339,26 +1498,28 @@ function buildTargetDropdownBox(dropW, maxBoxRows = 18) {
 }
 
 // Overlay helper that writes centered/positioned box lines onto canvas lines and registers hitboxes
-function overlayBoxOntoLines(canvasLines, startRowIdx, screenStartRow, leftCol0, boxEntries) {
+function overlayBoxOntoLines(canvasLines, startRowIdx, screenStartRow, leftCol0, boxEntries, minRowIdx = 0) {
   const bg = getCanvasBg();
   for (let i = 0; i < boxEntries.length; i++) {
     const r = startRowIdx + i;
-    if (r < 0 || r >= canvasLines.length) continue;
+    if (r < minRowIdx || r < 0 || r >= canvasLines.length) continue;
     const entry = boxEntries[i];
     const lineStr = typeof entry === "string" ? entry : entry.line;
     const lineW = stringWidth(lineStr);
     const padL = " ".repeat(Math.max(0, leftCol0));
     const existingW = stringWidth(canvasLines[r]);
-    const rightRemain = Math.max(0, existingW - leftCol0 - lineW);
-    canvasLines[r] = `${bg}${padL}${lineStr}${bg}${" ".repeat(rightRemain)}${A.reset}`;
+    canvasLines[r] = fitToWidth(`${bg}${padL}${lineStr}`, existingW, bg);
 
     if (typeof entry === "object" && entry.action) {
+      const endCol = Math.min(existingW, leftCol0 + lineW);
       registerHitbox(
         screenStartRow + r,
         leftCol0 + 1,
-        leftCol0 + lineW,
+        endCol,
         entry.action,
-        entry.payload || {}
+        entry.payload || {},
+        screenStartRow + r,
+        10
       );
     }
   }
@@ -1372,37 +1533,66 @@ function renderComposerPanel(mainWidth, availableHeight, screenStartRow, options
   const centeredVertically = Boolean(options.centeredVertically);
   const headingText = sanitizeTerminalText(options.headingText || "✉ Intercom");
   const subHeadingText = sanitizeTerminalText(options.subHeadingText || "");
+  const minOverlayRow = Math.max(0, options.minOverlayRow || 0);
   const bg = theme.bgCanvas;
+  const compact = mainWidth < 55;
 
-  const boxW = Math.min(74, Math.max(38, Math.floor(mainWidth * 0.72)));
-  const leftPad0 = Math.max(1, Math.floor((mainWidth - boxW) / 2));
-  const boxInnerW = boxW - 2;
+  const minBoxW = Math.min(38, Math.max(20, mainWidth - 2));
+  const boxW = Math.max(20, Math.min(74, mainWidth - 2, Math.max(minBoxW, Math.floor(mainWidth * 0.72))));
+  const leftPad0 = Math.max(0, Math.floor((mainWidth - boxW) / 2));
+  const boxInnerW = Math.max(10, boxW - 2);
 
   const safeTargetName = sanitizeTerminalText(selectedType === "channel" ? selectedChannel : selectedAgent);
   const targetLabel = selectedType === "channel" ? `#${safeTargetName}` : `@${safeTargetName}`;
-  const targetBtnText = `To: [ ${targetLabel} ▾ ]`;
-  const sendBtnText = "[ ↵ Send ]";
-  const clearBtnText = "[ Clear ]";
+
+  const buildControlsSpec = () => {
+    const fullTarget = `To: [ ${targetLabel} ▾ ]`;
+    const fullSend = "[ ↵ Send ]";
+    const fullClear = "[ Clear ]";
+    const fullW = stringWidth(fullTarget) + 2 + stringWidth(fullSend) + 2 + stringWidth(fullClear);
+    if (!compact && fullW <= mainWidth - leftPad0) {
+      return { targetBtnText: fullTarget, sendBtnText: fullSend, clearBtnText: fullClear, gapStr: "  ", gapW: 2 };
+    }
+    const maxTargetLabelW = Math.max(6, mainWidth - 24);
+    const shortTarget = clipAnsi(targetLabel, maxTargetLabelW);
+    const cTarget = `To:[${shortTarget}▾]`;
+    const cSend = "[↵Send]";
+    const cClear = "[Clr]";
+    const cW = stringWidth(cTarget) + 1 + stringWidth(cSend) + 1 + stringWidth(cClear);
+    if (cW <= mainWidth) {
+      return { targetBtnText: cTarget, sendBtnText: cSend, clearBtnText: cClear, gapStr: " ", gapW: 1 };
+    }
+    const tightTarget = `[${clipAnsi(targetLabel, Math.max(4, mainWidth - 18))}▾]`;
+    return { targetBtnText: tightTarget, sendBtnText: "[Send]", clearBtnText: "[Clr]", gapStr: " ", gapW: 1 };
+  };
+  const { targetBtnText, sendBtnText, clearBtnText, gapStr, gapW } = buildControlsSpec();
 
   const showHeading = Boolean(options.showHeading);
   const baseBlockRows = (showHeading ? 2 : 0) + 3 + 1 + (showHeading ? 1 : 0); // heading+gap, 3-row box, controls, hint
-
-  // Check active dropdowns
-  const showSlash = isSlashMenuVisible();
-  const showTargetDrop = !showSlash && targetDropdownOpen;
-  const slashEntries = showSlash ? buildSlashDropdownBox(boxW) : [];
-  const dropW = Math.min(boxW, 38);
-  const targetEntries = showTargetDrop ? buildTargetDropdownBox(dropW, Math.max(10, availableHeight - 1)) : [];
 
   const lines = Array.from({ length: availableHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
 
   let composerStartRow = 0;
   if (centeredVertically) {
-    const extraH = showSlash ? Math.min(slashEntries.length, 6) : (showTargetDrop ? Math.min(targetEntries.length, 8) : 0);
-    const totalNeeded = baseBlockRows + (extraH > 0 ? 1 : 0);
-    composerStartRow = Math.max(0, Math.floor((availableHeight - totalNeeded - Math.floor(extraH / 2)) / 2));
+    composerStartRow = Math.max(0, Math.floor((availableHeight - baseBlockRows) / 2));
   } else {
     composerStartRow = Math.max(0, availableHeight - baseBlockRows);
+  }
+
+  // Check active dropdowns with available height above/below composer
+  const showSlash = isSlashMenuVisible();
+  const showTargetDrop = !showSlash && targetDropdownOpen;
+  const dropW = Math.min(boxW, Math.max(22, Math.min(38, mainWidth - 2)));
+  const maxAbove = Math.max(6, composerStartRow + (showHeading ? 2 : 0) - minOverlayRow);
+  const maxBelow = Math.max(6, availableHeight - (composerStartRow + baseBlockRows - (showHeading ? 1 : 0)));
+  const dropMaxRows = Math.max(maxAbove, maxBelow);
+  const slashEntries = showSlash ? buildSlashDropdownBox(boxW) : [];
+  const targetEntries = showTargetDrop ? buildTargetDropdownBox(dropW, dropMaxRows) : [];
+
+  if (centeredVertically && (showSlash || showTargetDrop)) {
+    const extraH = showSlash ? Math.min(slashEntries.length, 6) : Math.min(targetEntries.length, 8);
+    const totalNeeded = baseBlockRows + (extraH > 0 ? 1 : 0);
+    composerStartRow = Math.max(0, Math.floor((availableHeight - totalNeeded - Math.floor(extraH / 2)) / 2));
   }
 
   let curR = composerStartRow;
@@ -1420,9 +1610,10 @@ function renderComposerPanel(mainWidth, availableHeight, screenStartRow, options
 
   // 2. Composer Input Box (3 rows)
   const boxTopRow = curR;
+  const inputActive = composerFocused && composerFocusZone === "input";
   if (curR < availableHeight) {
-    const borderColor = composerFocused ? theme.fgAccent : theme.fgDimBorder;
-    const labelStr = ` ${targetLabel} `;
+    const borderColor = inputActive ? theme.fgAccent : theme.fgDimBorder;
+    const labelStr = ` ${clipAnsi(targetLabel, Math.max(4, boxInnerW - 4))} `;
     const dashes = Math.max(1, boxInnerW - stringWidth(labelStr) - 1);
     const topLine = `${theme.bgInput}${borderColor}${B.tl}${B.h}${A.bold}${theme.fgPrimary}${labelStr}${A.reset}${theme.bgInput}${borderColor}${B.h.repeat(dashes)}${B.tr}${A.reset}`;
     lines[curR] = fitToWidth(`${bg}${" ".repeat(leftPad0)}${topLine}`, mainWidth, bg);
@@ -1430,12 +1621,12 @@ function renderComposerPanel(mainWidth, availableHeight, screenStartRow, options
   }
 
   if (curR < availableHeight) {
-    const borderColor = composerFocused ? theme.fgAccent : theme.fgDimBorder;
+    const borderColor = inputActive ? theme.fgAccent : theme.fgDimBorder;
     const promptPrefix = ` ${theme.fgAccent}›${A.reset}${theme.bgInput} `;
     const prefixW = stringWidth(promptPrefix);
-    const inputAvail = Math.max(8, boxInnerW - prefixW - 1);
+    const inputAvail = Math.max(6, boxInnerW - prefixW - 1);
     const placeholder = `Message ${targetLabel} or type / for commands...`;
-    const cursorView = renderCursorText(composerBuffer, composerCursor, inputAvail, composerFocused, placeholder);
+    const cursorView = renderCursorText(composerBuffer, composerCursor, inputAvail, inputActive, placeholder);
     const innerContent = fitToWidth(`${promptPrefix}${cursorView}`, boxInnerW, theme.bgInput);
     const midLine = `${theme.bgInput}${borderColor}${B.v}${A.reset}${innerContent}${theme.bgInput}${borderColor}${B.v}${A.reset}`;
     lines[curR] = fitToWidth(`${bg}${" ".repeat(leftPad0)}${midLine}`, mainWidth, bg);
@@ -1443,14 +1634,14 @@ function renderComposerPanel(mainWidth, availableHeight, screenStartRow, options
   }
 
   if (curR < availableHeight) {
-    const borderColor = composerFocused ? theme.fgAccent : theme.fgDimBorder;
+    const borderColor = inputActive ? theme.fgAccent : theme.fgDimBorder;
     const botLine = `${theme.bgInput}${borderColor}${B.bl}${B.h.repeat(boxInnerW)}${B.br}${A.reset}`;
     lines[curR] = fitToWidth(`${bg}${" ".repeat(leftPad0)}${botLine}`, mainWidth, bg);
     // Register hitbox for composer box
     registerHitbox(
       screenStartRow + boxTopRow,
       leftPad0 + 1,
-      leftPad0 + boxW,
+      Math.min(mainWidth, leftPad0 + boxW),
       "focus_compose",
       {},
       screenStartRow + curR
@@ -1461,54 +1652,115 @@ function renderComposerPanel(mainWidth, availableHeight, screenStartRow, options
   // 3. Controls Row: To: [ @target ▾ ]   [ ↵ Send ]   [ Clear ]
   const controlsRowIdx = curR;
   if (curR < availableHeight) {
-    const targetCol1 = leftPad0 + 1;
     const targetW = stringWidth(targetBtnText);
-    const sendCol1 = targetCol1 + targetW + 2;
     const sendW = stringWidth(sendBtnText);
-    const clearCol1 = sendCol1 + sendW + 2;
     const clearW = stringWidth(clearBtnText);
+    const totalCtrlW = targetW + gapW + sendW + gapW + clearW;
+    const ctrlPad0 = totalCtrlW + leftPad0 <= mainWidth
+      ? leftPad0
+      : Math.max(0, Math.floor((mainWidth - totalCtrlW) / 2));
+
+    const targetCol1 = ctrlPad0 + 1;
+    const sendCol1 = targetCol1 + targetW + gapW;
+    const clearCol1 = sendCol1 + sendW + gapW;
 
     const screenCtrlRow = screenStartRow + curR;
-    registerHitbox(screenCtrlRow, targetCol1, targetCol1 + targetW - 1, "toggle_target_dropdown", {});
-    registerHitbox(screenCtrlRow, sendCol1, sendCol1 + sendW - 1, "btn_send", {});
-    registerHitbox(screenCtrlRow, clearCol1, clearCol1 + clearW - 1, "btn_clear", {});
+    if (targetCol1 <= mainWidth) {
+      registerHitbox(screenCtrlRow, targetCol1, Math.min(mainWidth, targetCol1 + targetW - 1), "toggle_target_dropdown", {});
+    }
+    if (sendCol1 <= mainWidth) {
+      registerHitbox(screenCtrlRow, sendCol1, Math.min(mainWidth, sendCol1 + sendW - 1), "btn_send", {});
+    }
+    if (clearCol1 <= mainWidth) {
+      registerHitbox(screenCtrlRow, clearCol1, Math.min(mainWidth, clearCol1 + clearW - 1), "btn_clear", {});
+    }
 
-    const targetBg = targetDropdownOpen ? theme.bgActiveNav : theme.bgSelected;
-    const targetFg = targetDropdownOpen ? theme.fgOnActive : theme.fgPrimary;
-    const targetStyled = `${targetBg}${A.bold}${targetFg}${targetBtnText}${A.reset}`;
-    const sendStyled = `${theme.bgActiveNav}${A.bold}${theme.fgOnActive}${sendBtnText}${A.reset}`;
-    const clearStyled = `${theme.bgSelected}${theme.fgMuted}${clearBtnText}${A.reset}`;
+    const isTargetFocus = composerFocusZone === "target" || targetDropdownOpen;
+    const isSendFocus = composerFocusZone === "send";
+    const isClearFocus = composerFocusZone === "clear";
 
-    const ctrlLine = `${bg}${" ".repeat(leftPad0)}${targetStyled}${bg}  ${sendStyled}${bg}  ${clearStyled}`;
+    const targetBg = isTargetFocus ? theme.bgActiveNav : theme.bgSelected;
+    const targetFg = isTargetFocus ? `${A.bold}${A.underline}${theme.fgOnActive}` : `${A.bold}${theme.fgPrimary}`;
+    const sendBg = isSendFocus ? theme.bgActiveNav : theme.bgActiveNav;
+    const sendFg = isSendFocus ? `${A.bold}${A.underline}${theme.fgOnActive}` : `${A.bold}${theme.fgOnActive}`;
+    const clearBg = isClearFocus ? theme.bgActiveNav : theme.bgSelected;
+    const clearFg = isClearFocus ? `${A.bold}${A.underline}${theme.fgOnActive}` : theme.fgMuted;
+
+    const targetStyled = `${targetBg}${targetFg}${targetBtnText}${A.reset}`;
+    const sendStyled = `${sendBg}${sendFg}${sendBtnText}${A.reset}`;
+    const clearStyled = `${clearBg}${clearFg}${clearBtnText}${A.reset}`;
+
+    const ctrlLine = `${bg}${" ".repeat(ctrlPad0)}${targetStyled}${bg}${gapStr}${sendStyled}${bg}${gapStr}${clearStyled}`;
     lines[curR] = fitToWidth(ctrlLine, mainWidth, bg);
     curR++;
   }
 
   // 4. Subtle Hint Row on Home/Empty
   if (showHeading && curR < availableHeight) {
-    const hint = `${theme.fgMuted}[Tab] Sub-Tabs  [/] Commands  [Ctrl+B] Menu  [Esc+z] Zen  [Enter] Send${A.reset}`;
+    const hint = compact
+      ? `${theme.fgMuted}[Tab] Tabs  [/] Cmds  [Esc then z] Zen  [Enter] Send${A.reset}`
+      : `${theme.fgMuted}[Tab] Sub-Tabs  [/] Commands  [Ctrl+B] Menu  [Esc then z] Zen  [Enter] Send${A.reset}`;
     const hintW = stringWidth(hint);
     const hintPad = Math.max(0, Math.floor((mainWidth - hintW) / 2));
     lines[curR] = fitToWidth(`${bg}${" ".repeat(hintPad)}${hint}`, mainWidth, bg);
     curR++;
   }
 
-  // 5. Anchor Floating Dropdowns cleanly (below if room, otherwise above!)
+  // 5. Anchor Floating Dropdowns cleanly (below if room, otherwise above without overlapping minOverlayRow)
   if (showSlash && slashEntries.length > 0) {
     const roomBelow = availableHeight - (boxTopRow + 3);
     const anchorStart = roomBelow >= slashEntries.length
       ? boxTopRow + 3
-      : Math.max(0, boxTopRow - slashEntries.length);
-    overlayBoxOntoLines(lines, anchorStart, screenStartRow, leftPad0, slashEntries);
+      : Math.max(minOverlayRow, boxTopRow - slashEntries.length);
+    overlayBoxOntoLines(lines, anchorStart, screenStartRow, leftPad0, slashEntries, minOverlayRow);
   } else if (showTargetDrop && targetEntries.length > 0) {
     const roomBelow = availableHeight - (controlsRowIdx + 1);
     const anchorStart = roomBelow >= targetEntries.length
       ? controlsRowIdx + 1
-      : Math.max(0, boxTopRow - targetEntries.length);
-    overlayBoxOntoLines(lines, anchorStart, screenStartRow, leftPad0, targetEntries);
+      : Math.max(minOverlayRow, boxTopRow - targetEntries.length);
+    const dropPad0 = Math.max(0, Math.min(leftPad0, mainWidth - dropW));
+    overlayBoxOntoLines(lines, anchorStart, screenStartRow, dropPad0, targetEntries, minOverlayRow);
   }
 
   return lines;
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  CHANNELS BAR HELPER
+// ─────────────────────────────────────────────────────────────────
+function renderChannelsBar(mainWidth, screenBarRow) {
+  const theme = getTheme();
+  const bg = theme.bgHeader;
+  const compact = mainWidth < 55;
+  const addBtn = compact ? "[+Ch]" : "[ + Channel ]";
+  const addW = stringWidth(addBtn);
+  const maxPillsCol = Math.max(6, mainWidth - addW - 2);
+
+  let col1 = 2; // 1 leading space
+  let barStr = " ";
+
+  for (let i = 0; i < channelList.length; i++) {
+    const ch = channelList[i];
+    const safeCh = sanitizeTerminalText(ch);
+    const isSel = ch === selectedChannel && selectedType === "channel";
+    const pillText = `[ #${safeCh} ]`;
+    const pillW = stringWidth(pillText);
+    if (col1 + pillW > maxPillsCol) break;
+
+    registerHitbox(screenBarRow, col1, col1 + pillW - 1, "select_channel", { name: ch, index: i });
+    const pillBg = isSel ? theme.bgActiveNav : theme.bgSelected;
+    const pillFg = isSel ? `${A.bold}${theme.fgOnActive}` : theme.fgChannel;
+    barStr += `${pillBg}${pillFg}${pillText}${A.reset}${bg} `;
+    col1 += pillW + 1;
+  }
+
+  const gap = Math.max(1, mainWidth - col1 - addW);
+  const addCol1 = col1 + gap;
+  if (addCol1 + addW - 1 <= mainWidth) {
+    registerHitbox(screenBarRow, addCol1, addCol1 + addW - 1, "new_channel_prompt", {});
+  }
+  barStr += `${" ".repeat(gap)}${theme.bgSelected}${theme.fgAccent}${addBtn}${A.reset}`;
+  return fitToWidth(barStr, mainWidth, bg);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1517,14 +1769,25 @@ function renderComposerPanel(mainWidth, availableHeight, screenStartRow, options
 function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChannel) {
   const theme = getTheme();
   const bg = theme.bgCanvas;
+  const compact = mainWidth < 55;
   const targetName = isChannel ? selectedChannel : selectedAgent;
   const safeTargetName = sanitizeTerminalText(targetName);
   const cacheEntry = threadCache.get(getThreadCacheKey(isChannel, targetName));
   const msgs = (cacheEntry && Array.isArray(cacheEntry.messages)) ? cacheEntry.messages : [];
 
-  // Empty conversation -> Centered Composer with target heading!
+  // Empty conversation -> Centered Composer (plus Channels Bar on Channels view!)
   if (!msgs || msgs.length === 0) {
     const prefix = isChannel ? `#${safeTargetName}` : `@${safeTargetName}`;
+    if (isChannel && bodyHeight >= 10) {
+      const chBar = renderChannelsBar(mainWidth, screenStartRow);
+      const compLines = renderComposerPanel(mainWidth, bodyHeight - 1, screenStartRow + 1, {
+        centeredVertically: true,
+        showHeading: true,
+        headingText: `✉ Intercom`,
+        subHeadingText: `${prefix} · No messages yet`
+      });
+      return [chBar, ...compLines];
+    }
     return renderComposerPanel(mainWidth, bodyHeight, screenStartRow, {
       centeredVertically: true,
       showHeading: true,
@@ -1533,12 +1796,13 @@ function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChanne
     });
   }
 
-  // Active conversation with messages -> clean header + high-contrast speech bubbles + centered-width composer
-  const composerH = Math.min(bodyHeight - 4, 4); // 3-row box + 1-row controls
-  const streamTotalH = Math.max(4, bodyHeight - composerH);
+  // Active conversation with messages -> clean header + optional Channels bar + speech bubbles + centered-width composer
+  const headerRows = isChannel ? 2 : 1;
+  const composerH = Math.min(Math.max(4, bodyHeight - headerRows - 2), 4); // 3-row box + 1-row controls
+  const streamTotalH = Math.max(headerRows + 2, bodyHeight - composerH);
   const lines = Array.from({ length: bodyHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
 
-  // Header row (row 0 of body)
+  // Header row (row 0 of body) — right-aligned buttons never shift or clip on narrow widths
   const targetTag = isChannel
     ? `${theme.fgChannel}${A.bold}#${safeTargetName}${A.reset}`
     : `${theme.fgAccent}${A.bold}@${safeTargetName}${A.reset}`;
@@ -1546,23 +1810,51 @@ function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChanne
   const statusPill = isChannel
     ? `${theme.fgMuted}· Topic Channel (${msgs.length})${A.reset}`
     : `${statusBadge.label}${A.reset} ${theme.fgMuted}· Inbox (${msgs.length})${A.reset}`;
-  const refreshBtn = "[ ↻ Refresh ]";
-  const refreshW = stringWidth(refreshBtn);
-  const refreshCol1 = Math.max(2, mainWidth - refreshW - 1);
-  registerHitbox(screenStartRow, refreshCol1, refreshCol1 + refreshW - 1, "btn_refresh", {});
 
-  const leftHdr = `  ${targetTag}  ${statusPill}`;
-  const hdrGap = Math.max(1, refreshCol1 - stringWidth(leftHdr) - 1);
-  lines[0] = fitToWidth(`${bg}${leftHdr}${bg}${" ".repeat(hdrGap)}${theme.bgSelected}${theme.fgAccent}${refreshBtn}${A.reset}`, mainWidth, bg);
+  const refreshBtn = compact ? "[↻]" : "[ ↻ Refresh ]";
+  const refreshW = stringWidth(refreshBtn);
+  const markReadBtn = !isChannel ? (compact ? "[✓Read]" : "[ ✓ Mark Read ]") : "";
+  const markReadW = markReadBtn ? stringWidth(markReadBtn) : 0;
+
+  const rightGroupW = markReadBtn ? (markReadW + 1 + refreshW) : refreshW;
+  const rightStart0 = Math.max(2, mainWidth - rightGroupW - 1);
+  const maxLeftW = Math.max(4, rightStart0 - 1);
+  const rawLeftHdr = `  ${targetTag}  ${statusPill}`;
+  const clippedLeftHdr = clipAnsi(rawLeftHdr, maxLeftW);
+  const hdrGap = Math.max(1, rightStart0 - stringWidth(clippedLeftHdr));
+
+  let rightRendered = "";
+  let curCol1 = rightStart0 + 1;
+  if (markReadBtn) {
+    registerHitbox(screenStartRow, curCol1, Math.min(mainWidth, curCol1 + markReadW - 1), "btn_mark_read", { agent: targetName });
+    rightRendered += `${theme.bgSelected}${theme.fgSelf}${markReadBtn}${A.reset}${bg} `;
+    curCol1 += markReadW + 1;
+  }
+  registerHitbox(screenStartRow, curCol1, Math.min(mainWidth, curCol1 + refreshW - 1), "btn_refresh", {});
+  rightRendered += `${theme.bgSelected}${theme.fgAccent}${refreshBtn}${A.reset}`;
+
+  lines[0] = fitToWidth(`${bg}${clippedLeftHdr}${bg}${" ".repeat(hdrGap)}${rightRendered}`, mainWidth, bg);
+
+  if (isChannel && bodyHeight > 1) {
+    lines[1] = renderChannelsBar(mainWidth, screenStartRow + 1);
+  }
 
   // Build speech bubbles centered cleanly
-  const streamW = Math.min(82, Math.max(40, Math.floor(mainWidth * 0.78)));
-  const streamPad0 = Math.max(1, Math.floor((mainWidth - streamW) / 2));
+  const maxStreamW = Math.max(20, mainWidth - 2);
+  const streamW = Math.min(82, maxStreamW, Math.max(Math.min(40, maxStreamW), Math.floor(mainWidth * 0.78)));
+  const bubbleW = Math.max(20, Math.min(streamW, maxStreamW));
+  const streamPad0 = Math.max(0, Math.floor((mainWidth - bubbleW) / 2));
   const bubbleRows = [];
   const recent = msgs.slice(-25);
   const selfIdentity = getSelfIdentity().toLowerCase();
 
-  for (const m of recent) {
+  if (selectedMessageIndex >= recent.length) {
+    selectedMessageIndex = recent.length - 1;
+  }
+
+  for (let mIdx = 0; mIdx < recent.length; mIdx++) {
+    const m = recent[mIdx];
+    const isSelectedMsg = mIdx === selectedMessageIndex;
     const rawFrom = m.from || m.sender || "unknown";
     const from = sanitizeTerminalText(rawFrom);
     const fromLower = String(rawFrom || "").toLowerCase();
@@ -1572,7 +1864,7 @@ function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChanne
     const ts = settings.showTimestamps ? sanitizeTerminalText(tsSlice) : "";
     const isRead = Boolean(m.read || (m.metadata && m.metadata.read));
     const receiptBadge = settings.readReceipts && !isChannel
-      ? (isRead ? ` ${A.dim}[READ]${A.reset}` : ` ${theme.fgWarn}[UNREAD]${A.reset}`)
+      ? (isRead ? ` ${theme.fgMuted}[READ]${A.reset}` : ` ${theme.fgWarn}[UNREAD]${A.reset}`)
       : "";
     const body = sanitizeTerminalText(
       String(m.message || (m.payload && m.payload.message) || m.body || "").trim(),
@@ -1580,47 +1872,91 @@ function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChanne
     );
 
     const senderColor = isChannel ? theme.fgChannel : (isSelf ? theme.fgSelf : theme.fgAccent);
-    const bubbleBg = isSelf ? theme.bgBubbleSelf : theme.bgBubble;
-    const bubbleW = Math.min(streamW, Math.max(30, streamW - 2));
+    const borderColor = isSelectedMsg ? theme.fgWarn : senderColor;
+    const bubbleBg = isSelectedMsg ? theme.bgSelected : (isSelf ? theme.bgBubbleSelf : theme.bgBubble);
     const tsPart = ts ? `  ${theme.fgMuted}${ts}${A.reset}` : "";
-    const headerLabel = `${senderColor}${A.bold}@${from}${A.reset}${tsPart}${receiptBadge}`;
-    const dashLen = Math.max(2, bubbleW - stringWidth(headerLabel) - 5);
+    const selPrefix = isSelectedMsg ? `${theme.fgWarn}›${A.reset} ` : "";
+    const rawHeaderLabel = `${selPrefix}${senderColor}${A.bold}@${from}${A.reset}${tsPart}${receiptBadge}`;
+    const headerLabel = clipAnsi(rawHeaderLabel, Math.max(6, bubbleW - 6));
+    const dashLen = Math.max(1, bubbleW - stringWidth(headerLabel) - 5);
 
-    bubbleRows.push(`${senderColor}${B.tl}${B.h}${A.reset} ${headerLabel} ${senderColor}${B.h.repeat(dashLen)}${B.tr}${A.reset}`);
+    bubbleRows.push({
+      text: `${borderColor}${B.tl}${B.h}${A.reset} ${headerLabel} ${borderColor}${B.h.repeat(dashLen)}${B.tr}${A.reset}`,
+      hitboxes: [{ relStartCol: 1, relEndCol: bubbleW, action: "select_message", payload: { index: mIdx } }]
+    });
 
-    const wrapped = wrapText(body, bubbleW - 4);
+    const wrapped = wrapText(body, Math.max(8, bubbleW - 4));
     for (const wl of wrapped) {
       const innerText = fitToWidth(` ${theme.fgPrimary}${wl}${A.reset}`, bubbleW - 2, bubbleBg);
-      bubbleRows.push(`${senderColor}${B.v}${A.reset}${innerText}${senderColor}${B.v}${A.reset}`);
+      bubbleRows.push({
+        text: `${borderColor}${B.v}${A.reset}${innerText}${borderColor}${B.v}${A.reset}`,
+        hitboxes: [{ relStartCol: 1, relEndCol: bubbleW, action: "select_message", payload: { index: mIdx } }]
+      });
     }
-    bubbleRows.push(`${senderColor}${B.bl}${B.h.repeat(bubbleW - 2)}${B.br}${A.reset}`);
-    bubbleRows.push("");
+
+    if (isSelectedMsg) {
+      const replyBtn = compact ? "[↩Reply]" : "[ ↩ Reply ]";
+      const fwdBtn = compact ? "[↪Fwd]" : "[ ↪ Forward ]";
+      const replyW = stringWidth(replyBtn);
+      const fwdW = stringWidth(fwdBtn);
+      const actInner = fitToWidth(
+        ` ${theme.bgActiveNav}${A.bold}${theme.fgOnActive}${replyBtn}${A.reset}${bubbleBg}  ${theme.bgHeader}${theme.fgAccent}${fwdBtn}${A.reset}`,
+        bubbleW - 2,
+        bubbleBg
+      );
+      const replyRelStart = 3; // border(1) + space(1) + 1-based
+      const replyRelEnd = replyRelStart + replyW - 1;
+      const fwdRelStart = replyRelEnd + 3; // 2 spaces gap
+      const fwdRelEnd = fwdRelStart + fwdW - 1;
+      bubbleRows.push({
+        text: `${borderColor}${B.v}${A.reset}${actInner}${borderColor}${B.v}${A.reset}`,
+        hitboxes: [
+          { relStartCol: 1, relEndCol: bubbleW, action: "select_message", payload: { index: mIdx } },
+          { relStartCol: replyRelStart, relEndCol: replyRelEnd, action: "reply_message", payload: { index: mIdx, from, body } },
+          { relStartCol: fwdRelStart, relEndCol: fwdRelEnd, action: "forward_message", payload: { index: mIdx, from, body } }
+        ]
+      });
+    }
+
+    bubbleRows.push({
+      text: `${borderColor}${B.bl}${B.h.repeat(bubbleW - 2)}${B.br}${A.reset}`,
+      hitboxes: [{ relStartCol: 1, relEndCol: bubbleW, action: "select_message", payload: { index: mIdx } }]
+    });
+    bubbleRows.push({ text: "", hitboxes: [] });
   }
 
   // Slice visible window with scrollOffset
-  const visibleH = Math.max(1, streamTotalH - 1);
+  const visibleH = Math.max(1, streamTotalH - headerRows);
   const maxScroll = Math.max(0, bubbleRows.length - visibleH);
   scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
   const startIdx = Math.max(0, bubbleRows.length - visibleH - scrollOffset);
   const slice = bubbleRows.slice(startIdx, startIdx + visibleH);
 
   for (let i = 0; i < slice.length; i++) {
-    const r = 1 + i;
+    const r = headerRows + i;
     if (r >= streamTotalH) break;
-    lines[r] = fitToWidth(`${bg}${" ".repeat(streamPad0)}${slice[i]}`, mainWidth, bg);
+    const rowObj = slice[i];
+    lines[r] = fitToWidth(`${bg}${" ".repeat(streamPad0)}${rowObj.text}`, mainWidth, bg);
+    for (const hb of rowObj.hitboxes) {
+      const sCol = Math.max(1, streamPad0 + hb.relStartCol);
+      const eCol = Math.min(mainWidth, streamPad0 + hb.relEndCol);
+      if (sCol <= eCol) {
+        registerHitbox(screenStartRow + r, sCol, eCol, hb.action, hb.payload);
+      }
+    }
   }
 
   // Render centered-width composer at bottom of thread
   const composerLines = renderComposerPanel(mainWidth, bodyHeight, screenStartRow, {
     centeredVertically: false,
-    showHeading: false
+    showHeading: false,
+    minOverlayRow: headerRows
   });
   // Copy bottom composer rows (and any anchored overlay dropdowns above the composer!)
   const composerTopRow = bodyHeight - composerH;
   const showOverlay = isSlashMenuVisible() || targetDropdownOpen;
-  const copyStart = showOverlay ? 1 : composerTopRow;
+  const copyStart = showOverlay ? headerRows : composerTopRow;
   for (let r = copyStart; r < bodyHeight; r++) {
-    // Only overwrite stream rows where an overlay dropdown actually drew non-empty content
     if (r < composerTopRow) {
       if (stripAnsi(composerLines[r]).trim().length > 0) {
         lines[r] = composerLines[r];
@@ -1639,45 +1975,128 @@ function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChanne
 function renderPeersView(mainWidth, bodyHeight, screenStartRow) {
   const theme = getTheme();
   const bg = theme.bgCanvas;
-  const cardW = Math.min(76, Math.max(42, Math.floor(mainWidth * 0.78)));
-  const padL0 = Math.max(1, Math.floor((mainWidth - cardW) / 2));
-  const inner = cardW - 2;
+  const compact = mainWidth < 55;
+  const maxCardW = Math.max(24, mainWidth - 2);
+  const cardW = Math.min(76, maxCardW, Math.max(Math.min(42, maxCardW), Math.floor(mainWidth * 0.80)));
+  const padL0 = Math.max(0, Math.floor((mainWidth - cardW) / 2));
+  const inner = Math.max(12, cardW - 2);
   const lines = Array.from({ length: bodyHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
 
-  const refreshBtn = "[ ↻ Refresh ]";
+  const filterBtn = compact || cardW < 44
+    ? (peerFilterActive || peerFilterQuery ? "[/·On]" : "[/]")
+    : (peerFilterActive || peerFilterQuery ? "[ / Filter · On ]" : "[ / Filter ]");
+  const refreshBtn = compact || cardW < 44 ? "[↻]" : "[ ↻ Refresh ]";
+  const filterW = stringWidth(filterBtn);
   const refW = stringWidth(refreshBtn);
+  const rightBtnsW = filterW + 1 + refW;
 
   let r = 1;
   if (r < bodyHeight) {
-    const hdr = `${A.bold}${theme.fgAccent}● Active Agent Peers${A.reset}`;
+    const rawHdr = compact ? `${A.bold}${theme.fgAccent}● Peers${A.reset}` : `${A.bold}${theme.fgAccent}● Active Agent Peers${A.reset}`;
+    const hdr = clipAnsi(rawHdr, Math.max(4, cardW - rightBtnsW - 1));
     const hdrW = stringWidth(hdr);
-    const gap = Math.max(1, cardW - hdrW - refW);
-    const refCol1 = padL0 + hdrW + gap + 1;
-    registerHitbox(screenStartRow + r, refCol1, refCol1 + refW - 1, "btn_refresh", {});
-    lines[r] = fitToWidth(`${bg}${" ".repeat(padL0)}${hdr}${bg}${" ".repeat(gap)}${theme.bgSelected}${theme.fgAccent}${refreshBtn}${A.reset}`, mainWidth, bg);
-    r += 2;
+    const gap = Math.max(1, cardW - hdrW - rightBtnsW);
+    const filterCol1 = padL0 + hdrW + gap + 1;
+    const refCol1 = filterCol1 + filterW + 1;
+    if (filterCol1 <= mainWidth) {
+      registerHitbox(screenStartRow + r, filterCol1, Math.min(mainWidth, filterCol1 + filterW - 1), "toggle_peer_filter", {});
+    }
+    if (refCol1 <= mainWidth) {
+      registerHitbox(screenStartRow + r, refCol1, Math.min(mainWidth, refCol1 + refW - 1), "btn_refresh", {});
+    }
+    const filterBg = (peerFilterActive || peerFilterQuery) ? theme.bgActiveNav : theme.bgSelected;
+    const filterFg = (peerFilterActive || peerFilterQuery) ? `${A.bold}${theme.fgOnActive}` : theme.fgAccent;
+    lines[r] = fitToWidth(
+      `${bg}${" ".repeat(padL0)}${hdr}${bg}${" ".repeat(gap)}${filterBg}${filterFg}${filterBtn}${A.reset}${bg} ${theme.bgSelected}${theme.fgAccent}${refreshBtn}${A.reset}`,
+      mainWidth,
+      bg
+    );
+    r += 1;
+  }
+
+  const filteredAgents = getFilteredAgents();
+
+  if ((peerFilterActive || peerFilterQuery.length > 0) && r < bodyHeight - 3) {
+    const countTag = `${theme.fgMuted}(${filteredAgents.length}/${agentList.length})${A.reset}`;
+    const clearTag = peerFilterQuery.length > 0 ? ` ${theme.bgSelected}${theme.fgMuted}[×]${A.reset}` : "";
+    const prefix = `${theme.fgAccent}Filter:${A.reset} `;
+    const suffixW = stringWidth(countTag) + (peerFilterQuery.length > 0 ? 4 : 0) + 1;
+    const inputAvail = Math.max(6, cardW - stringWidth(prefix) - suffixW);
+    const cursorView = renderCursorText(peerFilterQuery, peerFilterCursor, inputAvail, peerFilterActive, "type peer name...");
+    const rowStr = `${prefix}${cursorView} ${countTag}${clearTag}`;
+    const clippedRow = clipAnsi(rowStr, cardW);
+    const filterInputEnd = Math.min(mainWidth, padL0 + cardW - (peerFilterQuery.length > 0 ? 3 : 0));
+    registerHitbox(screenStartRow + r, padL0 + 1, filterInputEnd, "focus_peer_filter", {});
+    if (peerFilterQuery.length > 0) {
+      const clearCol1 = Math.min(mainWidth, padL0 + stringWidth(`${prefix}${cursorView} ${countTag} `) + 1);
+      registerHitbox(screenStartRow + r, clearCol1, Math.min(mainWidth, clearCol1 + 2), "clear_peer_filter", {});
+    }
+    lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${clippedRow}`, mainWidth, bg);
+  } else {
+    r++;
   }
 
   if (r < bodyHeight) {
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.tl}${B.h.repeat(inner)}${B.tr}${A.reset}`, mainWidth, bg);
   }
 
-  for (let i = 0; i < agentList.length && r < bodyHeight - 2; i++) {
-    const name = agentList[i];
-    const safeName = sanitizeTerminalText(name);
-    const meta = agentMetaMap.get(name) || { total: 0, unread: 0 };
-    const { dot } = formatPeerStatusBadge(name, theme);
-    const unread = meta.unread > 0 ? ` ${theme.fgWarn}[${meta.unread} unread]${A.reset}` : "";
-    const total = meta.total > 0 ? ` ${theme.fgMuted}(${meta.total} msgs)${A.reset}` : ` ${A.dim}(idle)${A.reset}`;
-    const isSel = name === selectedAgent;
-    const rowBg = isSel ? theme.bgSelected : theme.bgInput;
-    const openBadge = `${theme.fgAccent}[ Open ]${A.reset}`;
-    const leftPart = `  ${dot}  ${A.bold}${theme.fgPrimary}@${safeName}${A.reset}${unread}${total}`;
-    const gap = Math.max(1, inner - stringWidth(leftPart) - stringWidth(openBadge) - 1);
-    const content = fitToWidth(`${leftPart}${" ".repeat(gap)}${openBadge}`, inner, rowBg);
+  const listMaxRows = Math.max(1, bodyHeight - r - 1);
+  if (filteredAgents.length === 0) {
+    if (r < bodyHeight - 1) {
+      const msg = peerFilterQuery
+        ? `No peers matching "${sanitizeTerminalText(peerFilterQuery)}"`
+        : "No active peers discovered";
+      const row = fitToWidth(`  ${theme.fgMuted}${msg}${A.reset}`, inner, theme.bgInput);
+      lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${row}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+    }
+  } else {
+    const needsScroll = filteredAgents.length > listMaxRows;
+    const maxStart = Math.max(0, filteredAgents.length - Math.max(1, listMaxRows - (needsScroll ? 1 : 0)));
+    let startIdx = needsScroll ? Math.max(0, Math.min(scrollOffset, maxStart)) : 0;
+    scrollOffset = startIdx;
 
-    registerHitbox(screenStartRow + r, padL0 + 1, padL0 + cardW, "select_agent", { name, index: i });
-    lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${content}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+    let availRows = listMaxRows;
+    const hasAbove = startIdx > 0;
+    if (hasAbove) availRows = Math.max(1, availRows - 1);
+    let hasBelow = startIdx + availRows < filteredAgents.length;
+    if (hasBelow && availRows > 1) availRows -= 1;
+    hasBelow = startIdx + availRows < filteredAgents.length;
+
+    if (hasAbove && r < bodyHeight - 1) {
+      const hint = fitToWidth(`  ${theme.fgAccent}↑ ${startIdx} more above (scroll up)${A.reset}`, inner, theme.bgInput);
+      registerHitbox(screenStartRow + r, padL0 + 1, Math.min(mainWidth, padL0 + cardW), "scroll_list", { delta: -3 });
+      lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${hint}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+    }
+
+    const endIdx = Math.min(filteredAgents.length, startIdx + availRows);
+    for (let i = startIdx; i < endIdx && r < bodyHeight - 1; i++) {
+      const name = filteredAgents[i];
+      const realIdx = agentList.indexOf(name);
+      const safeName = sanitizeTerminalText(name);
+      const meta = agentMetaMap.get(name) || { total: 0, unread: 0 };
+      const { dot } = formatPeerStatusBadge(name, theme);
+      const unread = meta.unread > 0 ? ` ${theme.fgWarn}[${meta.unread} unread]${A.reset}` : "";
+      const total = meta.total > 0 ? ` ${theme.fgMuted}(${meta.total} msgs)${A.reset}` : ` ${theme.fgMuted}(idle)${A.reset}`;
+      const isSel = name === selectedAgent;
+      const rowBg = isSel ? theme.bgSelected : theme.bgInput;
+      const openBadgeText = cardW < 40 ? "[Open]" : "[ Open ]";
+      const openBadge = `${theme.fgAccent}${openBadgeText}${A.reset}`;
+      const maxLeftW = Math.max(8, inner - stringWidth(openBadgeText) - 2);
+      const rawLeft = `  ${dot}  ${A.bold}${theme.fgPrimary}@${safeName}${A.reset}${unread}${total}`;
+      const leftPart = clipAnsi(rawLeft, maxLeftW);
+      const gap = Math.max(1, inner - stringWidth(leftPart) - stringWidth(openBadgeText) - 1);
+      const content = fitToWidth(`${leftPart}${" ".repeat(gap)}${openBadge}`, inner, rowBg);
+
+      registerHitbox(screenStartRow + r, padL0 + 1, Math.min(mainWidth, padL0 + cardW), "select_agent", { name, index: realIdx >= 0 ? realIdx : i });
+      lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${content}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+    }
+
+    if (hasBelow && r < bodyHeight - 1) {
+      const rem = filteredAgents.length - endIdx;
+      const hint = fitToWidth(`  ${theme.fgAccent}↓ ${rem} more below (scroll down)${A.reset}`, inner, theme.bgInput);
+      registerHitbox(screenStartRow + r, padL0 + 1, Math.min(mainWidth, padL0 + cardW), "scroll_list", { delta: 3 });
+      lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${hint}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+    }
   }
 
   if (r < bodyHeight) {
@@ -1689,21 +2108,26 @@ function renderPeersView(mainWidth, bodyHeight, screenStartRow) {
 function renderInfoView(mainWidth, bodyHeight, screenStartRow) {
   const theme = getTheme();
   const bg = theme.bgCanvas;
-  const cardW = Math.min(78, Math.max(44, Math.floor(mainWidth * 0.80)));
-  const padL0 = Math.max(1, Math.floor((mainWidth - cardW) / 2));
-  const inner = cardW - 2;
+  const compact = mainWidth < 55;
+  const maxCardW = Math.max(24, mainWidth - 2);
+  const cardW = Math.min(78, maxCardW, Math.max(Math.min(44, maxCardW), Math.floor(mainWidth * 0.80)));
+  const padL0 = Math.max(0, Math.floor((mainWidth - cardW) / 2));
+  const inner = Math.max(12, cardW - 2);
   const lines = Array.from({ length: bodyHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
 
-  const refreshBtn = "[ ↻ Refresh ]";
+  const refreshBtn = compact || cardW < 46 ? "[↻]" : "[ ↻ Refresh ]";
   const refW = stringWidth(refreshBtn);
 
   let r = 1;
   if (r < bodyHeight) {
-    const hdr = `${A.bold}${theme.fgAccent}ℹ Intercom Mesh Health & System Info${A.reset}`;
+    const rawHdr = compact
+      ? `${A.bold}${theme.fgAccent}ℹ Mesh Health & Info${A.reset}`
+      : `${A.bold}${theme.fgAccent}ℹ Intercom Mesh Health & System Info${A.reset}`;
+    const hdr = clipAnsi(rawHdr, Math.max(4, cardW - refW - 1));
     const hdrW = stringWidth(hdr);
     const gap = Math.max(1, cardW - hdrW - refW);
     const refCol1 = padL0 + hdrW + gap + 1;
-    registerHitbox(screenStartRow + r, refCol1, refCol1 + refW - 1, "btn_refresh", {});
+    registerHitbox(screenStartRow + r, refCol1, Math.min(mainWidth, refCol1 + refW - 1), "btn_refresh", {});
     lines[r] = fitToWidth(`${bg}${" ".repeat(padL0)}${hdr}${bg}${" ".repeat(gap)}${theme.bgActiveNav}${A.bold}${theme.fgOnActive}${refreshBtn}${A.reset}`, mainWidth, bg);
     r += 2;
   }
@@ -1743,12 +2167,14 @@ function renderInfoView(mainWidth, bodyHeight, screenStartRow) {
   }
   if (r + 1 < bodyHeight && activityLog.length > 0) {
     r++;
-    const actBtn = "[ View Activity ]";
+    const actBtn = compact || cardW < 44 ? "[Activity]" : "[ View Activity ]";
     const actW = stringWidth(actBtn);
-    const actCol1 = padL0 + cardW - actW;
-    registerHitbox(screenStartRow + r, actCol1, actCol1 + actW - 1, "open_activity", {});
-    const actHdr = `${A.bold}${theme.fgAccent}⏱ Recent Activity${A.reset}`;
-    const actGap = Math.max(1, cardW - stringWidth(actHdr) - actW);
+    const rawActHdr = `${A.bold}${theme.fgAccent}⏱ Recent Activity${A.reset}`;
+    const actHdr = clipAnsi(rawActHdr, Math.max(4, cardW - actW - 1));
+    const actHdrW = stringWidth(actHdr);
+    const actGap = Math.max(1, cardW - actHdrW - actW);
+    const actCol1 = padL0 + actHdrW + actGap + 1;
+    registerHitbox(screenStartRow + r, actCol1, Math.min(mainWidth, actCol1 + actW - 1), "open_activity", {});
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${actHdr}${bg}${" ".repeat(actGap)}${theme.bgSelected}${theme.fgAccent}${actBtn}${A.reset}`, mainWidth, bg);
     for (let i = 0; i < Math.min(3, activityLog.length) && r < bodyHeight; i++) {
       lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}  ${theme.fgMuted}${sanitizeTerminalText(activityLog[i])}${A.reset}`, mainWidth, bg);
@@ -1760,21 +2186,24 @@ function renderInfoView(mainWidth, bodyHeight, screenStartRow) {
 function renderActivityView(mainWidth, bodyHeight, screenStartRow) {
   const theme = getTheme();
   const bg = theme.bgCanvas;
-  const cardW = Math.min(82, Math.max(44, Math.floor(mainWidth * 0.82)));
-  const padL0 = Math.max(1, Math.floor((mainWidth - cardW) / 2));
-  const inner = cardW - 2;
+  const compact = mainWidth < 55;
+  const maxCardW = Math.max(24, mainWidth - 2);
+  const cardW = Math.min(82, maxCardW, Math.max(Math.min(44, maxCardW), Math.floor(mainWidth * 0.82)));
+  const padL0 = Math.max(0, Math.floor((mainWidth - cardW) / 2));
+  const inner = Math.max(12, cardW - 2);
   const lines = Array.from({ length: bodyHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
 
-  const clearBtn = "[ Clear Log ]";
+  const clearBtn = compact || cardW < 46 ? "[Clear]" : "[ Clear Log ]";
   const clearW = stringWidth(clearBtn);
 
   let r = 1;
   if (r < bodyHeight) {
-    const hdr = `${A.bold}${theme.fgAccent}⏱ Mesh Activity Stream (${activityLog.length})${A.reset}`;
+    const rawHdr = `${A.bold}${theme.fgAccent}⏱ Mesh Activity Stream (${activityLog.length})${A.reset}`;
+    const hdr = clipAnsi(rawHdr, Math.max(4, cardW - clearW - 1));
     const hdrW = stringWidth(hdr);
     const gap = Math.max(1, cardW - hdrW - clearW);
     const clearCol1 = padL0 + hdrW + gap + 1;
-    registerHitbox(screenStartRow + r, clearCol1, clearCol1 + clearW - 1, "clear_activity", {});
+    registerHitbox(screenStartRow + r, clearCol1, Math.min(mainWidth, clearCol1 + clearW - 1), "clear_activity", {});
     lines[r] = fitToWidth(`${bg}${" ".repeat(padL0)}${hdr}${bg}${" ".repeat(gap)}${theme.bgSelected}${theme.fgMuted}${clearBtn}${A.reset}`, mainWidth, bg);
     r += 2;
   }
@@ -1783,14 +2212,41 @@ function renderActivityView(mainWidth, bodyHeight, screenStartRow) {
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.tl}${B.h.repeat(inner)}${B.tr}${A.reset}`, mainWidth, bg);
   }
 
+  const listMaxRows = Math.max(1, bodyHeight - r - 1);
   if (activityLog.length === 0 && r < bodyHeight - 1) {
     const emptyRow = fitToWidth(`  ${theme.fgMuted}No activity recorded yet. Send a message or refresh the mesh.${A.reset}`, inner, theme.bgInput);
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${emptyRow}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
   } else {
-    for (let i = 0; i < activityLog.length && r < bodyHeight - 1; i++) {
+    const needsScroll = activityLog.length > listMaxRows;
+    const maxStart = Math.max(0, activityLog.length - Math.max(1, listMaxRows - (needsScroll ? 1 : 0)));
+    const startIdx = needsScroll ? Math.max(0, Math.min(scrollOffset, maxStart)) : 0;
+    scrollOffset = startIdx;
+
+    let availRows = listMaxRows;
+    const hasAbove = startIdx > 0;
+    if (hasAbove) availRows = Math.max(1, availRows - 1);
+    let hasBelow = startIdx + availRows < activityLog.length;
+    if (hasBelow && availRows > 1) availRows -= 1;
+    hasBelow = startIdx + availRows < activityLog.length;
+
+    if (hasAbove && r < bodyHeight - 1) {
+      const hint = fitToWidth(`  ${theme.fgAccent}↑ ${startIdx} more above (scroll up)${A.reset}`, inner, theme.bgInput);
+      registerHitbox(screenStartRow + r, padL0 + 1, Math.min(mainWidth, padL0 + cardW), "scroll_list", { delta: -3 });
+      lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${hint}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+    }
+
+    const endIdx = Math.min(activityLog.length, startIdx + availRows);
+    for (let i = startIdx; i < endIdx && r < bodyHeight - 1; i++) {
       const entry = sanitizeTerminalText(activityLog[i]);
       const row = fitToWidth(`  ${theme.fgSubtle}${entry}${A.reset}`, inner, theme.bgInput);
       lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${row}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+    }
+
+    if (hasBelow && r < bodyHeight - 1) {
+      const rem = activityLog.length - endIdx;
+      const hint = fitToWidth(`  ${theme.fgAccent}↓ ${rem} more below (scroll down)${A.reset}`, inner, theme.bgInput);
+      registerHitbox(screenStartRow + r, padL0 + 1, Math.min(mainWidth, padL0 + cardW), "scroll_list", { delta: 3 });
+      lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${hint}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
     }
   }
 
@@ -1803,9 +2259,10 @@ function renderActivityView(mainWidth, bodyHeight, screenStartRow) {
 function renderSettingsView(mainWidth, bodyHeight, screenStartRow) {
   const theme = getTheme();
   const bg = theme.bgCanvas;
-  const cardW = Math.min(78, Math.max(44, Math.floor(mainWidth * 0.80)));
-  const padL0 = Math.max(1, Math.floor((mainWidth - cardW) / 2));
-  const inner = cardW - 2;
+  const maxCardW = Math.max(24, mainWidth - 2);
+  const cardW = Math.min(78, maxCardW, Math.max(Math.min(44, maxCardW), Math.floor(mainWidth * 0.80)));
+  const padL0 = Math.max(0, Math.floor((mainWidth - cardW) / 2));
+  const inner = Math.max(12, cardW - 2);
   const lines = Array.from({ length: bodyHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
 
   let r = 1;
@@ -1826,13 +2283,13 @@ function renderSettingsView(mainWidth, bodyHeight, screenStartRow) {
     const rowBg = isSel ? theme.bgSelected : theme.bgInput;
     const cursor = isSel ? `${theme.fgAccent}›${A.reset}` : " ";
     const togglePill = enabled
-      ? `${theme.bgActiveNav}${A.bold}${theme.fgSelf} ON  ${A.reset}`
+      ? `${theme.bgActiveNav}${A.bold}${theme.fgOnActive} ON  ${A.reset}`
       : `${theme.bgSelected}${theme.fgMuted} OFF ${A.reset}`;
 
     const labelPart = ` ${cursor} ${A.bold}${theme.fgPrimary}${padEnd(opt.label, 17)}${A.reset} ${togglePill}  ${theme.fgMuted}${opt.desc}${A.reset}`;
     const content = fitToWidth(labelPart, inner, rowBg);
 
-    registerHitbox(screenStartRow + r, padL0 + 1, padL0 + cardW, "toggle_setting", { key: opt.key, index: i });
+    registerHitbox(screenStartRow + r, padL0 + 1, Math.min(mainWidth, padL0 + cardW), "toggle_setting", { key: opt.key, index: i });
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${content}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
   }
 
@@ -1842,31 +2299,53 @@ function renderSettingsView(mainWidth, bodyHeight, screenStartRow) {
   return lines;
 }
 
-function renderHelpView(mainWidth, bodyHeight) {
+function renderHelpView(mainWidth, bodyHeight, screenStartRow = 2) {
   const theme = getTheme();
   const bg = theme.bgCanvas;
-  const cardW = Math.min(78, Math.max(44, Math.floor(mainWidth * 0.80)));
-  const padL0 = Math.max(1, Math.floor((mainWidth - cardW) / 2));
-  const inner = cardW - 2;
+  const compact = mainWidth < 55;
+  const maxCardW = Math.max(24, mainWidth - 2);
+  const cardW = Math.min(78, maxCardW, Math.max(Math.min(44, maxCardW), Math.floor(mainWidth * 0.80)));
+  const padL0 = Math.max(0, Math.floor((mainWidth - cardW) / 2));
+  const inner = Math.max(12, cardW - 2);
   const lines = Array.from({ length: bodyHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
+
+  const closeBtn = compact || cardW < 44 ? "[×]" : "[ × Close ]";
+  const closeW = stringWidth(closeBtn);
 
   let r = 1;
   if (r < bodyHeight) {
-    lines[r] = fitToWidth(`${bg}${" ".repeat(padL0)}${A.bold}${theme.fgAccent}? Intercom Shortcuts & Slash Commands${A.reset}`, mainWidth, bg);
+    const rawHdr = compact
+      ? `${A.bold}${theme.fgAccent}? Shortcuts & Commands${A.reset}`
+      : `${A.bold}${theme.fgAccent}? Intercom Shortcuts & Slash Commands${A.reset}`;
+    const hdr = clipAnsi(rawHdr, Math.max(4, cardW - closeW - 1));
+    const hdrW = stringWidth(hdr);
+    const gap = Math.max(1, cardW - hdrW - closeW);
+    const closeCol1 = padL0 + hdrW + gap + 1;
+    registerHitbox(screenStartRow + r, closeCol1, Math.min(mainWidth, closeCol1 + closeW - 1), "close_help", {});
+    lines[r] = fitToWidth(`${bg}${" ".repeat(padL0)}${hdr}${bg}${" ".repeat(gap)}${theme.bgSelected}${theme.fgMuted}${closeBtn}${A.reset}`, mainWidth, bg);
     r += 2;
   }
   if (r < bodyHeight) {
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.tl}${B.h.repeat(inner)}${B.tr}${A.reset}`, mainWidth, bg);
   }
 
-  for (const sc of SLASH_COMMANDS) {
-    if (r >= bodyHeight - 4) break;
-    const row = fitToWidth(`  ${A.bold}${theme.fgAccent}${padEnd(sc.syntax, 25)}${A.reset} ${theme.fgSubtle}${sc.desc}${A.reset}`, inner, theme.bgInput);
+  for (let i = 0; i < SLASH_COMMANDS.length; i++) {
+    const sc = SLASH_COMMANDS[i];
+    if (r >= bodyHeight - 3) break;
+    const syntaxPad = compact ? 16 : 25;
+    const row = fitToWidth(`  ${A.bold}${theme.fgAccent}${padEnd(sc.syntax, syntaxPad)}${A.reset} ${theme.fgSubtle}${sc.desc}${A.reset}`, inner, theme.bgInput);
+    registerHitbox(
+      screenStartRow + r,
+      padL0 + 1,
+      Math.min(mainWidth, padL0 + cardW),
+      "select_slash_command",
+      { cmd: sc.cmd, syntax: sc.syntax, hasArgs: sc.hasArgs, index: i }
+    );
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${row}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
   }
 
-  if (r < bodyHeight - 2) {
-    const keysLine = fitToWidth(`  ${theme.fgMuted}Keys: [Tab] Sub-Tabs  [Ctrl+B] Menu  [z] Zen  [a] Activity  [F5] Refresh  [q] Quit${A.reset}`, inner, theme.bgInput);
+  if (r < bodyHeight - 1) {
+    const keysLine = fitToWidth(`  ${theme.fgMuted}Keys: [Tab] Tabs  [Ctrl+B] Menu  [Esc then z / Ctrl+Z] Zen  [a] Activity  [F5] Refresh  [q] Quit${A.reset}`, inner, theme.bgInput);
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${keysLine}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
   }
   if (r < bodyHeight) {
@@ -1880,9 +2359,10 @@ function renderHelpView(mainWidth, bodyHeight) {
 // ─────────────────────────────────────────────────────────────────
 function renderBottomBar(cols, bottomRow) {
   const theme = getTheme();
+  const compact = cols < 60;
   const statsText = settings.showCornerStats ? formatCornerStats() : "";
   const statsW = stringWidth(statsText);
-  const quitBtn = "[ Quit ]";
+  const quitBtn = cols < 48 ? "[Q]" : "[ Quit ]";
   const quitW = stringWidth(quitBtn);
   const safeNotice = sanitizeTerminalText(lastStatusNotice);
 
@@ -1891,14 +2371,14 @@ function renderBottomBar(cols, bottomRow) {
   registerHitbox(bottomRow, quitCol1, quitCol1 + quitW - 1, "btn_quit", {});
   const leftPart = ` ${theme.bgSelected}${theme.fgMuted}${quitBtn}${A.reset}${theme.bgFooter}  ${theme.fgMuted}${safeNotice}${A.reset}`;
 
-  if (!statsText) {
+  if (!statsText || (compact && cols - quitW - statsW < 10)) {
     return fitToWidth(`${theme.bgFooter}${leftPart}`, cols, theme.bgFooter);
   }
 
-  const maxLeftW = Math.max(10, cols - statsW - 3);
+  const maxLeftW = Math.max(quitW + 2, cols - statsW - 3);
   const clippedLeft = clipAnsi(leftPart, maxLeftW);
   const gap = Math.max(1, cols - stringWidth(clippedLeft) - statsW - 1);
-  return fitToWidth(`${theme.bgFooter}${clippedLeft}${theme.bgFooter}${" ".repeat(gap)}${A.dim}${theme.fgAccent}${statsText}${A.reset} `, cols, theme.bgFooter);
+  return fitToWidth(`${theme.bgFooter}${clippedLeft}${theme.bgFooter}${" ".repeat(gap)}${theme.fgAccent}${statsText}${A.reset} `, cols, theme.bgFooter);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1930,13 +2410,15 @@ function renderViewLines(mainWidth, bodyHeight, startRow) {
   if (activeNav === 7) {
     return renderActivityView(mainWidth, bodyHeight, startRow);
   }
-  return renderHelpView(mainWidth, bodyHeight);
+  return renderHelpView(mainWidth, bodyHeight, startRow);
 }
 
 function renderFrame(colsArg, rowsArg) {
   const theme = getTheme();
-  const cols = Math.max(60, colsArg || screen.cols || screen.width || 80);
-  const rows = Math.max(18, rowsArg || screen.rows || screen.height || 24);
+  const fallbackCols = (screen.cols && screen.cols > 1) ? screen.cols : ((screen.width && screen.width > 1) ? screen.width : 80);
+  const fallbackRows = (screen.rows && screen.rows > 1) ? screen.rows : ((screen.height && screen.height > 1) ? screen.height : 24);
+  const cols = Math.max(36, colsArg || fallbackCols);
+  const rows = Math.max(12, rowsArg || fallbackRows);
   hitboxes = [];
 
   if (zenMode) {
@@ -1951,8 +2433,9 @@ function renderFrame(colsArg, rowsArg) {
   const topLine = renderTopBar(cols);
   const bodyHeight = Math.max(8, rows - 2);
   const startRow = 2;
-  const sidebarW = rightSidebarOpen ? Math.min(28, Math.max(22, Math.floor(cols * 0.26))) : 0;
-  const mainWidth = Math.max(36, cols - sidebarW);
+  const maxSidebarW = Math.max(16, cols - 24);
+  const sidebarW = rightSidebarOpen ? Math.min(28, maxSidebarW, Math.max(18, Math.floor(cols * 0.26))) : 0;
+  const mainWidth = cols - sidebarW;
 
   const mainLines = renderViewLines(mainWidth, bodyHeight, startRow);
   const sidebarLines = rightSidebarOpen ? renderSidebar(sidebarW, bodyHeight, startRow, cols) : [];
@@ -2170,8 +2653,18 @@ async function loadListsImpl() {
 
     agentMetaMap = new Map();
     for (const p of allPeers) {
-      agentMetaMap.set(p.name, { total: p.total || 0, unread: p.unread || 0, online: Boolean(p.online) });
-      totalUnread += p.unread || 0;
+      let unreadCount = p.unread || 0;
+      const cached = threadCache.get(`peer:${p.name}`);
+      if (cached && Array.isArray(cached.messages)) {
+        const readInCache = cached.messages.filter((m) => Boolean(m.read || (m.metadata && m.metadata.read))).length;
+        if ((p.total || 0) <= cached.messages.length) {
+          unreadCount = Math.max(0, cached.messages.length - readInCache);
+        } else {
+          unreadCount = Math.max(0, unreadCount - readInCache);
+        }
+      }
+      agentMetaMap.set(p.name, { total: p.total || 0, unread: unreadCount, online: Boolean(p.online) });
+      totalUnread += unreadCount;
     }
     agentList = allPeers.map((p) => p.name);
     const foundIdx = agentList.indexOf(selectedAgent);
@@ -2262,7 +2755,9 @@ async function refreshOnce() {
   } else if (activeNav === 2 && selectedChannel && !threadCache.has(getThreadCacheKey(true, selectedChannel))) {
     await loadThreadMessages(true, selectedChannel);
   }
-  const frame = renderFrame(screen.cols || screen.width || 80, screen.rows || screen.height || 24);
+  const curCols = (screen.cols && screen.cols > 1) ? screen.cols : ((screen.width && screen.width > 1) ? screen.width : 80);
+  const curRows = (screen.rows && screen.rows > 1) ? screen.rows : ((screen.height && screen.height > 1) ? screen.height : 24);
+  const frame = renderFrame(curCols, curRows);
   try {
     mainCanvasBox.setContent(frame.join("\n"));
     screen.render();
@@ -2367,6 +2862,65 @@ async function dispatchMessage(isChannel, target, body) {
   }
 }
 
+async function markPeerInboxRead(agentName) {
+  const cleanRaw = String(agentName || selectedAgent || "").replace(/^@/, "").trim();
+  if (!cleanRaw) return { ok: false, count: 0 };
+  let cleanAgent = cleanRaw;
+  try {
+    cleanAgent = validateAgentName(cleanRaw);
+  } catch {
+    return { ok: false, count: 0 };
+  }
+
+  let markedCount = 0;
+  try {
+    const diskMsgs = readInboxSync(cleanAgent) || [];
+    for (const m of diskMsgs) {
+      if (m && m.id && !(m.read || (m.metadata && m.metadata.read))) {
+        const updated = updateDiscreteEnvelopeSync(cleanAgent, m.id, (env) => ({
+          ...env,
+          read: true,
+          metadata: { ...(env.metadata || {}), read: true }
+        }));
+        if (updated) markedCount++;
+      }
+    }
+  } catch {}
+
+  try {
+    const legacyMarked = checkAndMarkRead(cleanAgent);
+    if (Array.isArray(legacyMarked)) markedCount += legacyMarked.length;
+  } catch {}
+
+  const key = getThreadCacheKey(false, cleanAgent);
+  const existingCache = threadCache.get(key);
+  if (existingCache && Array.isArray(existingCache.messages)) {
+    const updatedMsgs = existingCache.messages.map((m) => {
+      if (!m) return m;
+      if (!(m.read || (m.metadata && m.metadata.read))) markedCount++;
+      return {
+        ...m,
+        read: true,
+        metadata: { ...(m.metadata || {}), read: true }
+      };
+    });
+    threadCache.set(key, { ...existingCache, messages: updatedMsgs, loadedAt: Date.now() });
+  } else {
+    await loadThreadMessages(false, cleanAgent, { force: true });
+  }
+
+  const prevMeta = agentMetaMap.get(cleanAgent) || { total: 0, unread: 0, online: isPeerOnline(cleanAgent) };
+  agentMetaMap.set(cleanAgent, { ...prevMeta, unread: 0 });
+
+  let totalUnread = 0;
+  for (const [, m] of agentMetaMap.entries()) totalUnread += Math.max(0, m.unread || 0);
+  meshStats = { ...meshStats, unread: totalUnread };
+
+  logActivity(`Marked @${cleanAgent} inbox read`);
+  lastStatusNotice = `✓ Marked @${cleanAgent} inbox read`;
+  return { ok: true, agent: cleanAgent, count: markedCount };
+}
+
 async function executeSlashCommand(rawInput) {
   const trimmed = String(rawInput || "").trim();
   if (!trimmed.startsWith("/")) return { handled: false };
@@ -2383,6 +2937,7 @@ async function executeSlashCommand(rawInput) {
       composerBuffer = "/msg ";
       composerCursor = composerBuffer.length;
       composerFocused = true;
+      composerFocusZone = "input";
       slashMenuDismissed = false;
       lastStatusNotice = "Usage: /msg <peer> <text>";
       await refresh();
@@ -2391,6 +2946,7 @@ async function executeSlashCommand(rawInput) {
     const res = await dispatchMessage(false, peer, text);
     composerBuffer = "";
     composerCursor = 0;
+    composerFocusZone = "input";
     await loadLists();
     await refresh();
     return { handled: true, action: "slash_msg", ...res };
@@ -2398,20 +2954,41 @@ async function executeSlashCommand(rawInput) {
 
   if (cmd === "/channel" || cmd === "/ch") {
     const parts = rest.split(/\s+/);
-    const chName = (parts[0] || "").replace(/^#/, "");
+    const chName = (parts[0] || "").replace(/^#/, "").trim();
     const text = rest.slice(parts[0]?.length || 0).trim();
-    if (!chName || !text) {
+    if (!chName) {
       composerBuffer = "/channel ";
       composerCursor = composerBuffer.length;
       composerFocused = true;
+      composerFocusZone = "input";
       slashMenuDismissed = false;
-      lastStatusNotice = "Usage: /channel <name> <text>";
+      lastStatusNotice = "Usage: /channel <name> [text]";
       await refresh();
       return { handled: true, action: "slash_prefill", cmd: "/channel" };
+    }
+    if (!text) {
+      // Quick-open channel
+      const cleanCh = chName.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+      if (!channelList.includes(cleanCh)) {
+        channelList.push(cleanCh);
+        channelMetaMap.set(cleanCh, { total: 0 });
+      }
+      selectedType = "channel";
+      selectedChannel = cleanCh;
+      channelIdx = Math.max(0, channelList.indexOf(cleanCh));
+      ensureTargetSubTab("channel", cleanCh, true);
+      composerBuffer = "";
+      composerCursor = 0;
+      slashMenuDismissed = false;
+      await loadThreadMessages(true, cleanCh, { force: true });
+      lastStatusNotice = `Opened #${cleanCh}`;
+      await refresh();
+      return { handled: true, action: "slash_channel_open", channel: cleanCh };
     }
     const res = await dispatchMessage(true, chName, text);
     composerBuffer = "";
     composerCursor = 0;
+    composerFocusZone = "input";
     await loadLists();
     await refresh();
     return { handled: true, action: "slash_channel", ...res };
@@ -2420,27 +2997,36 @@ async function executeSlashCommand(rawInput) {
   // Clear prompt for non-arg slash commands
   composerBuffer = "";
   composerCursor = 0;
+  composerFocusZone = "input";
   slashMenuDismissed = false;
+  scrollOffset = 0;
 
   if (cmd === "/peers") {
     activeNav = 3;
+    lastNonHelpNav = 3;
     composerFocused = false;
     lastStatusNotice = "Opened Peer Mailboxes";
   } else if (cmd === "/info" || cmd === "/health") {
     activeNav = 4;
+    lastNonHelpNav = 4;
     composerFocused = false;
     lastStatusNotice = "Opened Mesh Health & Info";
   } else if (cmd === "/settings") {
     activeNav = 5;
+    lastNonHelpNav = 5;
     composerFocused = false;
     lastStatusNotice = "Opened Intercom Settings";
   } else if (cmd === "/activity") {
     activeNav = 7;
+    lastNonHelpNav = 7;
     composerFocused = false;
     lastStatusNotice = "Opened Activity Log";
   } else if (cmd === "/zen") {
     zenMode = !zenMode;
     lastStatusNotice = zenMode ? "Zen mode enabled" : "Zen mode disabled";
+  } else if (cmd === "/read") {
+    const targetPeer = rest.replace(/^@/, "") || selectedAgent;
+    await markPeerInboxRead(targetPeer);
   } else if (cmd === "/refresh") {
     await refreshMeshInfo();
   } else if (cmd === "/clear") {
@@ -2460,6 +3046,7 @@ async function executeSlashCommand(rawInput) {
     openNewSubTab();
     await loadActiveThread();
   } else if (cmd === "/help") {
+    if (activeNav !== 6) lastNonHelpNav = activeNav;
     activeNav = 6;
     composerFocused = false;
     lastStatusNotice = "Opened Intercom Help";
@@ -2522,16 +3109,32 @@ async function executeHitAction(hit) {
 
   switch (hit.action) {
     case "nav":
+      if ((p.index ?? 0) === 6 && activeNav !== 6) lastNonHelpNav = activeNav;
       activeNav = p.index ?? 0;
+      if (activeNav !== 6) lastNonHelpNav = activeNav;
       targetDropdownOpen = false;
-      if (activeNav === 0) activeSubTabIndex = 0;
+      scrollOffset = 0;
+      selectedMessageIndex = -1;
+      if (activeNav === 0) {
+        activeSubTabIndex = 0;
+        ensureActiveSubTabVisible = true;
+      } else if (activeNav === 1) {
+        selectedType = "peer";
+        if (selectedAgent) ensureTargetSubTab("peer", selectedAgent, true);
+      } else if (activeNav === 2) {
+        selectedType = "channel";
+        if (selectedChannel) ensureTargetSubTab("channel", selectedChannel, true);
+      }
       syncComposerFocusForNav(activeNav);
       await loadActiveThread();
       await refresh();
       break;
 
     case "open_activity":
+      if (activeNav !== 6) lastNonHelpNav = activeNav;
       activeNav = 7;
+      lastNonHelpNav = 7;
+      scrollOffset = 0;
       targetDropdownOpen = false;
       composerFocused = false;
       await refresh();
@@ -2539,15 +3142,105 @@ async function executeHitAction(hit) {
 
     case "clear_activity":
       activityLog.length = 0;
+      scrollOffset = 0;
       lastStatusNotice = "Activity log cleared";
       await refresh();
       break;
+
+    case "close_help":
+      activeNav = lastNonHelpNav !== 6 ? lastNonHelpNav : 0;
+      syncComposerFocusForNav(activeNav);
+      lastStatusNotice = "Closed Help";
+      await loadActiveThread();
+      await refresh();
+      break;
+
+    case "scroll_subtabs":
+      subTabScrollOffset = Math.max(
+        0,
+        Math.min(Math.max(0, subTabs.length - 1), subTabScrollOffset + (p.delta || 1))
+      );
+      ensureActiveSubTabVisible = false;
+      await refresh();
+      break;
+
+    case "scroll_list":
+      scrollOffset = Math.max(0, scrollOffset + (p.delta || 0));
+      await refresh();
+      break;
+
+    case "toggle_peer_filter":
+      peerFilterActive = !peerFilterActive;
+      peerFilterCursor = peerFilterQuery.length;
+      scrollOffset = 0;
+      await refresh();
+      break;
+
+    case "focus_peer_filter":
+      peerFilterActive = true;
+      peerFilterCursor = peerFilterQuery.length;
+      await refresh();
+      break;
+
+    case "clear_peer_filter":
+      peerFilterQuery = "";
+      peerFilterCursor = 0;
+      peerFilterActive = false;
+      scrollOffset = 0;
+      await refresh();
+      break;
+
+    case "new_channel_prompt":
+      composerBuffer = "/channel ";
+      composerCursor = composerBuffer.length;
+      composerFocused = true;
+      composerFocusZone = "input";
+      slashMenuDismissed = true;
+      lastStatusNotice = "Enter channel name after /channel and press Enter";
+      await refresh();
+      break;
+
+    case "btn_mark_read":
+      await markPeerInboxRead(p.agent || selectedAgent);
+      await refresh();
+      break;
+
+    case "select_message":
+      selectedMessageIndex = typeof p.index === "number" ? p.index : -1;
+      await refresh();
+      break;
+
+    case "reply_message": {
+      const replyTarget = sanitizeTerminalText(p.from || selectedAgent || "operator").replace(/^@/, "");
+      composerBuffer = `@${replyTarget} `;
+      composerCursor = composerBuffer.length;
+      composerFocused = true;
+      composerFocusZone = "input";
+      slashMenuDismissed = true;
+      lastStatusNotice = `Replying to @${replyTarget}`;
+      await refresh();
+      break;
+    }
+
+    case "forward_message": {
+      const fwdFrom = sanitizeTerminalText(p.from || "peer");
+      const fwdBody = sanitizeTerminalText(String(p.body || "").trim());
+      composerBuffer = `/msg  [Fwd from @${fwdFrom}]: ${fwdBody}`;
+      composerCursor = 5;
+      composerFocused = true;
+      composerFocusZone = "input";
+      slashMenuDismissed = true;
+      lastStatusNotice = "Type recipient after /msg and press Enter to forward";
+      await refresh();
+      break;
+    }
 
     case "select_agent":
       selectedAgent = p.name;
       agentIdx = p.index ?? Math.max(0, agentList.indexOf(p.name));
       selectedType = "peer";
       activeNav = 1;
+      lastNonHelpNav = 1;
       targetDropdownOpen = false;
       ensureTargetSubTab("peer", p.name, true);
       await loadThreadMessages(false, p.name);
@@ -2559,6 +3252,7 @@ async function executeHitAction(hit) {
       channelIdx = p.index ?? Math.max(0, channelList.indexOf(p.name));
       selectedType = "channel";
       activeNav = 2;
+      lastNonHelpNav = 2;
       targetDropdownOpen = false;
       ensureTargetSubTab("channel", p.name, true);
       await loadThreadMessages(true, p.name);
@@ -2621,15 +3315,21 @@ async function executeHitAction(hit) {
       }
       targetDropdownOpen = false;
       composerFocused = activeNav <= 2;
+      if (composerFocused) composerFocusZone = "input";
       await refresh();
       break;
 
     case "select_slash_command": {
       const cmd = p.cmd || "";
       if (p.hasArgs) {
+        if (activeNav > 2) {
+          activeNav = lastNonHelpNav <= 2 ? lastNonHelpNav : 0;
+          if (activeNav === 0) activeSubTabIndex = 0;
+        }
         composerBuffer = `${cmd} `;
         composerCursor = composerBuffer.length;
         composerFocused = true;
+        composerFocusZone = "input";
         slashMenuDismissed = false;
         await refresh();
       } else {
@@ -2656,6 +3356,8 @@ async function executeHitAction(hit) {
         composerBuffer = "";
         composerCursor = 0;
         slashMenuDismissed = false;
+        composerFocusZone = "input";
+        composerFocused = true;
         lastStatusNotice = "Prompt cleared";
       } else if (activeNav === 1 && selectedAgent) {
         await clearInbox(selectedAgent);
@@ -2680,6 +3382,7 @@ async function executeHitAction(hit) {
 
     case "focus_compose":
       composerFocused = true;
+      composerFocusZone = "input";
       await refresh();
       break;
   }
@@ -2709,17 +3412,17 @@ function handleHit(row, col) {
 async function handleKey(str, key = {}) {
   if (!key) return { handled: false };
 
-  // Global quit (Ctrl+C always; q/Q when not editing/focused in composer)
-  if ((key.ctrl && key.name === "c") || (!composerBuffer && !targetDropdownOpen && !composerFocused && (str === "q" || str === "Q"))) {
+  // Global quit (Ctrl+C always; q/Q when not editing/focused in composer or peer filter)
+  if ((key.ctrl && key.name === "c") || (!composerBuffer && !targetDropdownOpen && !composerFocused && !peerFilterActive && (str === "q" || str === "Q"))) {
     cleanExit();
     return { handled: true, action: "quit" };
   }
 
-  // Zen / Focus Mode toggle (Ctrl+Z always; z/Z when composer is unfocused)
+  // Zen / Focus Mode toggle (Ctrl+Z always; z/Z when composer & peer filter are unfocused)
   if (
     (key.ctrl && key.name === "z") ||
     str === "\x1a" ||
-    (!composerFocused && !targetDropdownOpen && !composerBuffer && (str === "z" || str === "Z"))
+    (!composerFocused && !peerFilterActive && !targetDropdownOpen && !composerBuffer && (str === "z" || str === "Z"))
   ) {
     zenMode = !zenMode;
     lastStatusNotice = zenMode ? "Zen mode enabled (press z or Esc to exit)" : "Zen mode disabled";
@@ -2727,9 +3430,11 @@ async function handleKey(str, key = {}) {
     return { handled: true, action: "toggle_zen", zenMode };
   }
 
-  // Activity Log quick toggle when composer is unfocused
-  if (!composerFocused && !targetDropdownOpen && !composerBuffer && (str === "a" || str === "A")) {
+  // Activity Log quick toggle when composer & peer filter are unfocused
+  if (!composerFocused && !peerFilterActive && !targetDropdownOpen && !composerBuffer && (str === "a" || str === "A")) {
     activeNav = activeNav === 7 ? 0 : 7;
+    if (activeNav !== 6) lastNonHelpNav = activeNav;
+    scrollOffset = 0;
     syncComposerFocusForNav(activeNav);
     lastStatusNotice = activeNav === 7 ? "Opened Activity Log" : "Returned Home";
     await refresh();
@@ -2845,7 +3550,103 @@ async function handleKey(str, key = {}) {
     }
   }
 
-  // Tab key: autocomplete @/# if starting with @/# in composer, else switch top-left sub-tabs!
+  // Peers View Filter & Navigation
+  if (activeNav === 3) {
+    const filtered = getFilteredAgents();
+    if (!peerFilterActive && str === "/") {
+      peerFilterActive = true;
+      peerFilterCursor = peerFilterQuery.length;
+      await refresh();
+      return { handled: true, action: "peer_filter_open" };
+    }
+    if (peerFilterActive) {
+      if (key.name === "escape") {
+        if (peerFilterQuery.length > 0) {
+          peerFilterQuery = "";
+          peerFilterCursor = 0;
+          scrollOffset = 0;
+        } else {
+          peerFilterActive = false;
+        }
+        await refresh();
+        return { handled: true, action: "peer_filter_escape" };
+      }
+      if (key.name === "up" || key.name === "down") {
+        if (filtered.length > 0) {
+          const delta = key.name === "up" ? -1 : 1;
+          const curF = Math.max(0, filtered.indexOf(selectedAgent));
+          const nextF = Math.max(0, Math.min(filtered.length - 1, curF + delta));
+          selectedAgent = filtered[nextF];
+          const realIdx = agentList.indexOf(selectedAgent);
+          if (realIdx >= 0) agentIdx = realIdx;
+          if (nextF < scrollOffset) scrollOffset = nextF;
+          else if (nextF >= scrollOffset + 8) scrollOffset = nextF - 7;
+        }
+        await refresh();
+        return { handled: true, action: "peer_move" };
+      }
+      if (key.name === "return") {
+        if (filtered.length > 0) {
+          const target = filtered.includes(selectedAgent) ? selectedAgent : filtered[0];
+          await executeHitAction({ action: "select_agent", payload: { name: target, index: agentList.indexOf(target) } });
+          return { handled: true, action: "open_peer_from_list" };
+        }
+        return { handled: false };
+      }
+      const fState = { value: peerFilterQuery, cursor: peerFilterCursor };
+      if (applyReadlineKey(fState, str, key)) {
+        peerFilterQuery = fState.value;
+        peerFilterCursor = fState.cursor;
+        scrollOffset = 0;
+        await refresh();
+        return { handled: true, action: "peer_filter_edit" };
+      }
+    }
+  }
+
+  // Composer Action Row Focus Ring (To:, Send, Clear)
+  if (activeNav <= 2 && composerFocusZone !== "input") {
+    const ring = ["target", "send", "clear", "input"];
+    const rowRing = ["target", "send", "clear"];
+    if (key.name === "tab") {
+      const cur = ring.indexOf(composerFocusZone);
+      const next = key.shift
+        ? (cur <= 0 ? "input" : ring[cur - 1])
+        : ring[(cur + 1) % ring.length];
+      composerFocusZone = next;
+      composerFocused = next === "input";
+      await refresh();
+      return { handled: true, action: "focus_ring_move", zone: composerFocusZone };
+    }
+    if (key.name === "left" || key.name === "right") {
+      const cur = Math.max(0, rowRing.indexOf(composerFocusZone));
+      const delta = key.name === "left" ? -1 : 1;
+      composerFocusZone = rowRing[(cur + delta + rowRing.length) % rowRing.length];
+      await refresh();
+      return { handled: true, action: "focus_ring_move", zone: composerFocusZone };
+    }
+    if (key.name === "up") {
+      composerFocusZone = "input";
+      composerFocused = true;
+      await refresh();
+      return { handled: true, action: "focus_ring_move", zone: "input" };
+    }
+    if (key.name === "return" || key.name === "space") {
+      const zone = composerFocusZone;
+      if (zone === "target") await executeHitAction({ action: "toggle_target_dropdown", payload: {} });
+      else if (zone === "send") await executeHitAction({ action: "btn_send", payload: {} });
+      else if (zone === "clear") await executeHitAction({ action: "btn_clear", payload: {} });
+      return { handled: true, action: "focus_ring_activate", zone };
+    }
+    if (key.name === "escape") {
+      composerFocusZone = "input";
+      composerFocused = true;
+      await refresh();
+      return { handled: true, action: "focus_ring_exit" };
+    }
+  }
+
+  // Tab key: autocomplete @/#, step composer focus ring, or cycle Row-1 sub-tabs
   if (key.name === "tab") {
     if (composerFocused && composerBuffer.startsWith("@")) {
       const idx = (agentList.indexOf(selectedAgent) + 1) % Math.max(1, agentList.length);
@@ -2863,6 +3664,20 @@ async function handleKey(str, key = {}) {
       await refresh();
       return { handled: true, action: "autocomplete_channel" };
     }
+    if (activeNav <= 2 && composerFocusZone === "input") {
+      if (key.shift) {
+        composerFocusZone = "clear";
+        composerFocused = false;
+        await refresh();
+        return { handled: true, action: "focus_ring_move", zone: "clear" };
+      }
+      if (composerBuffer.length > 0 || subTabs.length <= 1) {
+        composerFocusZone = "target";
+        composerFocused = false;
+        await refresh();
+        return { handled: true, action: "focus_ring_move", zone: "target" };
+      }
+    }
     if (key.shift) prevSubTab();
     else nextSubTab();
     await loadActiveThread();
@@ -2872,9 +3687,14 @@ async function handleKey(str, key = {}) {
 
   // Enter on Peers view opens selected peer thread; Enter on composer views sends
   if (key.name === "return") {
-    if (activeNav === 3 && agentList[agentIdx]) {
-      await executeHitAction({ action: "select_agent", payload: { name: agentList[agentIdx], index: agentIdx } });
-      return { handled: true, action: "open_peer_from_list" };
+    if (activeNav === 3) {
+      const filtered = getFilteredAgents();
+      const target = (filtered.length > 0 && (filtered.includes(agentList[agentIdx]) ? agentList[agentIdx] : filtered[0])) || null;
+      if (target) {
+        await executeHitAction({ action: "select_agent", payload: { name: target, index: agentList.indexOf(target) } });
+        return { handled: true, action: "open_peer_from_list" };
+      }
+      return { handled: false };
     }
     if (composerFocused && activeNav <= 2) {
       return doSend();
@@ -2882,7 +3702,7 @@ async function handleKey(str, key = {}) {
     return { handled: false };
   }
 
-  // Escape: clear buffer, close sidebar, exit Zen, or blur composer so q/z shortcuts work
+  // Escape: clear buffer, close sidebar, exit Zen, clear message selection, or blur composer
   if (key.name === "escape") {
     if (composerBuffer.length > 0) {
       composerBuffer = "";
@@ -2901,6 +3721,11 @@ async function handleKey(str, key = {}) {
       await refresh();
       return { handled: true, action: "exit_zen" };
     }
+    if (selectedMessageIndex >= 0) {
+      selectedMessageIndex = -1;
+      await refresh();
+      return { handled: true, action: "clear_message_selection" };
+    }
     if (composerFocused) {
       composerFocused = false;
       lastStatusNotice = "Composer unfocused · Press q to quit, z for Zen, or click input";
@@ -2910,14 +3735,67 @@ async function handleKey(str, key = {}) {
     return { handled: false };
   }
 
-  // Up/Down when on Inbox/Channels/Peers and prompt empty -> scroll or navigate
+  // Shift+Up / Shift+Down (or Alt+Up / Alt+Down) on Thread views selects messages
+  if ((key.shift || key.meta) && (key.name === "up" || key.name === "down") && (activeNav === 1 || activeNav === 2)) {
+    const isCh = activeNav === 2;
+    const cacheEntry = threadCache.get(getThreadCacheKey(isCh, isCh ? selectedChannel : selectedAgent));
+    const recent = (cacheEntry && Array.isArray(cacheEntry.messages)) ? cacheEntry.messages.slice(-25) : [];
+    if (recent.length > 0) {
+      if (selectedMessageIndex < 0) {
+        selectedMessageIndex = recent.length - 1;
+      } else {
+        const delta = key.name === "up" ? -1 : 1;
+        selectedMessageIndex = Math.max(0, Math.min(recent.length - 1, selectedMessageIndex + delta));
+      }
+      await refresh();
+      return { handled: true, action: "select_message", selectedMessageIndex };
+    }
+  }
+
+  // Quick Reply (r) / Forward (f) on selected message when composer unfocused
+  if (!composerFocused && !composerBuffer && selectedMessageIndex >= 0 && (activeNav === 1 || activeNav === 2) && (str === "r" || str === "R" || str === "f" || str === "F")) {
+    const isCh = activeNav === 2;
+    const cacheEntry = threadCache.get(getThreadCacheKey(isCh, isCh ? selectedChannel : selectedAgent));
+    const recent = (cacheEntry && Array.isArray(cacheEntry.messages)) ? cacheEntry.messages.slice(-25) : [];
+    const m = recent[selectedMessageIndex];
+    if (m) {
+      const from = sanitizeTerminalText(m.from || m.sender || selectedAgent);
+      const body = sanitizeTerminalText(String(m.message || (m.payload && m.payload.message) || m.body || "").trim());
+      const action = (str === "r" || str === "R") ? "reply_message" : "forward_message";
+      await executeHitAction({ action, payload: { index: selectedMessageIndex, from, body } });
+      return { handled: true, action };
+    }
+  }
+
+  // Up/Down when on Inbox/Channels/Peers/Activity and prompt empty -> scroll or navigate
   if ((key.name === "up" || key.name === "down") && composerBuffer.length === 0) {
     const delta = key.name === "up" ? -1 : 1;
-    if (activeNav === 3 && agentList.length > 0) {
-      agentIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx + delta));
-      selectedAgent = agentList[agentIdx];
+    if (activeNav === 3) {
+      const filtered = getFilteredAgents();
+      if (!peerFilterQuery && agentList.length > 0) {
+        agentIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx + delta));
+        selectedAgent = agentList[agentIdx];
+        if (agentIdx < scrollOffset) scrollOffset = agentIdx;
+        else if (agentIdx >= scrollOffset + 8) scrollOffset = agentIdx - 7;
+        await refresh();
+        return { handled: true, action: "peer_move" };
+      }
+      if (filtered.length > 0) {
+        const curF = Math.max(0, filtered.indexOf(selectedAgent));
+        const nextF = Math.max(0, Math.min(filtered.length - 1, curF + delta));
+        selectedAgent = filtered[nextF];
+        const realIdx = agentList.indexOf(selectedAgent);
+        if (realIdx >= 0) agentIdx = realIdx;
+        if (nextF < scrollOffset) scrollOffset = nextF;
+        else if (nextF >= scrollOffset + 8) scrollOffset = nextF - 7;
+        await refresh();
+        return { handled: true, action: "peer_move" };
+      }
+    }
+    if (activeNav === 7) {
+      scrollOffset = Math.max(0, scrollOffset + delta);
       await refresh();
-      return { handled: true, action: "peer_move" };
+      return { handled: true, action: "scroll" };
     }
     if (activeNav === 1 || activeNav === 2) {
       scrollOffset = Math.max(0, scrollOffset - delta * 2);
@@ -2937,6 +3815,7 @@ async function handleKey(str, key = {}) {
     composerBuffer = bufState.value;
     composerCursor = bufState.cursor;
     composerFocused = true;
+    composerFocusZone = "input";
     if (changed) {
       slashMenuDismissed = false;
       slashSelectedIndex = 0;
@@ -2967,6 +3846,19 @@ function parseSgrSequence(str) {
   return results;
 }
 
+function handleMouseWheel(rawBtn) {
+  const isListView = activeNav === 3 || activeNav === 7;
+  if (rawBtn === 64) {
+    scrollOffset = isListView ? Math.max(0, scrollOffset - 3) : scrollOffset + 3;
+    return refresh();
+  }
+  if (rawBtn === 65) {
+    scrollOffset = isListView ? scrollOffset + 3 : Math.max(0, scrollOffset - 3);
+    return refresh();
+  }
+  return Promise.resolve();
+}
+
 if (screen.program && !isHeadlessTest) {
   screen.program.on("data", (data) => {
     const str = typeof data === "string" ? data : data.toString("utf8");
@@ -2974,12 +3866,8 @@ if (screen.program && !isHeadlessTest) {
     for (const ev of events) {
       if (!ev.isRelease && ev.rawBtn === 0) {
         handleHit(ev.row, ev.col);
-      } else if (!ev.isRelease && ev.rawBtn === 64) {
-        scrollOffset = scrollOffset + 3;
-        refresh();
-      } else if (!ev.isRelease && ev.rawBtn === 65) {
-        scrollOffset = Math.max(0, scrollOffset - 3);
-        refresh();
+      } else if (!ev.isRelease && (ev.rawBtn === 64 || ev.rawBtn === 65)) {
+        handleMouseWheel(ev.rawBtn);
       }
     }
   });
@@ -3055,11 +3943,14 @@ module.exports = {
   handleHit,
   executeHitAction,
   handleKey,
+  handleMouseWheel,
+  markPeerInboxRead,
   doSend,
   executeSlashCommand,
   renderTopBar,
   renderSidebar,
   renderFrame,
+  fitToWidth,
   getFilteredSlashCommands,
   getTargetDropdownItems,
   formatCornerStats,
@@ -3091,9 +3982,11 @@ module.exports = {
     channelIdx,
     subTabs: subTabs.map((t) => ({ ...t })),
     activeSubTabIndex,
+    subTabScrollOffset,
     composerBuffer,
     composerCursor,
     composerFocused,
+    composerFocusZone,
     targetDropdownOpen,
     targetDropdownIndex,
     slashMenuOpen: isSlashMenuVisible(),
@@ -3101,6 +3994,9 @@ module.exports = {
     settings: { ...settings },
     selectedSettingIndex,
     scrollOffset,
+    selectedMessageIndex,
+    peerFilterActive,
+    peerFilterQuery,
     lastStatusNotice,
     activityLog: [...activityLog],
     meshStats: { ...meshStats }
@@ -3108,6 +4004,7 @@ module.exports = {
   setState: (patch = {}) => {
     if (patch.activeNav !== undefined) {
       activeNav = patch.activeNav;
+      if (activeNav !== 6) lastNonHelpNav = activeNav;
       if (patch.composerFocused === undefined) {
         syncComposerFocusForNav(activeNav);
       }
@@ -3123,7 +4020,11 @@ module.exports = {
     if (patch.agentIdx !== undefined) agentIdx = patch.agentIdx;
     if (patch.channelIdx !== undefined) channelIdx = patch.channelIdx;
     if (patch.subTabs !== undefined) subTabs = patch.subTabs.map((t) => ({ ...t }));
-    if (patch.activeSubTabIndex !== undefined) activeSubTabIndex = patch.activeSubTabIndex;
+    if (patch.activeSubTabIndex !== undefined) {
+      activeSubTabIndex = patch.activeSubTabIndex;
+      ensureActiveSubTabVisible = true;
+    }
+    if (patch.subTabScrollOffset !== undefined) subTabScrollOffset = patch.subTabScrollOffset;
     if (patch.composerBuffer !== undefined) {
       composerBuffer = String(patch.composerBuffer);
       composerCursor = composerBuffer.length;
@@ -3131,6 +4032,7 @@ module.exports = {
     }
     if (patch.composerCursor !== undefined) composerCursor = patch.composerCursor;
     if (patch.composerFocused !== undefined) composerFocused = Boolean(patch.composerFocused);
+    if (patch.composerFocusZone !== undefined) composerFocusZone = String(patch.composerFocusZone);
     if (patch.targetDropdownOpen !== undefined) targetDropdownOpen = Boolean(patch.targetDropdownOpen);
     if (patch.targetDropdownIndex !== undefined) targetDropdownIndex = patch.targetDropdownIndex;
     if (patch.slashMenuDismissed !== undefined) slashMenuDismissed = Boolean(patch.slashMenuDismissed);
@@ -3138,6 +4040,15 @@ module.exports = {
     if (patch.settings !== undefined) settings = { ...settings, ...patch.settings };
     if (patch.selectedSettingIndex !== undefined) selectedSettingIndex = patch.selectedSettingIndex;
     if (patch.scrollOffset !== undefined) scrollOffset = patch.scrollOffset;
+    if (patch.selectedMessageIndex !== undefined) selectedMessageIndex = patch.selectedMessageIndex;
+    if (patch.peerFilterActive !== undefined) peerFilterActive = Boolean(patch.peerFilterActive);
+    if (patch.peerFilterQuery !== undefined) {
+      peerFilterQuery = String(patch.peerFilterQuery);
+      peerFilterCursor = peerFilterQuery.length;
+    }
+    if (patch.agentMeta !== undefined) {
+      agentMetaMap = new Map(Object.entries(patch.agentMeta));
+    }
     if (patch.lastStatusNotice !== undefined) lastStatusNotice = String(patch.lastStatusNotice);
     if (patch.onlinePeers !== undefined) {
       onlinePeersSet = new Set(Array.from(patch.onlinePeers).map((n) => String(n).toLowerCase()));

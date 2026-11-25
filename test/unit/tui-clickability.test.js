@@ -194,9 +194,9 @@ describe("Intercom TUI Clickability & SGR Mouse Event Suite", () => {
 
   // ── 4. Slash Commands, Dropdowns & Readline Editing ──────────────────
   describe("4. Slash Menu, Target Dropdown & Readline Composer Editing", () => {
-    test("SLASH_COMMANDS exposes all 10 intercom commands and keyboard navigation selects them", async () => {
-      assert.equal(tui.SLASH_COMMANDS.length, 10);
-      const expected = ["/msg", "/channel", "/peers", "/info", "/settings", "/refresh", "/clear", "/menu", "/new", "/help"];
+    test("SLASH_COMMANDS exposes all 13 intercom commands and keyboard navigation selects them", async () => {
+      assert.equal(tui.SLASH_COMMANDS.length, 13);
+      const expected = ["/msg", "/channel", "/peers", "/info", "/settings", "/refresh", "/clear", "/menu", "/new", "/activity", "/zen", "/read", "/help"];
       assert.deepEqual(tui.SLASH_COMMANDS.map((c) => c.cmd), expected);
 
       await tui.handleKey("/", { name: "/" });
