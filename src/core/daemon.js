@@ -1,20 +1,38 @@
 // src/core/daemon.js - High-Speed Local Loopback HTTP/SSE Daemon (127.0.0.1:4150)
 const http = require('http');
-const url = require('url');
 const fs = require('fs');
 const path = require('path');
-const { PORT, MESH_DIR } = require('../config');
-const { MessageEnvelope, validateMessage } = require('./message');
-const { writeMessage, readInbox, ackMessage, validateAgentName, retryNtfsOperation } = require('./mesh');
+const { getPort, getMeshDir } = require('../config');
+const { MessageEnvelope } = require('./message');
+const { writeMessage, writeMessageSync, readInbox, validateAgentName } = require('./mesh');
 const { listActiveAgents } = require('./registry');
+const { handleRequest, parseJsonBody, sendError, sendJson } = require('../routes/router');
+
+const MAX_SSE_BACKPRESSURE_BYTES = 1024 * 1024;
+
+function getPortPidPath(port, meshDir = getMeshDir()) {
+  return path.join(meshDir, `daemon.${port}.pid`);
+}
+
+function getDefaultPidPath(meshDir = getMeshDir()) {
+  return path.join(meshDir, 'daemon.pid');
+}
+
+function unlinkIgnoreEnoent(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+}
 
 class IntercomDaemon {
   constructor(options = {}) {
-    this.port = options.port || PORT || 4150;
+    this.port = options.port !== undefined ? options.port : getPort();
     this.host = '127.0.0.1'; // Invariant: Local loopback only!
     this.server = null;
     this.sseClients = new Map(); // agentName -> Set<http.ServerResponse>
-    this.pidFile = path.join(MESH_DIR, 'daemon.pid');
+    this.pidFile = getDefaultPidPath();
     this.heartbeatTimer = null;
   }
 
@@ -50,6 +68,10 @@ class IntercomDaemon {
       });
 
       this.server.listen(this.port, this.host, () => {
+        const addr = this.server.address();
+        if (addr && typeof addr === 'object' && addr.port) {
+          this.port = addr.port;
+        }
         this.writePidFile();
         this.startHeartbeatBroadcast();
         resolve(this.server);
@@ -67,17 +89,25 @@ class IntercomDaemon {
     }
 
     // Close all active SSE streams
-    for (const [agent, clientSet] of this.sseClients.entries()) {
+    for (const clientSet of this.sseClients.values()) {
       for (const res of clientSet) {
         try {
-          res.write('event: shutdown\ndata: {"status": "DAEMON_SHUTDOWN"}\n\n');
-          res.end();
+          if (!res.destroyed && !res.writableEnded) {
+            res.write('event: shutdown\ndata: {"status": "DAEMON_SHUTDOWN"}\n\n');
+            res.end();
+          }
         } catch {}
+        try { res.destroy(); } catch {}
       }
     }
     this.sseClients.clear();
 
     if (this.server) {
+      try {
+        if (typeof this.server.closeAllConnections === 'function') {
+          this.server.closeAllConnections();
+        }
+      } catch {}
       await new Promise((resolve) => {
         this.server.close(() => resolve());
       });
@@ -87,94 +117,106 @@ class IntercomDaemon {
     this.removePidFile();
   }
 
-  /**
-   * Core request dispatcher
-   */
-  async handleRequest(req, res) {
-    const parsedUrl = new URL(req.url, `http://${this.host}:${this.port}`);
-    const pathname = parsedUrl.pathname;
-    const method = req.method.toUpperCase();
-
-    // CORS: Strictly localhost/loopback origins only
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-    if (method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
+  _removeSseClient(agentName, clientRes) {
+    const clientSet = this.sseClients.get(agentName);
+    if (!clientSet) return;
+    clientSet.delete(clientRes);
+    if (clientSet.size === 0) {
+      this.sseClients.delete(agentName);
     }
+  }
 
+  _writeSsePacket(agentName, clientRes, packet) {
+    if (!clientRes || clientRes.destroyed || clientRes.writableEnded) {
+      this._removeSseClient(agentName, clientRes);
+      return false;
+    }
     try {
-      // 1. Health check
-      if ((pathname === '/api/intercom/health' || pathname === '/health') && method === 'GET') {
-        const health = {
-          status: 'ONLINE',
-          pid: process.pid,
-          uptime: process.uptime(),
-          port: this.port,
-          version: '2.0.0',
-          timestamp: new Date().toISOString()
-        };
-        this.sendJson(res, 200, health);
-        return;
+      const ok = clientRes.write(packet);
+      if (!ok && clientRes.writableLength > MAX_SSE_BACKPRESSURE_BYTES) {
+        this._removeSseClient(agentName, clientRes);
+        try { clientRes.destroy(); } catch {}
+        return false;
       }
+      return true;
+    } catch {
+      this._removeSseClient(agentName, clientRes);
+      try { clientRes.destroy(); } catch {}
+      return false;
+    }
+  }
 
-      // 2. Connected & Registered Peers
-      if (pathname === '/api/intercom/peers' && method === 'GET') {
-        const connectedPeers = Array.from(this.sseClients.keys());
-        const registered = await listActiveAgents();
-        this.sendJson(res, 200, {
-          connectedPeers,
-          registeredAgents: registered
-        });
-        return;
+  broadcastEvent(type, payload) {
+    const data = JSON.stringify({ type, timestamp: new Date().toISOString(), payload });
+    const packet = `event: ${type}\ndata: ${data}\n\n`;
+    for (const [agent, clientSet] of Array.from(this.sseClients.entries())) {
+      for (const clientRes of Array.from(clientSet)) {
+        this._writeSsePacket(agent, clientRes, packet);
       }
-
-      // 3. Fast-Path / Safe-Path Send Endpoint
-      if ((pathname === '/api/intercom/send' || pathname === '/messages') && method === 'POST') {
-        const body = await this.readJsonBody(req);
-        const result = await this.handleSend(body);
-        this.sendJson(res, 200, result);
-        return;
-      }
-
-      // 4. SSE Real-Time Event Stream
-      if (pathname === '/api/intercom/events' && method === 'GET') {
-        const agentName = parsedUrl.searchParams ? parsedUrl.searchParams.get('agent') : (parsedUrl.query && parsedUrl.query.agent);
-        if (!agentName) {
-          this.sendJson(res, 400, { error: 'Query parameter "agent" is required' });
-          return;
-        }
-        await this.handleSseConnect(agentName, req, res);
-        return;
-      }
-
-      // 5. Interrupt Endpoint
-      if (pathname === '/api/intercom/interrupt' && method === 'POST') {
-        const body = await this.readJsonBody(req);
-        const result = await this.handleInterrupt(body);
-        this.sendJson(res, 200, result);
-        return;
-      }
-
-      // 6. Graceful Shutdown Endpoint
-      if (pathname === '/api/intercom/shutdown' && method === 'POST') {
-        this.sendJson(res, 200, { status: 'SHUTTING_DOWN', message: 'Intercom daemon stopping gracefully' });
-        setTimeout(() => this.stop(), 50);
-        return;
-      }
-
-      // 404 Fallback
-      this.sendJson(res, 404, { error: `Not found: ${method} ${pathname}` });
-    } catch (err) {
-      this.sendJson(res, 500, { error: err.message });
     }
   }
 
   /**
-   * Handles message send with Fast-Path in-memory delivery and Safe-Path file-mesh fallback
+   * Core request dispatcher unified with central router.js
+   */
+  handleRequest(req, res) {
+    return handleRequest(req, res, {
+      AUTO_REPLY_ENABLED: false,
+      sseClients: new Set(),
+      getHealth: () => ({
+        status: 'ONLINE',
+        pid: process.pid,
+        uptime: process.uptime(),
+        port: this.port,
+        version: '2.0.0',
+        timestamp: new Date().toISOString()
+      }),
+      getPeers: async () => ({
+        connectedPeers: Array.from(this.sseClients.keys()),
+        registeredAgents: await listActiveAgents()
+      }),
+      handleSend: (body) => this.handleSend(body),
+      handleSseConnect: (rq, rs, parsedUrl) => {
+        const agentName = parsedUrl.searchParams ? parsedUrl.searchParams.get('agent') : null;
+        if (!agentName) {
+          sendError(rs, 'Query parameter "agent" is required', 400);
+          return;
+        }
+        return this.handleSseConnect(agentName, rq, rs);
+      },
+      handleInterrupt: (body) => this.handleInterrupt(body),
+      onShutdown: () => this.stop(),
+      broadcastEvent: (type, payload) => this.broadcastEvent(type, payload),
+      dispatchMessage: (from, to, message) => {
+        const envelope = MessageEnvelope.create({
+          sender: from,
+          recipient: to,
+          type: 'task_dispatch',
+          payload: { message }
+        });
+        writeMessageSync(to, envelope);
+        const packet = `event: message\ndata: ${JSON.stringify(envelope.toJSON())}\n\n`;
+        const clientSet = this.sseClients.get(envelope.recipient);
+        if (clientSet && clientSet.size > 0) {
+          for (const clientRes of Array.from(clientSet)) {
+            this._writeSsePacket(envelope.recipient, clientRes, packet);
+          }
+        }
+        return {
+          id: envelope.id,
+          from,
+          to,
+          message,
+          timestamp: envelope.timestamp,
+          read: false,
+          envelope: envelope.toJSON()
+        };
+      }
+    });
+  }
+
+  /**
+   * Handles message send with Fast-Path in-memory delivery and durable Safe-Path discrete persistence
    */
   async handleSend(body = {}) {
     let envelope;
@@ -195,31 +237,30 @@ class IntercomDaemon {
     const recipient = envelope.recipient;
     const clientSet = this.sseClients.get(recipient);
 
-    // Fast-Path: In-memory live delivery if recipient has active SSE/WS stream
+    // Fast-Path: In-memory live delivery if recipient has active SSE stream
+    let deliveredCount = 0;
     if (clientSet && clientSet.size > 0) {
       const ssePacket = `event: message\ndata: ${JSON.stringify(envelope.toJSON())}\n\n`;
-      let deliveredCount = 0;
-      for (const clientRes of clientSet) {
-        try {
-          clientRes.write(ssePacket);
+      for (const clientRes of Array.from(clientSet)) {
+        if (this._writeSsePacket(recipient, clientRes, ssePacket)) {
           deliveredCount++;
-        } catch {
-          clientSet.delete(clientRes);
         }
-      }
-
-      if (deliveredCount > 0) {
-        return {
-          status: 'DELIVERED_FAST_PATH',
-          messageId: envelope.id,
-          deliveredClients: deliveredCount,
-          envelope: envelope.toJSON()
-        };
       }
     }
 
-    // Safe-Path Fallback: Persist to discrete atomic file-mesh
+    // Always persist durably to the discrete file-mesh even on Fast-Path SSE delivery
     const writeResult = await writeMessage(recipient, envelope);
+
+    if (deliveredCount > 0) {
+      return {
+        status: 'DELIVERED_FAST_PATH',
+        messageId: envelope.id,
+        deliveredClients: deliveredCount,
+        path: writeResult.path,
+        envelope: envelope.toJSON()
+      };
+    }
+
     return {
       status: 'DELIVERED_SAFE_PATH',
       messageId: envelope.id,
@@ -247,7 +288,6 @@ class IntercomDaemon {
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no'
     });
-    res.write(`: connected at ${new Date().toISOString()}\n\n`);
 
     // Register in active clients map
     if (!this.sseClients.has(agentName)) {
@@ -256,18 +296,36 @@ class IntercomDaemon {
     const clientSet = this.sseClients.get(agentName);
     clientSet.add(res);
 
-    req.on('close', () => {
-      clientSet.delete(res);
-      if (clientSet.size === 0) {
-        this.sseClients.delete(agentName);
-      }
-    });
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      this._removeSseClient(agentName, res);
+      req.removeListener('close', cleanup);
+      req.removeListener('error', cleanup);
+      res.removeListener('close', cleanup);
+      res.removeListener('error', cleanup);
+      try { if (!res.writableEnded) res.end(); } catch {}
+    };
+
+    req.on('close', cleanup);
+    req.on('error', cleanup);
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+
+    this._writeSsePacket(agentName, res, `: connected at ${new Date().toISOString()}\n\n`);
 
     // Drain existing pending discrete inbox messages
     try {
       const pending = await readInbox(agentName);
       for (const env of pending) {
-        res.write(`event: message\ndata: ${JSON.stringify(env.toJSON ? env.toJSON() : env)}\n\n`);
+        if (cleaned) break;
+        const ok = this._writeSsePacket(
+          agentName,
+          res,
+          `event: message\ndata: ${JSON.stringify(env.toJSON ? env.toJSON() : env)}\n\n`
+        );
+        if (!ok) break;
       }
     } catch {}
   }
@@ -291,12 +349,10 @@ class IntercomDaemon {
         reason,
         timestamp: new Date().toISOString()
       });
-      for (const clientRes of clientSet) {
-        try {
-          clientRes.write(`event: interrupt\ndata: ${interruptPayload}\n\n`);
+      const packet = `event: interrupt\ndata: ${interruptPayload}\n\n`;
+      for (const clientRes of Array.from(clientSet)) {
+        if (this._writeSsePacket(cleanAgent, clientRes, packet)) {
           sseNotified = true;
-        } catch {
-          clientSet.delete(clientRes);
         }
       }
     }
@@ -319,28 +375,49 @@ class IntercomDaemon {
   startHeartbeatBroadcast() {
     this.heartbeatTimer = setInterval(() => {
       const ping = `: ping ${Date.now()}\n\n`;
-      for (const [agent, clientSet] of this.sseClients.entries()) {
-        for (const res of clientSet) {
-          try {
-            res.write(ping);
-          } catch {
-            clientSet.delete(res);
-          }
+      for (const [agent, clientSet] of Array.from(this.sseClients.entries())) {
+        for (const res of Array.from(clientSet)) {
+          this._writeSsePacket(agent, res, ping);
         }
       }
     }, 15000);
+    if (typeof this.heartbeatTimer.unref === 'function') {
+      this.heartbeatTimer.unref();
+    }
   }
 
   writePidFile() {
+    const meshDir = getMeshDir();
+    this.pidFile = getDefaultPidPath(meshDir);
+    const portPidFile = getPortPidPath(this.port, meshDir);
+    const payload = JSON.stringify({ pid: process.pid, port: this.port });
     try {
-      fs.writeFileSync(this.pidFile, String(process.pid), 'utf8');
+      fs.mkdirSync(meshDir, { recursive: true });
+      fs.writeFileSync(portPidFile, payload, 'utf8');
+      fs.writeFileSync(this.pidFile, payload, 'utf8');
     } catch {}
   }
 
   removePidFile() {
+    const meshDir = getMeshDir();
+    const portPidFile = getPortPidPath(this.port, meshDir);
+    const defaultPidFile = getDefaultPidPath(meshDir);
+    try { unlinkIgnoreEnoent(portPidFile); } catch {}
     try {
-      if (fs.existsSync(this.pidFile)) {
-        fs.unlinkSync(this.pidFile);
+      if (fs.existsSync(defaultPidFile)) {
+        const raw = fs.readFileSync(defaultPidFile, 'utf8').trim();
+        let pid = parseInt(raw, 10);
+        let pidPort = null;
+        if (isNaN(pid)) {
+          try {
+            const parsed = JSON.parse(raw);
+            pid = parsed.pid;
+            pidPort = parsed.port;
+          } catch {}
+        }
+        if (pid === process.pid || pidPort === this.port) {
+          unlinkIgnoreEnoent(defaultPidFile);
+        }
       }
     } catch {}
   }
@@ -363,68 +440,112 @@ class IntercomDaemon {
   }
 
   readJsonBody(req) {
-    return new Promise((resolve, reject) => {
-      let data = '';
-      req.on('data', chunk => {
-        data += chunk;
-        if (data.length > 10 * 1024 * 1024) { // 10MB limit
-          req.destroy();
-          reject(new Error('Payload too large'));
-        }
-      });
-      req.on('end', () => {
-        if (!data.trim()) return resolve({});
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(new Error(`Invalid JSON: ${e.message}`));
-        }
-      });
-      req.on('error', reject);
-    });
+    return parseJsonBody(req);
   }
 
   sendJson(res, statusCode, data) {
-    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(data, null, 2));
+    return sendJson(res, statusCode, data);
   }
 }
 
 /**
  * Starts daemon on specified port
  */
-async function startDaemon(port = PORT || 4150) {
+async function startDaemon(port = getPort()) {
   const daemon = new IntercomDaemon({ port });
   await daemon.start();
   return daemon;
 }
 
+function readPidData(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8').trim();
+    if (!content) return null;
+    if (/^\d+$/.test(content)) {
+      return { pid: parseInt(content, 10), port: null };
+    }
+    const parsed = JSON.parse(content);
+    if (parsed && Number.isInteger(parsed.pid)) {
+      return { pid: parsed.pid, port: parsed.port || null };
+    }
+  } catch {}
+  return null;
+}
+
+function requestHttpShutdown(port, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: '/api/intercom/shutdown',
+      method: 'POST',
+      timeout: timeoutMs
+    }, (res) => {
+      res.resume();
+      resolve(res.statusCode >= 200 && res.statusCode < 300);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+
+function isPidAlive(pid) {
+  if (!pid || !Number.isInteger(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Stops running daemon
+ * Stops running daemon cleanly via HTTP shutdown before SIGTERM, respecting port argument
  */
-async function stopDaemon(port = PORT || 4150) {
-  const pidFile = path.join(MESH_DIR, 'daemon.pid');
-  if (fs.existsSync(pidFile)) {
+async function stopDaemon(port = getPort()) {
+  const meshDir = getMeshDir();
+  const portPidFile = getPortPidPath(port, meshDir);
+  const defaultPidFile = getDefaultPidPath(meshDir);
+
+  const portData = readPidData(portPidFile);
+  const defaultData = readPidData(defaultPidFile);
+  const matchingDefault = defaultData && (!defaultData.port || defaultData.port === port) ? defaultData : null;
+  const pidData = portData || matchingDefault;
+  const targetPort = (pidData && pidData.port) || port;
+
+  // 1. Attempt graceful HTTP shutdown first (critical on Windows where SIGTERM is hard TerminateProcess)
+  const gracefulSent = targetPort ? await requestHttpShutdown(targetPort, 1500) : false;
+  if (gracefulSent) {
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline) {
+      if (pidData && pidData.pid !== process.pid && !isPidAlive(pidData.pid)) break;
+      if (pidData && pidData.pid === process.pid && !fs.existsSync(portPidFile)) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
+  // 2. Fallback to SIGTERM if an external daemon process is still alive
+  let killed = false;
+  if (pidData && pidData.pid !== process.pid && isPidAlive(pidData.pid)) {
     try {
-      const content = fs.readFileSync(pidFile, 'utf8').trim();
-      let pid = parseInt(content, 10);
-      if (isNaN(pid)) {
-        try { pid = JSON.parse(content).pid; } catch {}
-      }
-      if (pid && !isNaN(pid)) {
-        try { process.kill(pid, 'SIGTERM'); } catch {}
-      }
-      if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
-      return true;
+      process.kill(pidData.pid, 'SIGTERM');
+      killed = true;
     } catch {}
   }
-  return false;
+
+  try { unlinkIgnoreEnoent(portPidFile); } catch {}
+  if (matchingDefault) {
+    try { unlinkIgnoreEnoent(defaultPidFile); } catch {}
+  }
+
+  return Boolean(gracefulSent || killed || pidData);
 }
 
 /**
  * Queries running daemon status
  */
-async function getDaemonStatus(port = PORT || 4150) {
+async function getDaemonStatus(port = getPort()) {
   return new Promise((resolve) => {
     const req = http.request({
       hostname: '127.0.0.1',

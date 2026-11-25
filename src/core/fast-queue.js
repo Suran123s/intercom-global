@@ -20,6 +20,70 @@ const PRIORITY_LEVELS = {
   CRITICAL: 4
 };
 
+const MAX_WILDCARD_CACHE_SIZE = 500;
+const MAX_PATTERN_LENGTH = 256;
+const MAX_REGEX_WILDCARDS = 8;
+const wildcardRegexCache = new Map();
+
+/**
+ * Linear-time glob matching for patterns with excessive wildcards to prevent ReDoS
+ */
+function matchWildcardLinear(text, pattern) {
+  let ti = 0;
+  let pi = 0;
+  let starIdx = -1;
+  let matchIdx = 0;
+
+  while (ti < text.length) {
+    if (pi < pattern.length && pattern[pi] === text[ti]) {
+      ti++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starIdx = pi;
+      matchIdx = ti;
+      pi++;
+    } else if (starIdx !== -1) {
+      pi = starIdx + 1;
+      matchIdx++;
+      ti = matchIdx;
+    } else {
+      return false;
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') {
+    pi++;
+  }
+  return pi === pattern.length;
+}
+
+function matchesWildcardPattern(value, pattern) {
+  if (typeof pattern !== 'string') return false;
+  if (pattern.length > MAX_PATTERN_LENGTH) return false;
+  if (!pattern.includes('*')) return value === pattern;
+
+  const normalized = pattern.replace(/\*+/g, '*');
+  const starCount = (normalized.match(/\*/g) || []).length;
+  if (starCount > MAX_REGEX_WILDCARDS) {
+    return matchWildcardLinear(value, normalized);
+  }
+
+  let regex = wildcardRegexCache.get(normalized);
+  if (!regex) {
+    const escaped = normalized.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    try {
+      regex = new RegExp(`^${escaped}$`);
+    } catch {
+      return false;
+    }
+    if (wildcardRegexCache.size >= MAX_WILDCARD_CACHE_SIZE) {
+      const oldestKey = wildcardRegexCache.keys().next().value;
+      if (oldestKey !== undefined) wildcardRegexCache.delete(oldestKey);
+    }
+    wildcardRegexCache.set(normalized, regex);
+  }
+  return regex.test(value);
+}
+
 class SubscriptionFilter {
   /**
    * Evaluates if a message envelope matches filter criteria
@@ -37,6 +101,7 @@ class SubscriptionFilter {
         ? (filter.type || filter.types)
         : [filter.type || filter.types];
       const matchType = allowed.some((pattern) => {
+        if (typeof pattern !== 'string') return false;
         if (pattern.endsWith('*')) {
           const prefix = pattern.slice(0, -1);
           return (msg.type || '').startsWith(prefix);
@@ -55,25 +120,13 @@ class SubscriptionFilter {
       if (!msgChannel || !allowed.includes(msgChannel)) return false;
     }
 
-    // Sender pattern (supports wildcard *)
+    // Sender pattern (supports cached bounded wildcard *)
     if (filter.sender || filter.senders) {
       const allowed = Array.isArray(filter.sender || filter.senders)
         ? (filter.sender || filter.senders)
         : [filter.sender || filter.senders];
       const sender = msg.sender || msg.from || '';
-      const matchSender = allowed.some((pattern) => {
-        if (typeof pattern !== 'string') return false;
-        if (pattern.includes('*')) {
-          const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-          try {
-            const regex = new RegExp('^' + escaped + '$');
-            return regex.test(sender);
-          } catch {
-            return false;
-          }
-        }
-        return sender === pattern;
-      });
+      const matchSender = allowed.some((pattern) => matchesWildcardPattern(sender, pattern));
       if (!matchSender) return false;
     }
 
@@ -83,19 +136,7 @@ class SubscriptionFilter {
         ? (filter.excludeSenders || filter.exclude)
         : [filter.excludeSenders || filter.exclude];
       const sender = msg.sender || msg.from || '';
-      const isExcluded = excluded.some((pattern) => {
-        if (typeof pattern !== 'string') return false;
-        if (pattern.includes('*')) {
-          const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-          try {
-            const regex = new RegExp('^' + escaped + '$');
-            return regex.test(sender);
-          } catch {
-            return false;
-          }
-        }
-        return sender === pattern;
-      });
+      const isExcluded = excluded.some((pattern) => matchesWildcardPattern(sender, pattern));
       if (isExcluded) return false;
     }
 
@@ -255,13 +296,10 @@ class FastQueue extends EventEmitter {
     if (this.isLocal(cleanRecipient)) {
       const q = this.agentQueues.get(cleanRecipient) || [];
       const worker = this.workers.get(cleanRecipient);
+      const eventName = `message:${cleanRecipient}`;
+      const hasSubscribers = this.listenerCount(eventName) > 0;
       const limit = worker?.maxQueue || this.maxQueueDepth;
 
-      if (q.length >= limit) {
-        q.shift(); // Evict oldest
-      }
-      q.push(envelopeData);
-      this.agentQueues.set(cleanRecipient, q);
       this.stats.inMemoryDelivered++;
 
       if (worker) {
@@ -271,15 +309,31 @@ class FastQueue extends EventEmitter {
         } catch (err) {
           this.stats.errorsCaught++;
           this.emit('worker:error', { agent: cleanRecipient, error: err.message });
-          // Fall back to Safe-Path disk on handler crash
+          // Fall back to Safe-Path disk on handler crash (do not retain in memory)
           const { writeMessage } = require('./mesh');
           await writeMessage(cleanRecipient, envelopeData);
           this.stats.fallbackDelivered++;
           return { mode: 'safe-path-file-mesh', delivered: true, fallback: true, error: err.message };
         }
+        // Delivered to worker; also notify any active subscribers without retaining in agentQueues
+        if (hasSubscribers) {
+          this.emit(eventName, envelopeData);
+        }
+        return { mode: 'fast-path-memory', delivered: true, inMemory: true, envelope: envelopeData };
       }
 
-      this.emit(`message:${cleanRecipient}`, envelopeData);
+      if (hasSubscribers) {
+        // Active subscriber(s) receive the message immediately; dequeue/do not retain in agentQueues
+        this.emit(eventName, envelopeData);
+        return { mode: 'fast-path-memory', delivered: true, inMemory: true, envelope: envelopeData };
+      }
+
+      // No active worker or subscriber: buffer up to maxQueueDepth cap
+      if (q.length >= limit) {
+        q.shift(); // Evict oldest
+      }
+      q.push(envelopeData);
+      this.agentQueues.set(cleanRecipient, q);
       return { mode: 'fast-path-memory', delivered: true, inMemory: true, envelope: envelopeData };
     }
 
@@ -305,10 +359,24 @@ class FastQueue extends EventEmitter {
 
   subscribe(agent, filter = {}, handler) {
     const clean = validateAgent(agent);
+    if (typeof handler !== 'function') {
+      throw new TypeError(`Subscriber handler for "${clean}" must be a function`);
+    }
     const eventName = `message:${clean}`;
     const listener = (msg) => {
       if (this.matchesFilter(msg, filter)) {
-        handler(msg);
+        try {
+          const result = handler(msg);
+          if (result && typeof result.then === 'function') {
+            result.catch((err) => {
+              this.stats.errorsCaught++;
+              this.emit('subscriber:error', { agent: clean, error: err?.message || String(err) });
+            });
+          }
+        } catch (err) {
+          this.stats.errorsCaught++;
+          this.emit('subscriber:error', { agent: clean, error: err?.message || String(err) });
+        }
       } else {
         this.stats.filteredOut++;
       }
@@ -339,6 +407,7 @@ class FastQueue extends EventEmitter {
   }
 
   clear() {
+    this.removeAllListeners();
     this.localAgents.clear();
     this.agentQueues.clear();
     this.workers.clear();

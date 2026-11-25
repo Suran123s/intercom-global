@@ -1,31 +1,43 @@
 // src/controllers/autowake.js - Universal Multi-Agent Auto-Wake & Interrupt Controller
 const net = require('net');
-const fs = require('fs');
-const path = require('path');
-const { exec } = require('child_process');
-const { PI_PIPE_NAME, MESH_DIR } = require('../config');
-const { readInbox, writeInbox, getInboxFile, sanitizeName, writeMessageSync } = require('../core/mesh');
+const { getBrokerConnectTarget, getPort } = require('../config');
+const { validateAgentName, sanitizeAgentName, writeMessageSync, listActiveMailboxes } = require('../core/mesh');
 const { MessageEnvelope } = require('../core/message');
-const { writeFrame, tryAutoSpawnPiBroker } = require('../bridges/pi-intercom');
+const piIntercom = require('../bridges/pi-intercom');
+const { spawnAgent } = require('./spawner');
 
-function connectSocket(target, connectListener) {
+const connectSocket = piIntercom.connectSocket || ((target, connectListener) => {
   if (typeof target === 'object' && target !== null && target.host && target.port) {
     return net.connect({ host: target.host, port: target.port }, connectListener);
   }
   return net.connect(target, connectListener);
-}
+});
 
 function wakePiAgent(targetName, message, callback, isRetry = false) {
   let finished = false;
+  let retryPending = false;
+  let socketTimeout = null;
+  let registerTimer = null;
+  let endTimer = null;
+  let retryTimer = null;
+
+  const clearTimers = () => {
+    if (socketTimeout) { clearTimeout(socketTimeout); socketTimeout = null; }
+    if (registerTimer) { clearTimeout(registerTimer); registerTimer = null; }
+    if (endTimer) { clearTimeout(endTimer); endTimer = null; }
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  };
+
   const done = (result) => {
     if (finished) return;
     finished = true;
+    clearTimers();
     if (callback) callback(result);
   };
 
-  const socket = connectSocket(PI_PIPE_NAME, () => {
+  const socket = connectSocket(getBrokerConnectTarget(), () => {
     const senderId = 'wake-' + Date.now();
-    writeFrame(socket, {
+    piIntercom.writeFrame(socket, {
       type: 'register',
       protocolVersion: 1,
       session: {
@@ -40,9 +52,10 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
       }
     });
 
-    setTimeout(() => {
+    registerTimer = setTimeout(() => {
+      if (finished) return;
       const msgId = 'msg-' + Date.now();
-      writeFrame(socket, {
+      piIntercom.writeFrame(socket, {
         type: 'send',
         to: targetName,
         message: {
@@ -51,27 +64,31 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
           content: { text: message }
         }
       });
-      console.log(`⚡ [AUTOWAKE PI] Sent direct interrupting turn trigger to Pi session: "${targetName.toUpperCase()}"`);
-      setTimeout(() => {
-        socket.end();
+      console.log(`⚡ [AUTOWAKE PI] Sent direct interrupting turn trigger to Pi session: "${String(targetName).toUpperCase()}"`);
+      endTimer = setTimeout(() => {
+        try { socket.end(); } catch {}
         done({ delivered: true, method: 'pi-intercom-ipc', target: targetName });
       }, 400);
     }, 150);
   });
 
   // Safety timeout in case pipe hangs
-  const socketTimeout = setTimeout(() => {
+  socketTimeout = setTimeout(() => {
     try { socket.destroy(); } catch {}
     done({ delivered: false, method: 'pi-intercom-ipc', reason: 'Connection timed out' });
   }, 2500);
 
   socket.on('error', (err) => {
-    clearTimeout(socketTimeout);
+    if (socketTimeout) { clearTimeout(socketTimeout); socketTimeout = null; }
     if (!isRetry) {
-      const spawned = tryAutoSpawnPiBroker();
+      const spawned = piIntercom.tryAutoSpawnPiBroker();
       if (spawned) {
-        console.log(`🚀 [AUTOWAKE PI] Auto-spawning background Pi Intercom Broker for "${targetName.toUpperCase()}"...`);
-        setTimeout(() => wakePiAgent(targetName, message, callback, true), 1000);
+        retryPending = true;
+        console.log(`🚀 [AUTOWAKE PI] Auto-spawning background Pi Intercom Broker for "${String(targetName).toUpperCase()}"...`);
+        retryTimer = setTimeout(() => {
+          retryPending = false;
+          wakePiAgent(targetName, message, callback, true);
+        }, 1000);
         return;
       }
     }
@@ -79,13 +96,19 @@ function wakePiAgent(targetName, message, callback, isRetry = false) {
   });
 
   socket.on('close', () => {
-    clearTimeout(socketTimeout);
+    if (retryPending) return;
     done({ delivered: false, method: 'pi-intercom-ipc', reason: 'Socket closed prematurely' });
   });
 }
 
 function wakeCliAgent(targetName, message) {
-  const cleanTarget = sanitizeName(targetName);
+  let cleanTarget;
+  try {
+    cleanTarget = validateAgentName(targetName);
+  } catch {
+    cleanTarget = sanitizeAgentName(targetName);
+  }
+
   const envelope = MessageEnvelope.create({
     sender: 'autowake',
     recipient: cleanTarget,
@@ -107,32 +130,32 @@ function wakeOpenCodeAgent(targetName, message, callback) {
   const baseUrl = process.env.OPENCODE_URL || `http://127.0.0.1:${port}`;
 
   if (isOpenCode) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
-
     fetch(`${baseUrl}/session`, {
       method: 'GET',
-      signal: controller.signal
+      signal: AbortSignal.timeout(1500)
     })
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       })
-      .then(sessions => {
-        clearTimeout(timeout);
+      .then(async (sessions) => {
         const activeSession = Array.isArray(sessions) && sessions.length > 0 ? sessions[0].id || sessions[0] : 'default';
-        return fetch(`${baseUrl}/session/${activeSession}/prompt_async`, {
+        const promptRes = await fetch(`${baseUrl}/session/${encodeURIComponent(String(activeSession))}/prompt_async`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: `[Intercom AutoWake]: ${message}` })
-        }).then(() => activeSession);
+          body: JSON.stringify({ prompt: `[Intercom AutoWake]: ${message}` }),
+          signal: AbortSignal.timeout(1500)
+        });
+        if (!promptRes.ok) {
+          throw new Error(`HTTP ${promptRes.status}`);
+        }
+        return activeSession;
       })
       .then((sess) => {
         console.log(`⚡ [AUTOWAKE OPENCODE] Triggered prompt in active OpenCode session (${sess}).`);
         if (callback) callback({ delivered: true, method: 'opencode-rest', url: baseUrl, session: sess });
       })
-      .catch((err) => {
-        clearTimeout(timeout);
+      .catch(() => {
         const reason = `OpenCode API server offline at ${baseUrl} (Start with 'opencode serve')`;
         console.log(`ℹ️ [AUTOWAKE OPENCODE NOTICE] ${reason}`);
         if (callback) callback({ delivered: false, method: 'opencode-rest', reason });
@@ -148,9 +171,6 @@ function wakeHermesAgent(targetName, message, callback) {
   const baseUrl = process.env.HERMES_URL || `http://127.0.0.1:${port}`;
 
   if (isHermes) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
-
     fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -159,16 +179,14 @@ function wakeHermesAgent(targetName, message, callback) {
         messages: [{ role: 'user', content: `[Intercom AutoWake]: ${message}` }],
         stream: false
       }),
-      signal: controller.signal
+      signal: AbortSignal.timeout(1500)
     })
       .then(res => {
-        clearTimeout(timeout);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         console.log(`⚡ [AUTOWAKE HERMES] Dispatched prompt to Hermes Gateway API (${baseUrl}).`);
         if (callback) callback({ delivered: true, method: 'hermes-gateway', url: baseUrl });
       })
-      .catch((err) => {
-        clearTimeout(timeout);
+      .catch(() => {
         const reason = `Hermes Gateway offline at ${baseUrl} (Start with 'hermes gateway')`;
         console.log(`ℹ️ [AUTOWAKE HERMES NOTICE] ${reason}`);
         if (callback) callback({ delivered: false, method: 'hermes-gateway', reason });
@@ -188,8 +206,15 @@ function wakeCloudAgent(targetName, message) {
           'Authorization': `Bearer ${process.env.DEVIN_API_KEY}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ prompt: message })
-      }).catch(err => console.error('Devin wake error:', err.message));
+        body: JSON.stringify({ prompt: message }),
+        signal: AbortSignal.timeout(3000)
+      })
+        .then((res) => {
+          if (!res.ok) {
+            console.error(`Devin wake error: HTTP ${res.status}`);
+          }
+        })
+        .catch(err => console.error('Devin wake error:', err.message));
       return { delivered: true, method: 'devin-cloud' };
     } else {
       const reason = 'Devin API key not set ($env:DEVIN_API_KEY missing)';
@@ -199,9 +224,6 @@ function wakeCloudAgent(targetName, message) {
   }
   return { delivered: false, skipped: true };
 }
-
-const { showDesktopNotification } = require('../core/notifications');
-const { spawnAgent } = require('./spawner');
 
 function logWakeHeader(to, message, options = {}) {
   console.log(`\n===========================================================`);
@@ -274,45 +296,65 @@ async function diagnoseMesh() {
     services: {}
   };
 
+  const piTarget = getBrokerConnectTarget();
+  const port = getPort();
+
   // 1. Pi Broker
   status.services.piBroker = await new Promise((resolve) => {
-    const socket = connectSocket(PI_PIPE_NAME, () => {
-      socket.end();
-      resolve({ status: 'ONLINE', target: typeof PI_PIPE_NAME === 'object' ? `${PI_PIPE_NAME.host}:${PI_PIPE_NAME.port}` : PI_PIPE_NAME });
+    let settled = false;
+    let timer = null;
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      resolve(res);
+    };
+
+    const socket = connectSocket(piTarget, () => {
+      try { socket.end(); } catch {}
+      finish({ status: 'ONLINE', target: typeof piTarget === 'object' ? `${piTarget.host}:${piTarget.port}` : piTarget });
     });
     socket.on('error', (err) => {
-      resolve({ status: 'OFFLINE', reason: err.message, remediation: "Launch Pi session with 'pi-intercom' extension" });
+      finish({ status: 'OFFLINE', reason: err.message, remediation: "Launch Pi session with 'pi-intercom' extension" });
     });
-    setTimeout(() => {
+    timer = setTimeout(() => {
       try { socket.destroy(); } catch {}
-      resolve({ status: 'TIMEOUT', reason: 'Broker socket timed out' });
+      finish({ status: 'TIMEOUT', reason: 'Broker socket timed out' });
     }, 1000);
+    if (typeof timer.unref === 'function') timer.unref();
   });
 
   // 2. OpenCode API
   const opencodePort = process.env.OPENCODE_PORT || 4096;
   const opencodeUrl = process.env.OPENCODE_URL || `http://127.0.0.1:${opencodePort}`;
   status.services.opencodeApi = await fetch(`${opencodeUrl}/session`, { signal: AbortSignal.timeout(1000) })
-    .then(res => res.json())
-    .then(sessions => ({ status: 'ONLINE', url: opencodeUrl, activeSessions: sessions.length }))
+    .then(async res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const sessions = await res.json();
+      return { status: 'ONLINE', url: opencodeUrl, activeSessions: Array.isArray(sessions) ? sessions.length : 0 };
+    })
     .catch(err => ({ status: 'OFFLINE', url: opencodeUrl, reason: err.message, remediation: `Start OpenCode with 'opencode serve --port ${opencodePort}'` }));
 
   // 3. Hermes Gateway
   const hermesPort = process.env.HERMES_PORT || 8000;
   const hermesUrl = process.env.HERMES_URL || `http://127.0.0.1:${hermesPort}`;
   status.services.hermesGateway = await fetch(`${hermesUrl}/v1/models`, { signal: AbortSignal.timeout(1000) })
-    .then(res => ({ status: 'ONLINE', url: hermesUrl }))
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return { status: 'ONLINE', url: hermesUrl };
+    })
     .catch(err => ({ status: 'OFFLINE', url: hermesUrl, reason: err.message, remediation: `Start Hermes with 'hermes gateway'` }));
 
   // 4. Global Intercom Daemon
-  const { PORT } = require('../config');
-  status.services.intercomDaemon = await fetch(`http://localhost:${PORT}/.well-known/agent.json`, { signal: AbortSignal.timeout(1000) })
-    .then(res => res.json())
-    .then(card => ({ status: 'ONLINE', url: `http://localhost:${PORT}`, agentCard: card.name }))
-    .catch(err => ({ status: 'OFFLINE', url: `http://localhost:${PORT}`, reason: err.message, remediation: "Start daemon with 'intercom server'" }));
+  status.services.intercomDaemon = await fetch(`http://127.0.0.1:${port}/.well-known/agent.json`, { signal: AbortSignal.timeout(1000) })
+    .then(async res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const card = await res.json();
+      return { status: 'ONLINE', url: `http://127.0.0.1:${port}`, agentCard: card.name };
+    })
+    .catch(err => ({ status: 'OFFLINE', url: `http://127.0.0.1:${port}`, reason: err.message, remediation: "Start daemon with 'intercom server'" }));
 
   // 5. Active Mailboxes
-  const { listActiveMailboxes } = require('../core/mesh');
   status.mailboxes = await listActiveMailboxes();
 
   return status;

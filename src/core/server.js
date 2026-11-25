@@ -7,12 +7,22 @@ const { handleRequest, sendError } = require('../routes/router');
 const AUTO_REPLY_ENABLED = process.argv.includes('--auto-reply') || process.env.INTERCOM_AUTO_REPLY === 'true';
 
 const sseClients = new Set();
+const MAX_SSE_BACKPRESSURE_BYTES = 1024 * 1024;
 
 function broadcastEvent(type, payload) {
   const data = JSON.stringify({ type, timestamp: new Date().toISOString(), payload });
+  const packet = `event: ${type}\ndata: ${data}\n\n`;
   for (const client of sseClients) {
+    if (client.destroyed || client.writableEnded) {
+      sseClients.delete(client);
+      continue;
+    }
     try {
-      client.write(`event: ${type}\ndata: ${data}\n\n`);
+      const ok = client.write(packet);
+      if (!ok && client.writableLength > MAX_SSE_BACKPRESSURE_BYTES) {
+        sseClients.delete(client);
+        try { client.destroy(); } catch {}
+      }
     } catch {
       sseClients.delete(client);
     }
@@ -53,6 +63,28 @@ function dispatchMessage(from, to, message, isAutoReply = false) {
 }
 
 function createServer() {
+  const heartbeatTimer = setInterval(() => {
+    const ping = `: ping ${Date.now()}\n\n`;
+    for (const client of sseClients) {
+      if (client.destroyed || client.writableEnded) {
+        sseClients.delete(client);
+        continue;
+      }
+      try {
+        const ok = client.write(ping);
+        if (!ok && client.writableLength > MAX_SSE_BACKPRESSURE_BYTES) {
+          sseClients.delete(client);
+          try { client.destroy(); } catch {}
+        }
+      } catch {
+        sseClients.delete(client);
+      }
+    }
+  }, 15000);
+  if (typeof heartbeatTimer.unref === 'function') {
+    heartbeatTimer.unref();
+  }
+
   const server = http.createServer((req, res) => {
     handleRequest(req, res, {
       dispatchMessage,
@@ -60,6 +92,15 @@ function createServer() {
       sseClients,
       AUTO_REPLY_ENABLED
     });
+  });
+
+  server.on('close', () => {
+    clearInterval(heartbeatTimer);
+    for (const client of sseClients) {
+      try { if (!client.writableEnded) client.end(); } catch {}
+      try { client.destroy(); } catch {}
+    }
+    sseClients.clear();
   });
 
   return server;

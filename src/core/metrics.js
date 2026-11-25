@@ -14,19 +14,63 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const { MESH_DIR } = require('../config');
+const { getMeshDir } = require('../config');
+
+const MAX_RECIPIENT_CARDINALITY = 200;
+const MAX_DLQ_REASON_CARDINALITY = 50;
+
+function normalizeDlqReason(reason) {
+  if (!reason) return 'UNKNOWN';
+  let fallbackName = '';
+  if (typeof reason === 'object') {
+    if (reason.code && typeof reason.code === 'string') {
+      return reason.code.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 32) || 'UNKNOWN';
+    }
+    if (reason.name && typeof reason.name === 'string' && reason.name !== 'Error') {
+      fallbackName = reason.name.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 32);
+    }
+    if (reason.message) {
+      reason = reason.message;
+    } else if (fallbackName) {
+      return fallbackName;
+    }
+  }
+  const str = String(reason).trim();
+  if (!str) return fallbackName || 'UNKNOWN';
+  // Extract leading error code if present (e.g. "ENOENT: ...", "SecurityError: ...")
+  const codeMatch = str.match(/^([A-Za-z][A-Za-z0-9_]{1,31})(?:\s*:|$)/);
+  if (codeMatch) {
+    return codeMatch[1].toUpperCase();
+  }
+  if (/timeout|timed out/i.test(str)) return 'TIMEOUT';
+  if (/enoent|not found/i.test(str)) return 'ENOENT';
+  if (/eperm|ebusy|eacces|lock/i.test(str)) return 'LOCK_OR_ACCESS_ERROR';
+  if (/security|traversal|invalid/i.test(str)) return 'VALIDATION_ERROR';
+  if (/json|parse/i.test(str)) return 'PARSE_ERROR';
+  return fallbackName || str.toUpperCase().replace(/[^A-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'UNKNOWN';
+}
 
 class MetricsRegistry {
-  constructor(baseMeshDir = MESH_DIR) {
-    this.baseMeshDir = baseMeshDir;
+  constructor(baseMeshDir = null) {
+    this._explicitBaseMeshDir = baseMeshDir || null;
     this.counters = new Map();
     this.gauges = new Map();
     this.histograms = new Map();
+    this._knownRecipients = new Set();
+    this._knownDlqReasons = new Set();
 
     // Default compaction metrics counters
     this.compactionRuns = 0;
     this.compactionPrunedDirs = 0;
     this.compactionReclaimedBytes = 0;
+  }
+
+  get baseMeshDir() {
+    return this._explicitBaseMeshDir || getMeshDir();
+  }
+
+  set baseMeshDir(val) {
+    this._explicitBaseMeshDir = val || null;
   }
 
   /**
@@ -69,6 +113,7 @@ class MetricsRegistry {
 
   /**
    * Formats a label dictionary into Prometheus label syntax: {k="v",...}
+   * Escapes backslash, double-quote, CR, and LF per Prometheus Text Format 0.0.4.
    * @param {object} [labels={}]
    * @returns {string}
    */
@@ -76,23 +121,59 @@ class MetricsRegistry {
     const entries = Object.entries(labels);
     if (entries.length === 0) return '';
     const formatted = entries
-      .map(([k, v]) => `${k}="${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
+      .map(([k, v]) => {
+        const escaped = String(v)
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"')
+          .replace(/\r/g, '\\r')
+          .replace(/\n/g, '\\n');
+        return `${k}="${escaped}"`;
+      })
       .join(',');
     return `{${formatted}}`;
+  }
+
+  _boundRecipientLabel(recipient = 'unknown') {
+    const clean = String(recipient || 'unknown').slice(0, 64);
+    if (this._knownRecipients.has(clean)) return clean;
+    if (this._knownRecipients.size < MAX_RECIPIENT_CARDINALITY) {
+      this._knownRecipients.add(clean);
+      return clean;
+    }
+    return '_other';
+  }
+
+  _boundDlqReasonLabel(reason = 'UNKNOWN') {
+    const code = normalizeDlqReason(reason);
+    if (this._knownDlqReasons.has(code)) return code;
+    if (this._knownDlqReasons.size < MAX_DLQ_REASON_CARDINALITY) {
+      this._knownDlqReasons.add(code);
+      return code;
+    }
+    return 'OTHER';
   }
 
   /**
    * Records a sent message event.
    */
   recordMessageSent(type = 'task_dispatch', priority = 'NORMAL', recipient = 'unknown') {
-    this.increment('intercom_messages_total', { status: 'sent', type, priority });
+    this.increment('intercom_messages_total', {
+      status: 'sent',
+      type: String(type || 'task_dispatch').slice(0, 48),
+      priority: String(priority || 'NORMAL').toUpperCase().slice(0, 16)
+    });
   }
 
   /**
-   * Records a delivered message event and its latency.
+   * Records a delivered message event and its latency with bounded label cardinality.
    */
   recordMessageDelivered(type = 'task_dispatch', recipient = 'unknown', status = 'delivered', latencyMs = 0) {
-    this.increment('intercom_messages_total', { status, recipient, type });
+    const boundedRecipient = this._boundRecipientLabel(recipient);
+    this.increment('intercom_messages_total', {
+      status: String(status || 'delivered').slice(0, 32),
+      recipient: boundedRecipient,
+      type: String(type || 'task_dispatch').slice(0, 48)
+    });
     if (latencyMs > 0) {
       this.observe('intercom_delivery_latency_ms', { transport: 'atomic_discrete' }, latencyMs);
     }
@@ -106,10 +187,11 @@ class MetricsRegistry {
   }
 
   /**
-   * Records a dead-letter queue enqueue event.
+   * Records a dead-letter queue enqueue event with normalized bounded error code label.
    */
   recordDlqEnqueue(reason = 'UNKNOWN') {
-    this.increment('intercom_dlq_enqueued_total', { reason });
+    const boundedReason = this._boundDlqReasonLabel(reason);
+    this.increment('intercom_dlq_enqueued_total', { reason: boundedReason });
   }
 
   /**
@@ -123,8 +205,10 @@ class MetricsRegistry {
 
   /**
    * Scans filesystem for active mailboxes, DLQ messages, and held CAS locks.
+   * Skips per-mailbox message file scans unless options.includeMailboxCounts is true.
    */
-  gatherFilesystemGauges(meshDir = this.baseMeshDir) {
+  gatherFilesystemGauges(meshDir = this.baseMeshDir, options = {}) {
+    const includeMailboxCounts = options && options.includeMailboxCounts === true;
     let activeMailboxes = 0;
     const mailboxCounts = new Map();
     let dlqCount = 0;
@@ -138,11 +222,13 @@ class MetricsRegistry {
         for (const d of dirs) {
           if (d.isDirectory()) {
             activeMailboxes++;
-            const fullDir = path.join(inboxBase, d.name);
-            try {
-              const files = fs.readdirSync(fullDir).filter(f => f.endsWith('.json') && !f.startsWith('.tmp'));
-              mailboxCounts.set(d.name, files.length);
-            } catch {}
+            if (includeMailboxCounts) {
+              const fullDir = path.join(inboxBase, d.name);
+              try {
+                const files = fs.readdirSync(fullDir).filter(f => f.endsWith('.json') && !f.startsWith('.tmp'));
+                mailboxCounts.set(d.name, files.length);
+              } catch {}
+            }
           }
         }
       } catch {}
@@ -182,8 +268,8 @@ class MetricsRegistry {
   /**
    * Syncs live gauges with disk state dynamically on every scrape/render call.
    */
-  syncLiveGauges(meshDir = this.baseMeshDir) {
-    const fsGauges = this.gatherFilesystemGauges(meshDir);
+  syncLiveGauges(meshDir = this.baseMeshDir, options = {}) {
+    const fsGauges = this.gatherFilesystemGauges(meshDir, options);
 
     this.setGauge('intercom_mailboxes_total', {}, fsGauges.activeMailboxes);
     this.setGauge('intercom_dlq_messages_total', {}, fsGauges.dlqCount);
@@ -194,10 +280,11 @@ class MetricsRegistry {
 
   /**
    * Renders the complete Prometheus exposition output.
+   * @param {object} [options={}]
    * @returns {string}
    */
-  render() {
-    this.syncLiveGauges();
+  render(options = {}) {
+    this.syncLiveGauges(this.baseMeshDir, options);
 
     const lines = [];
 
@@ -275,6 +362,25 @@ class MetricsRegistry {
       lines.push(`intercom_compaction_pruned_dirs_total ${this.compactionPrunedDirs}`);
     }
 
+    // 6b. FastQueue & DLQ enqueue counters (when recorded)
+    const fastCounters = Array.from(this.counters.values()).filter((c) => c.name === 'intercom_fast_queue_delivered_total');
+    if (fastCounters.length > 0) {
+      lines.push('# HELP intercom_fast_queue_delivered_total Total in-memory fast-queue deliveries');
+      lines.push('# TYPE intercom_fast_queue_delivered_total counter');
+      for (const c of fastCounters) {
+        lines.push(`intercom_fast_queue_delivered_total${this.formatLabels(c.labels)} ${c.value}`);
+      }
+    }
+
+    const dlqEnqueueCounters = Array.from(this.counters.values()).filter((c) => c.name === 'intercom_dlq_enqueued_total');
+    if (dlqEnqueueCounters.length > 0) {
+      lines.push('# HELP intercom_dlq_enqueued_total Total messages enqueued to dead-letter queue');
+      lines.push('# TYPE intercom_dlq_enqueued_total counter');
+      for (const c of dlqEnqueueCounters) {
+        lines.push(`intercom_dlq_enqueued_total${this.formatLabels(c.labels)} ${c.value}`);
+      }
+    }
+
     // 7. Process metrics
     const mem = process.memoryUsage();
     lines.push('# HELP process_uptime_seconds Total process uptime in seconds');
@@ -308,11 +414,12 @@ class MetricsCollector extends MetricsRegistry {}
 const metrics = new MetricsRegistry();
 
 /**
- * Starts a standalone Prometheus HTTP exposition server.
+ * Starts a standalone Prometheus HTTP exposition server bound to loopback 127.0.0.1.
  * @param {number} [port=9102]
+ * @param {string} [host='127.0.0.1']
  * @returns {http.Server}
  */
-function startMetricsServer(port = 9102) {
+function startMetricsServer(port = 9102, host = '127.0.0.1') {
   const server = http.createServer((req, res) => {
     if (req.url === '/metrics' || req.url === '/') {
       res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
@@ -322,7 +429,10 @@ function startMetricsServer(port = 9102) {
       res.end('Not Found');
     }
   });
-  server.listen(port);
+  server.on('error', (err) => {
+    console.error('[Metrics Server Error]:', err.message);
+  });
+  server.listen(port, host);
   return server;
 }
 
