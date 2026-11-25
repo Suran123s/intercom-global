@@ -52,7 +52,9 @@ describe('CPU & Event-Loop Spin Guards', () => {
     assert.match(body, /setTimeout\s*\(/, 'startFileMeshWatcher must yield via setTimeout between loop iterations');
   });
 
-  test('isEphemeralMailboxName & listActiveMailboxes({ excludeEphemeral: true }) filter test noise safely', async () => {
+  test('isEphemeralMailboxName & listActiveMailboxes({ excludeEphemeral: true }) filter test noise safely', async (t) => {
+    const { withIsolatedMeshEnv } = require('../helpers/isolated-env');
+    withIsolatedMeshEnv(t, 'intercom-spin-ephem-');
     assert.equal(isEphemeralMailboxName('test_1794400000000'), true);
     assert.equal(isEphemeralMailboxName('agent_sender_003f32'), true);
     assert.equal(isEphemeralMailboxName('cli-test-1794424378454'), true);

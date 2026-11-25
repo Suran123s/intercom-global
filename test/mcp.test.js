@@ -2,16 +2,17 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
-const fs = require('fs');
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
-const { getInboxFile } = require('../src/core/mesh');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('MCP server lists tools and handles tool calls', async () => {
+test('MCP server lists tools and handles tool calls', async (t) => {
+  const { env } = withIsolatedMeshEnv(t, 'intercom-mcp-');
   const serverPath = path.resolve(__dirname, '..', 'bin', 'intercom-mcp.js');
   const transport = new StdioClientTransport({
     command: 'node',
-    args: [serverPath]
+    args: [serverPath],
+    env
   });
 
   const client = new Client(
@@ -20,6 +21,9 @@ test('MCP server lists tools and handles tool calls', async () => {
   );
 
   await client.connect(transport);
+  t.after(async () => {
+    try { await client.close(); } catch {}
+  });
 
   // 1. List tools
   const toolsResult = await client.listTools();
@@ -32,7 +36,6 @@ test('MCP server lists tools and handles tool calls', async () => {
   assert.ok(toolNames.includes('intercom_list_peers'));
 
   const testAgent = 'mcp-agent-' + Date.now();
-  const file = getInboxFile(testAgent);
 
   // 2. Call intercom_send
   const sendRes = await client.callTool({
@@ -70,11 +73,4 @@ test('MCP server lists tools and handles tool calls', async () => {
     arguments: {}
   });
   assert.ok(Array.isArray(JSON.parse(peersRes.content[0].text)));
-
-  // Cleanup
-  if (fs.existsSync(file)) {
-    fs.unlinkSync(file);
-  }
-
-  await client.close();
 });

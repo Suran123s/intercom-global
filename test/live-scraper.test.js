@@ -175,7 +175,14 @@ test('sanitizeIdentifier strips shell metacharacters and enforces Zero-Qoder saf
   const okOpenCode = enforceZeroQoderPolicy({ id: 'opencode/beam-free', provider: 'opencode' });
   assert.equal(okOpenCode.allowed, true);
   assert.equal(okOpenCode.barredAuto, false);
-  assert.deepEqual(QODER_ALLOWED_MODELS, ['qwen3.8-flash', 'glm-5.3-flash', 'deepseek-flash', 'minimax-m3.1-flash']);
+  assert.deepEqual(QODER_ALLOWED_MODELS, [
+    'qwen3.8-flash',
+    'qwen3.8',
+    'qoder/qwen3.8-flash',
+    'glm-5.3-flash',
+    'deepseek-flash',
+    'minimax-m3.1-flash'
+  ]);
 });
 
 test('purifyScrapedData deduplicates schemas, enforces paid pricing over baseline, and ranks models cleanly', () => {
@@ -410,11 +417,18 @@ test('buildDynamicContext supplies all canonical variables and hydrateMarkdown p
   // Verify every refactored markdown document hydrates cleanly with zero leftover canonical placeholders
   const mdFiles = [
     path.join(ROOT_DIR, 'README.md'),
+    path.join(ROOT_DIR, 'AGENTS.md'),
     path.join(ROOT_DIR, 'skills', 'intercom-global', 'SKILL.md'),
     path.join(ROOT_DIR, 'docs', 'ARCHITECTURE.md'),
     path.join(ROOT_DIR, 'docs', 'GUIDE.md'),
     path.join(ROOT_DIR, 'docs', 'PRODUCTION_DEPLOYMENT.md'),
-    path.join(ROOT_DIR, 'docs', 'REAL_WORLD_EXAMPLES.md')
+    path.join(ROOT_DIR, 'docs', 'REAL_WORLD_EXAMPLES.md'),
+    path.join(ROOT_DIR, 'templates', 'README.md'),
+    path.join(ROOT_DIR, 'templates', 'AGENTS.md'),
+    path.join(ROOT_DIR, 'templates', 'docs', 'ARCHITECTURE.md'),
+    path.join(ROOT_DIR, 'templates', 'docs', 'GUIDE.md'),
+    path.join(ROOT_DIR, 'templates', 'docs', 'PRODUCTION_DEPLOYMENT.md'),
+    path.join(ROOT_DIR, 'templates', 'docs', 'REAL_WORLD_EXAMPLES.md')
   ];
 
   for (const mdPath of mdFiles) {
