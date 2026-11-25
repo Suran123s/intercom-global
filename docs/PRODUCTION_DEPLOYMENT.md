@@ -1,8 +1,8 @@
-# Intercom Global Mesh: Production Deployment & Hardening Guide (`{{PROJECT_NAME}}` v{{PROJECT_VERSION}})
+# Intercom Global Mesh: Production Deployment & Hardening Guide (`@advance/intercom-global` v2.0.0)
 
-> **Snapshot Date**: `{{CURRENT_DATE}}` · **Daemon URL**: `{{DAEMON_URL}}` (port `{{DAEMON_PORT}}`) · **Fallback Chain**: `{{FALLBACK_CHAIN}}`
+> **Snapshot Date**: `2026-11-25` · **Daemon URL**: `http://127.0.0.1:4150` (port `4150`) · **Fallback Chain**: `opencode -> claude -> hermes -> local-mesh (Zero-Qoder enforced)`
 
-This document defines the deployment architecture, OS tuning, process supervision, Prometheus observability, scheduled maintenance, and governance invariants for running the **Intercom Global Mesh** (`{{PROJECT_NAME}}` v{{PROJECT_VERSION}}) in high-throughput production developer environments.
+This document defines the deployment architecture, OS tuning, process supervision, Prometheus observability, scheduled maintenance, and governance invariants for running the **Intercom Global Mesh** (`@advance/intercom-global` v2.0.0) in high-throughput production developer environments.
 
 ---
 
@@ -50,7 +50,7 @@ To run Intercom Global as a resilient Windows Service that automatically restart
 ```cmd
 :: 1. Download and extract NSSM (https://nssm.cc)
 :: 2. Install the Windows Service
-nssm install IntercomGlobalMesh "C:\Program Files\nodejs\node.exe" "C:\Users\Suran\.intercom-global\bin\intercom.js daemon run --port {{DAEMON_PORT}}"
+nssm install IntercomGlobalMesh "C:\Program Files\nodejs\node.exe" "C:\Users\Suran\.intercom-global\bin\intercom.js daemon run --port 4150"
 
 :: 3. Configure service parameters
 nssm set IntercomGlobalMesh AppDirectory "C:\Users\Suran\.intercom-global"
@@ -77,7 +77,7 @@ After=network.target
 Type=simple
 User=suran
 WorkingDirectory=/home/suran/.intercom-global
-ExecStart=/usr/bin/node /home/suran/.intercom-global/bin/intercom.js daemon run --port {{DAEMON_PORT}}
+ExecStart=/usr/bin/node /home/suran/.intercom-global/bin/intercom.js daemon run --port 4150
 Restart=always
 RestartSec=5
 StandardOutput=append:/home/suran/.intercom-global/mesh/daemon.log
@@ -103,8 +103,8 @@ sudo systemctl status intercom-global
 The Intercom Global Mesh provides a native, zero-dependency Prometheus exporter adhering to Prometheus Text Format 0.0.4.
 
 ### 3.1 HTTP Endpoints
-- Exposition endpoint: `{{DAEMON_URL}}/metrics` (or `/api/intercom/metrics`)
-- CLI command: `{{CLI_COMMAND}} metrics` (or `{{CLI_COMMAND}} metrics --json`)
+- Exposition endpoint: `http://127.0.0.1:4150/metrics` (or `/api/intercom/metrics`)
+- CLI command: `intercom metrics` (or `intercom metrics --json`)
 
 ### 3.2 Metrics Catalog
 
@@ -130,7 +130,7 @@ scrape_configs:
     scrape_timeout: 5s
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['127.0.0.1:{{DAEMON_PORT}}']
+      - targets: ['127.0.0.1:4150']
         labels:
           environment: 'production'
           mesh_node: 'node-01'
@@ -147,13 +147,15 @@ scrape_configs:
 
 Over prolonged multi-agent sprints, thousands of ephemeral subagents create discrete message envelopes and temporary files. Routine compaction keeps disk scans fast and reclaims inodes.
 
+By default, `intercom compact` prunes both orphaned temp files and empty mailbox directories (`pruneEmpty: true`). Pass `--no-empty` only when you want to retain empty mailbox directories.
+
 ### 4.1 Automated Windows Task Scheduler Setup
 
 Set up an hourly compaction task in Windows:
 
 ```powershell
 $Action = New-ScheduledTaskAction -Execute "node.exe" `
-  -Argument "C:\Users\Suran\.intercom-global\bin\intercom.js compact --no-empty=false --temp-ttl=30000" `
+  -Argument "C:\Users\Suran\.intercom-global\bin\intercom.js compact --temp-ttl=30000" `
   -WorkingDirectory "C:\Users\Suran\.intercom-global"
 
 $Trigger = New-ScheduledTaskTrigger -Hourly
@@ -162,12 +164,13 @@ $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName "IntercomGlobalMailboxCompaction" `
   -Action $Action -Trigger $Trigger -Settings $Settings -Description "Hourly Intercom Mailbox Compaction"
 ```
+*(Add `--no-empty` to the argument list if you want to skip pruning empty mailbox directories.)*
 
 ### 4.2 Linux Crontab Setup
 
 ```bash
-# Run hourly mailbox compaction
-0 * * * * cd /home/suran/.intercom-global && /usr/bin/node bin/intercom.js compact --no-empty=false >> mesh/compaction.log 2>&1
+# Run hourly mailbox compaction (prunes orphaned temp files and empty mailboxes; pass --no-empty to keep empty directories)
+0 * * * * cd /home/suran/.intercom-global && /usr/bin/node bin/intercom.js compact --temp-ttl=30000 >> mesh/compaction.log 2>&1
 ```
 
 ---
@@ -177,12 +180,12 @@ Register-ScheduledTask -TaskName "IntercomGlobalMailboxCompaction" `
 Production multi-agent deployments must strictly comply with the following operational invariants:
 
 1. **Zero-Qoder Credit Protection**:
-   Under NO circumstance may `qoder` be invoked, triaged, configured as candidate, or listed in automatic fallback chains (`{{FALLBACK_CHAIN}}`). Any automated configuration specifying `harness: "qoder"` must be immediately rejected at pre-spawn validation; explicit free-tier Qoder calls (when permitted) are strictly constrained to `{{QODER_ALLOWED_MODELS}}` (default `{{DEFAULT_QODER_FREE_MODEL}}`).
+   Under NO circumstance may `qoder` be invoked, triaged, configured as candidate, or listed in automatic fallback chains (`opencode -> claude -> hermes -> local-mesh (Zero-Qoder enforced)`). Any automated configuration specifying `harness: "qoder"` must be immediately rejected at pre-spawn validation; explicit free-tier Qoder calls (when permitted) are strictly constrained to `qwen3.8-flash, qwen3.8, qoder/qwen3.8-flash, glm-5.3-flash, deepseek-flash, minimax-m3.1-flash` (default `qwen3.8-flash`).
 2. **Zero-Kill / Subagent Safety Rule**:
    Never kill running processes or subagents without confirmation. Subagents encountering errors or waiting for dependencies must be sent messages or resumed safely.
 3. **Antigravity Quota Safety Limits**:
    Always respect provider rate limits. Hold non-critical task launches when capacity drops below the **12% 5-hour limit** or **5% weekly limit**.
 4. **Live Registry Cache Hygiene**:
-   Keep `mesh/purified-live-cache.json` refreshed every `{{CACHE_TTL_MINUTES}}` minutes via non-blocking `{{CLI_COMMAND}} sync` with strict prompt-injection and shell-metacharacter purification.
+   Keep `mesh/purified-live-cache.json` refreshed every `15` minutes via non-blocking `intercom sync` with strict prompt-injection and shell-metacharacter purification.
 5. **Git Commit Discipline**:
    Atomic changes must not exceed **10 files per commit** and must use standard conventional commit scopes (`feat`, `fix`, `test`, `docs`, `refactor`).

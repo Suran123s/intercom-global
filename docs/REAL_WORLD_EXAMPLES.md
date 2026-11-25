@@ -1,10 +1,10 @@
 # 🌐 Real-World Multi-Agent Recipes & Harness Orchestration
 
-> **Package**: `{{PROJECT_NAME}}` (v{{PROJECT_VERSION}})  
-> **Snapshot Date**: `{{CURRENT_DATE}}` · **Last Live Sync**: `{{LAST_SYNCED_AT}}`  
+> **Package**: `@advance/intercom-global` (v2.0.0)  
+> **Snapshot Date**: `2026-11-25` · **Last Live Sync**: `2026-11-25T09:50:04.306Z`  
 > **Status**: Production Reference & Executable Recipes  
-> **Target Engines**: `{{SUPPORTED_HARNESSES}}` (active detected: `{{ACTIVE_HARNESSES}}`)  
-> **Default Models**: Primary `{{DEFAULT_MODEL}}` · Fallback `{{DEFAULT_FALLBACK_MODEL}}` · Claude `{{DEFAULT_CLAUDE_MODEL}}` · Jules `{{DEFAULT_JULES_MODEL}}`
+> **Target Engines**: `opencode, claude, hermes, pi, jules, codex, mcode, cursor, windsurf, vscode, antigravity, qoder, custom` (active detected: `opencode, claude, jules, codex, mcode, vscode`)  
+> **Default Models**: Primary `opencode/beam-free` · Fallback `opencode/cat-jam-free` · Claude `anthropic/claude-sonnet-4.6` · Jules `gemini-3.6-flash`
 
 This guide provides battle-tested recipes, command flows, and architectural scripts for coordinating heterogeneous AI agents across real-world terminal harnesses, Visual Studio Code extension hosts, and cloud VM execution clusters.
 
@@ -62,7 +62,7 @@ An external orchestrator running in a terminal or daemon needs to programmatical
 ### Architecture Flow:
 ```mermaid
 sequenceDiagram
-    participant Intercom as Intercom Daemon (:{{DAEMON_PORT}})
+    participant Intercom as Intercom Daemon (:4150)
     participant Extension as Roo-Code Extension Host
     participant Webview as React Chat Panel
     participant Disk as tasks/<id>/ui_messages.json
@@ -137,9 +137,9 @@ curl -N "http://127.0.0.1:4096/session/${SESSION_ID}/events"
 ## 4. 🛡️ Pattern 4: Explicit Free-Tier Qoder Worktree Isolation (Zero-Qoder Safe)
 
 ### The Real-World Scenario:
-> **Zero-Qoder Invariant**: `qoder` is barred from all automatic routing and default fallback chains (`{{FALLBACK_CHAIN}}`). Only invoke explicitly using verified free-tier models (`{{QODER_ALLOWED_MODELS}}`).
+> **Zero-Qoder Invariant**: `qoder` is barred from all automatic routing and default fallback chains (`opencode -> claude -> hermes -> local-mesh (Zero-Qoder enforced)`). Only invoke explicitly using verified free-tier models (`qwen3.8-flash, qwen3.8, qoder/qwen3.8-flash, glm-5.3-flash, deepseek-flash, minimax-m3.1-flash`).
 
-When explicitly dispatching an isolated defect investigation using `{{DEFAULT_QODER_FREE_MODEL}}` with full thinking effort, guarantee that it runs in an isolated Git worktree so uncommitted changes in your main workspace are never corrupted.
+When explicitly dispatching an isolated defect investigation using `qwen3.8-flash` with full thinking effort, guarantee that it runs in an isolated Git worktree so uncommitted changes in your main workspace are never corrupted.
 
 ### Configuration (`qoder-settings.json`):
 ```json
@@ -151,7 +151,7 @@ When explicitly dispatching an isolated defect investigation using `{{DEFAULT_QO
   },
   "model": {
     "preferences": {
-      "{{DEFAULT_QODER_FREE_MODEL}}": {
+      "qwen3.8-flash": {
         "reasoning": { "effort": "high" }
       }
     }
@@ -161,9 +161,9 @@ When explicitly dispatching an isolated defect investigation using `{{DEFAULT_QO
 
 ### Command Execution:
 ```bash
-# Spawns Qoder explicitly with verified free-tier model ({{DEFAULT_QODER_FREE_MODEL}}) in isolated Git worktree
+# Spawns Qoder explicitly with verified free-tier model (qwen3.8-flash) in isolated Git worktree
 qoder --worktree agent-cell-1 \
-  -m "{{DEFAULT_QODER_FREE_MODEL}}" \
+  -m "qwen3.8-flash" \
   --settings ./qoder-settings.json \
   --dangerously-skip-permissions \
   -p "Investigate memory leak in WebSocket connection pool, apply surgical fix, and verify test suite"
@@ -271,9 +271,9 @@ node examples/github-pr-review-swarm.js
 
 Monitor all multi-agent messages, broadcasts, and topic channels live in your browser:
 
-1. Start the Intercom HTTP & SSE Daemon (`{{DAEMON_URL}}`):
+1. Start the Intercom HTTP & SSE Daemon (`http://127.0.0.1:4150`):
    ```powershell
-   {{CLI_COMMAND}} daemon start
+   intercom daemon start
    ```
 2. Open `examples/live-mesh-dashboard.html` in your browser.
 3. Watch live message streams flow between agents in real time, with instant dispatch capabilities from the UI.
@@ -289,14 +289,14 @@ To prevent multiple agents working concurrently from clobbering each other's wor
 git worktree add ../feature-backend feature/backend-api
 git worktree add ../feature-security feature/security-audit
 
-# 2. Run {{DEFAULT_HARNESS}} in the backend worktree (model: {{DEFAULT_MODEL}})
-node src/bridges/session-bridge.js --agent {{DEFAULT_HARNESS}} -- "cd ../feature-backend; {{DEFAULT_HARNESS}}"
+# 2. Run opencode in the backend worktree (model: opencode/beam-free)
+node src/bridges/session-bridge.js --agent opencode -- "cd ../feature-backend; opencode"
 
 # 3. Run Hermes in the security worktree
 node src/bridges/session-bridge.js --agent hermes -- "cd ../feature-security; hermes chat"
 
-# 4. Notify active peers ({{ACTIVE_PEERS_LIST}})
-{{CLI_COMMAND}} send hermes "Backend branch ready for review ({{SAMPLE_TASK_ID}})" --from {{DEFAULT_HARNESS}}
+# 4. Notify active peers (antigravity, claude, opencode)
+intercom send hermes "Backend branch ready for review (1795604817027_2_28c8d57e-1b2c-43b1-97f4-6c70de4c7328)" --from opencode
 ```
 
 ---
