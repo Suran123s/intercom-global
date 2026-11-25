@@ -17,15 +17,18 @@ const path = require('path');
 const os = require('os');
 
 const http = require('http');
-const { MetricsRegistry, MetricsCollector, metrics } = require('../src/core/metrics');
+const { MetricsRegistry } = require('../src/core/metrics');
 const { createServer } = require('../src/core/server');
+const { createIsolatedMeshEnv, closeServer } = require('./helpers/isolated-env');
 
 describe('Milestone 4 — #94: Prometheus Metrics Exporter Suite', () => {
+  let iso;
   let registry;
   let tempMeshDir;
 
   beforeEach(() => {
-    tempMeshDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metrics-test-mesh-'));
+    iso = createIsolatedMeshEnv('intercom-metrics-');
+    tempMeshDir = iso.meshDir;
     fs.mkdirSync(path.join(tempMeshDir, 'inbox'), { recursive: true });
     fs.mkdirSync(path.join(tempMeshDir, 'locks'), { recursive: true });
     fs.mkdirSync(path.join(tempMeshDir, 'dlq'), { recursive: true });
@@ -33,9 +36,7 @@ describe('Milestone 4 — #94: Prometheus Metrics Exporter Suite', () => {
   });
 
   afterEach(() => {
-    try {
-      fs.rmSync(tempMeshDir, { recursive: true, force: true });
-    } catch {}
+    iso.cleanup();
   });
 
   test('Standard Prometheus Exposition Format: Every metric has # HELP and # TYPE declarations', () => {
@@ -124,7 +125,7 @@ describe('Milestone 4 — #94: Prometheus Metrics Exporter Suite', () => {
         assert.ok(body.endsWith('\n'));
       }
     } finally {
-      await new Promise(resolve => server.close(resolve));
+      await closeServer(server);
     }
   });
 });

@@ -3,13 +3,6 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { MESH_DIR } = require('../src/config');
-
-const TEST_DLQ_DIR = path.join(MESH_DIR, 'dlq_cas_test');
-const TEST_DLQ_FILE = path.join(MESH_DIR, 'dlq_cas_test.json');
-process.env.INTERCOM_DLQ_DIR = TEST_DLQ_DIR;
-process.env.INTERCOM_DLQ_FILE = TEST_DLQ_FILE;
-
 const {
   getDlq,
   enqueueDlq,
@@ -17,17 +10,19 @@ const {
   getDlqMessage,
   deleteDlqMessage,
   migrateLegacyDlqSync,
-  withDlqLockSync,
-  DLQ_DIR,
-  DLQ_FILE
+  getDlqDir,
+  getDlqFile
 } = require('../src/core/dlq');
 const { safeWriteJson } = require('../src/core/mesh');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('#41 & #43: DLQ writes discrete files with atomic CAS locks and O(1) lookup', async () => {
+test('#41 & #43: DLQ writes discrete files with atomic CAS locks and O(1) lookup', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-dlq-cas-1-');
   clearDlq();
   assert.strictEqual(getDlq().length, 0);
 
-  assert.ok(fs.existsSync(DLQ_DIR), `DLQ_DIR must exist: ${DLQ_DIR}`);
+  const dlqDir = getDlqDir();
+  assert.ok(fs.existsSync(dlqDir), `DLQ_DIR must exist: ${dlqDir}`);
 
   // Enqueue 5 failed messages sequentially
   for (let i = 0; i < 5; i++) {
@@ -47,7 +42,7 @@ test('#41 & #43: DLQ writes discrete files with atomic CAS locks and O(1) lookup
 
   // Verify discrete files on disk
   for (let i = 0; i < 5; i++) {
-    const filePath = path.join(DLQ_DIR, `fail-seq-${i}.json`);
+    const filePath = path.join(dlqDir, `fail-seq-${i}.json`);
     assert.ok(fs.existsSync(filePath), `Discrete DLQ file must exist: ${filePath}`);
     const found = getDlqMessage(`fail-seq-${i}`);
     assert.ok(found, `Must find message fail-seq-${i}`);
@@ -63,11 +58,12 @@ test('#41 & #43: DLQ writes discrete files with atomic CAS locks and O(1) lookup
   // Clear all
   clearDlq();
   assert.strictEqual(getDlq().length, 0);
-  const remainingFiles = fs.readdirSync(DLQ_DIR).filter(f => f.endsWith('.json'));
+  const remainingFiles = fs.readdirSync(dlqDir).filter(f => f.endsWith('.json'));
   assert.strictEqual(remainingFiles.length, 0);
 });
 
-test('#41: Concurrent worker enqueueing under CAS directory lock guarantees zero loss', async () => {
+test('#41: Concurrent worker enqueueing under CAS directory lock guarantees zero loss', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-dlq-cas-2-');
   clearDlq();
 
   const concurrency = 15;
@@ -97,15 +93,19 @@ test('#41: Concurrent worker enqueueing under CAS directory lock guarantees zero
   assert.strictEqual(getDlq().length, 0);
 });
 
-test('#43: Backward compatibility & legacy monolithic migration', () => {
+test('#43: Backward compatibility & legacy monolithic migration', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-dlq-cas-3-');
   clearDlq();
+
+  const dlqDir = getDlqDir();
+  const dlqFile = getDlqFile();
 
   // Create legacy monolithic file directly
   const legacyItems = [
     { id: 'legacy-msg-1', to: 'agent-1', from: 'operator', enqueuedAt: '2026-10-31T01:00:00.000Z' },
     { id: 'legacy-msg-2', to: 'agent-2', from: 'operator', enqueuedAt: '2026-10-31T02:00:00.000Z' }
   ];
-  safeWriteJson(DLQ_FILE, legacyItems);
+  safeWriteJson(dlqFile, legacyItems);
 
   // Reading getDlq() includes legacy items before migration
   const itemsBefore = getDlq();
@@ -115,8 +115,8 @@ test('#43: Backward compatibility & legacy monolithic migration', () => {
   const migrated = migrateLegacyDlqSync();
   assert.strictEqual(migrated, 2);
 
-  assert.ok(fs.existsSync(path.join(DLQ_DIR, 'legacy-msg-1.json')));
-  assert.ok(fs.existsSync(path.join(DLQ_DIR, 'legacy-msg-2.json')));
+  assert.ok(fs.existsSync(path.join(dlqDir, 'legacy-msg-1.json')));
+  assert.ok(fs.existsSync(path.join(dlqDir, 'legacy-msg-2.json')));
 
   // Lookup individual legacy message
   const msg1 = getDlqMessage('legacy-msg-1');
@@ -125,11 +125,4 @@ test('#43: Backward compatibility & legacy monolithic migration', () => {
 
   clearDlq();
   assert.strictEqual(getDlq().length, 0);
-
-  try {
-    if (fs.existsSync(TEST_DLQ_DIR)) fs.rmSync(TEST_DLQ_DIR, { recursive: true, force: true });
-    if (fs.existsSync(TEST_DLQ_FILE)) fs.unlinkSync(TEST_DLQ_FILE);
-  } catch {}
-  delete process.env.INTERCOM_DLQ_DIR;
-  delete process.env.INTERCOM_DLQ_FILE;
 });

@@ -3,11 +3,12 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const fs = require('fs');
-const path = require('path');
 const { sendChannelMessage, readChannel, listChannels, broadcastToAgents, getChannelFile } = require('../src/core/mesh');
-const { createServer, dispatchMessage } = require('../src/core/server');
+const { createServer } = require('../src/core/server');
+const { withIsolatedMeshEnv, listenEphemeral, closeServer, waitForCondition } = require('./helpers/isolated-env');
 
-test('sendChannelMessage and readChannel perform atomic pub-sub', () => {
+test('sendChannelMessage and readChannel perform atomic pub-sub', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-channels-pubsub-');
   const channelName = 'test-room-' + Date.now();
   const file = getChannelFile(channelName);
 
@@ -28,17 +29,14 @@ test('sendChannelMessage and readChannel perform atomic pub-sub', () => {
   assert.ok(found);
   assert.strictEqual(found.total, 2);
 
-  if (fs.existsSync(file)) {
-    fs.unlinkSync(file);
-  }
+  assert.ok(fs.existsSync(file));
 });
 
-test('getChannelFile prevents directory traversal', () => {
-  // Traversal attempt with ../
+test('getChannelFile prevents directory traversal', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-channels-trav-');
   const file1 = getChannelFile('../../secret');
   assert.ok(!file1.includes('..'));
 
-  // Traversal attempt with slashes
   const file2 = getChannelFile('foo/bar');
   assert.ok(!file2.includes('foo/bar'));
 });
@@ -58,15 +56,20 @@ test('broadcastToAgents dispatches to multiple recipients simultaneously', async
   assert.strictEqual(dispatched[2].to, 'agent3');
 });
 
-test('HTTP server SSE streaming and broadcast endpoints', async () => {
+test('HTTP server SSE streaming and broadcast endpoints', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-channels-http-');
   const server = createServer();
-  await new Promise(r => server.listen(0, '127.0.0.1', r));
-  const port = server.address().port;
+  const port = await listenEphemeral(server);
   const baseUrl = `http://127.0.0.1:${port}`;
+  let sseReq = null;
+  t.after(async () => {
+    try { sseReq?.destroy(); } catch {}
+    await closeServer(server);
+  });
 
   // 1. Test SSE Stream
   let sseReceivedConnect = false;
-  const sseReq = http.get(`${baseUrl}/api/intercom/events`, (res) => {
+  sseReq = http.get(`${baseUrl}/api/intercom/events`, (res) => {
     assert.strictEqual(res.statusCode, 200);
     assert.strictEqual(res.headers['content-type'], 'text/event-stream');
     res.on('data', (chunk) => {
@@ -77,7 +80,7 @@ test('HTTP server SSE streaming and broadcast endpoints', async () => {
     });
   });
 
-  await new Promise(r => setTimeout(r, 100));
+  await waitForCondition(() => sseReceivedConnect, { timeoutMs: 2000, intervalMs: 15, label: 'SSE connected' });
   assert.strictEqual(sseReceivedConnect, true);
 
   // 2. Test HTTP Broadcast
@@ -103,11 +106,4 @@ test('HTTP server SSE streaming and broadcast endpoints', async () => {
   assert.ok(Array.isArray(chanReadRes));
   assert.strictEqual(chanReadRes.length, 1);
   assert.strictEqual(chanReadRes[0].message, 'All tests green');
-
-  // Clean up
-  sseReq.destroy();
-  if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
-  await new Promise(r => server.close(r));
-  const chanFile = getChannelFile('qa-room');
-  if (fs.existsSync(chanFile)) fs.unlinkSync(chanFile);
 });

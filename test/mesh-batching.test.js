@@ -16,8 +16,10 @@ const {
   getInboxDir
 } = require('../src/core/mesh');
 const { MessageEnvelope } = require('../src/core/message');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('#40: writeMessagesBatch writes multiple discrete envelopes atomically under single directory lock', async () => {
+test('#40: writeMessagesBatch writes multiple discrete envelopes atomically under single directory lock', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-batch-1-');
   const agent = 'batch-agent-' + Date.now();
   await clearInbox(agent);
 
@@ -52,7 +54,8 @@ test('#40: writeMessagesBatch writes multiple discrete envelopes atomically unde
   await clearInbox(agent);
 });
 
-test('#40: writeMessagesBatchSync executes synchronously and creates discrete valid JSON files', () => {
+test('#40: writeMessagesBatchSync executes synchronously and creates discrete valid JSON files', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-batch-2-');
   const agent = 'sync-batch-agent-' + Date.now();
   const batchSize = 10;
   const envelopes = [];
@@ -80,7 +83,8 @@ test('#40: writeMessagesBatchSync executes synchronously and creates discrete va
   }
 });
 
-test('#40: High-throughput stress batch write (50 messages) without corruption', async () => {
+test('#40: High-throughput stress batch write (50 messages) without corruption', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-batch-3-');
   const agent = 'stress-batch-' + Date.now();
   const count = 50;
   const envelopes = [];
@@ -133,7 +137,8 @@ test('#44: LruCache enforces maximum entry bounds and updates recency on access'
   assert.strictEqual(cache.getStats().misses, 1);
 });
 
-test('#44: Global Mesh cache statistics and reset operations', () => {
+test('#44: Global Mesh cache statistics and reset operations', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-batch-4-');
   clearMeshCache();
   const statsBefore = getMeshCacheStats();
   assert.strictEqual(statsBefore.inboxDirCache.size, 0);

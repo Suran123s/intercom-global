@@ -2,7 +2,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
-const path = require('path');
 const {
   sendChannelMessage,
   readChannel,
@@ -10,8 +9,10 @@ const {
   clearChannel,
   getChannelFile
 } = require('../src/core/mesh');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('#42: sendChannelMessage executes thread-safe writes with directory CAS locks', async () => {
+test('#42: sendChannelMessage executes thread-safe writes with directory CAS locks', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-chan-cas-');
   const chanName = `stress-chan-${Date.now()}`;
   clearChannel(chanName);
 
@@ -37,16 +38,15 @@ test('#42: sendChannelMessage executes thread-safe writes with directory CAS loc
   assert.ok(chanObj, `Channel #${chanName} must be listed`);
   assert.strictEqual(chanObj.total, concurrency);
 
-  // Clean up
   clearChannel(chanName);
   assert.strictEqual(readChannel(chanName).length, 0);
 });
 
-test('#42: Channel name normalization (#prefix vs plain) and JSON integrity', () => {
+test('#42: Channel name normalization (#prefix vs plain) and JSON integrity', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-chan-norm-');
   const baseName = `norm-chan-${Date.now()}`;
   clearChannel(baseName);
 
-  // Send with and without # prefix
   const res1 = sendChannelMessage(baseName, 'agent-1', 'Message 1');
   assert.strictEqual(res1.channel, `#${baseName}`);
 
@@ -58,7 +58,6 @@ test('#42: Channel name normalization (#prefix vs plain) and JSON integrity', ()
   assert.strictEqual(msgs[0].message, 'Message 1');
   assert.strictEqual(msgs[1].message, 'Message 2');
 
-  // Verify file on disk is valid JSON
   const file = getChannelFile(baseName);
   assert.ok(fs.existsSync(file));
   const raw = fs.readFileSync(file, 'utf8');

@@ -14,20 +14,25 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-const { spawnSync } = require('child_process');
 
 const { dispatchMessage } = require('../src/core/server');
 const { wakeCliAgent } = require('../src/controllers/autowake');
-const { listActiveMailboxes, readInbox, clearInbox, getInboxDir } = require('../src/core/mesh');
+const { listActiveMailboxes, getInboxDir } = require('../src/core/mesh');
 const { startDaemon, stopDaemon } = require('../src/core/daemon-manager');
-const { MESH_DIR } = require('../src/config');
+const { createIsolatedMeshEnv, getFreePort } = require('./helpers/isolated-env');
 
 describe('Discrete Mailbox Migration Integration Suite', () => {
-  const recipient = `discrete-test-${Date.now()}`;
+  let iso;
+  let recipient;
 
-  afterEach(async () => {
-    try { await clearInbox(recipient); } catch {}
+  beforeEach(() => {
+    iso = createIsolatedMeshEnv('intercom-discrete-int-');
+    recipient = `discrete-test-${Date.now()}`;
+  });
+
+  afterEach(() => {
+    try { stopDaemon(); } catch {}
+    iso.cleanup();
   });
 
   test('server.js dispatchMessage writes discrete message file into recipient inbox directory', async () => {
@@ -55,8 +60,6 @@ describe('Discrete Mailbox Migration Integration Suite', () => {
     const inboxDir = getInboxDir(wakeTarget);
     const files = fs.readdirSync(inboxDir).filter((f) => f.endsWith('.json'));
     assert.ok(files.length >= 1, 'wakeCliAgent must create discrete message file');
-
-    try { await clearInbox(wakeTarget); } catch {}
   });
 
   test('listActiveMailboxes is asynchronous and returns array of mailbox profiles', async () => {
@@ -68,8 +71,8 @@ describe('Discrete Mailbox Migration Integration Suite', () => {
     }
   });
 
-  test('daemon-manager startDaemon aligns with cli.js without unknown command error', () => {
-    const daemonPort = 49999;
+  test('daemon-manager startDaemon aligns with cli.js without unknown command error', async () => {
+    const daemonPort = await getFreePort();
     const startRes = startDaemon(daemonPort);
 
     assert.ok(
@@ -77,7 +80,6 @@ describe('Discrete Mailbox Migration Integration Suite', () => {
       'Daemon must launch cleanly'
     );
 
-    // Stop daemon
     const stopRes = stopDaemon();
     assert.ok(stopRes.status === 'stopped' || stopRes.status === 'not_running');
   });

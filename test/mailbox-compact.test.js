@@ -11,25 +11,29 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { spawnSync } = require('child_process');
 
 const {
   writeMessage,
   readInbox,
   getInboxDir,
-  compactMailboxes,
-  clearInbox
+  compactMailboxes
 } = require('../src/core/mesh');
-const { MESH_DIR } = require('../src/config');
+const { createIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 describe('Mailbox Compaction & Ephemeral Pruning Suite', () => {
-  const testAgent = `test-compact-${Date.now()}`;
-  const ephemeralAgent = `ephemeral-subagent-${Date.now()}`;
+  let iso;
+  let testAgent;
+  let ephemeralAgent;
 
-  afterEach(async () => {
-    try { await clearInbox(testAgent); } catch {}
-    try { await clearInbox(ephemeralAgent); } catch {}
+  beforeEach(() => {
+    iso = createIsolatedMeshEnv('intercom-compact-');
+    testAgent = `test-compact-${Date.now()}`;
+    ephemeralAgent = `ephemeral-subagent-${Date.now()}`;
+  });
+
+  afterEach(() => {
+    iso.cleanup();
   });
 
   test('compactMailboxes prunes empty ephemeral inbox directories', async () => {
@@ -51,7 +55,7 @@ describe('Mailbox Compaction & Ephemeral Pruning Suite', () => {
     const inboxBefore = await readInbox(testAgent);
     assert.equal(inboxBefore.length, 1);
 
-    const result = await compactMailboxes({ dryRun: false });
+    await compactMailboxes({ dryRun: false });
     const inboxAfter = await readInbox(testAgent);
 
     assert.equal(inboxAfter.length, 1, 'Active unread messages must not be pruned');
@@ -64,16 +68,14 @@ describe('Mailbox Compaction & Ephemeral Pruning Suite', () => {
     const result = await compactMailboxes({ dryRun: true, removeEmpty: true });
     assert.equal(result.dryRun, true);
     assert.ok(fs.existsSync(dryDir), 'Dry-run must not delete directory from disk');
-
-    // Clean up
-    try { fs.rmdirSync(dryDir); } catch {}
   });
 
   test('CLI intercom compact runs cleanly and outputs structured summary', () => {
     const cliPath = path.join(__dirname, '../bin/intercom.js');
     const child = spawnSync(process.execPath, [cliPath, 'compact', '--dry-run'], {
       encoding: 'utf8',
-      timeout: 15000
+      timeout: 15000,
+      env: iso.env
     });
 
     assert.equal(child.status, 0, `CLI compact must exit with 0 (stderr: ${child.stderr})`);

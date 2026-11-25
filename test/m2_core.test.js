@@ -36,7 +36,7 @@ const {
 } = require('../src/core/interrupter');
 const { IntercomDaemon } = require('../src/core/daemon');
 const { parseArgs } = require('../src/cli');
-const { MESH_DIR } = require('../src/config');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 // --- Group 1: Standardized MessageEnvelope & Schema Validation ---
 test('MessageEnvelope: valid envelope creation and JSON serialization', () => {
@@ -150,7 +150,8 @@ test('Security: sanitizeAgentName safely neutralizes identifiers', () => {
 });
 
 // --- Group 3: Zero-Loss Discrete Atomic File-Mesh ---
-test('File-Mesh: discrete atomic message delivery and chronological retrieval', async () => {
+test('File-Mesh: discrete atomic message delivery and chronological retrieval', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-m2-mesh-');
   const agent = 'test_mesh_agent_' + Date.now();
   await clearInbox(agent);
 
@@ -207,7 +208,8 @@ test('File-Mesh: discrete atomic message delivery and chronological retrieval', 
   await clearInbox(agent);
 });
 
-test('File-Mesh: concurrent writes maintain 100% data integrity without drop or race', async () => {
+test('File-Mesh: concurrent writes maintain 100% data integrity without drop or race', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-m2-conc-');
   const agent = 'test_concurrency_agent_' + Date.now();
   await clearInbox(agent);
 
@@ -241,7 +243,8 @@ test('File-Mesh: concurrent writes maintain 100% data integrity without drop or 
 });
 
 // --- Group 4: Deadlock-Free CAS Advisory Locking ---
-test('CAS Locking: acquire, mutual exclusion, release, and 3-second stale recovery', async () => {
+test('CAS Locking: acquire, mutual exclusion, release, and 3-second stale recovery', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-m2-lock-');
   const resource = 'test_res_' + Date.now();
 
   // 1. Acquire lock
@@ -267,7 +270,8 @@ test('CAS Locking: acquire, mutual exclusion, release, and 3-second stale recove
 });
 
 // --- Group 5: Agent State Card Registry ---
-test('Registry: register, get state, touch heartbeat, and list active agents', async () => {
+test('Registry: register, get state, touch heartbeat, and list active agents', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-m2-reg-');
   const agentName = 'agent_reg_test_' + Date.now();
 
   const card = await registerAgent({
@@ -305,7 +309,8 @@ test('Registry: register, get state, touch heartbeat, and list active agents', a
 });
 
 // --- Group 6: 3-Tier Interruption Engine ---
-test('Interrupter: Safe-Path interrupt envelope and atomic flag file', async () => {
+test('Interrupter: Safe-Path interrupt envelope and atomic flag file', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-m2-int-');
   const targetAgent = 'interrupt_target_' + Date.now();
   await clearInbox(targetAgent);
 
@@ -336,10 +341,11 @@ test('Interrupter: Safe-Path interrupt envelope and atomic flag file', async () 
 });
 
 // --- Group 7: High-Speed Loopback Daemon ---
-test('Daemon: starts, responds to health check, send Fast/Safe path, and stops cleanly', async () => {
-  const testPort = 4195; // Isolated test port
-  const daemon = new IntercomDaemon({ port: testPort });
+test('Daemon: starts, responds to health check, send Fast/Safe path, and stops cleanly', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-m2-daemon-');
+  const daemon = new IntercomDaemon({ port: 0 });
   await daemon.start();
+  const testPort = daemon.port;
 
   try {
     // 1. Health check

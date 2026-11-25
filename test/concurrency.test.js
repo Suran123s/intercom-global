@@ -14,8 +14,10 @@ const {
   clearInbox,
   getInboxDir
 } = require('../src/core/mesh');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('Tier 2 Concurrency: 12 simultaneous writers dispatching 60 messages to a single recipient mailbox', async () => {
+test('Tier 2 Concurrency: 12 simultaneous writers dispatching 60 messages to a single recipient mailbox', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-concurrency-');
   const recipient = 'stress_recipient_' + Date.now();
   await clearInbox(recipient);
 
@@ -100,7 +102,8 @@ test('Tier 2 Concurrency: 12 simultaneous writers dispatching 60 messages to a s
   await clearInbox(recipient);
 });
 
-test('Tier 2 Concurrency: CAS Advisory directory locking under heavy multi-process contention', async () => {
+test('Tier 2 Concurrency: CAS Advisory directory locking under heavy multi-process contention', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-concurrency-cas-');
   const resourceName = 'shared_res_' + Date.now();
   const workerCount = 8;
   const executionLog = [];
