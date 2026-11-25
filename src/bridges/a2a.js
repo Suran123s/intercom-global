@@ -1,11 +1,35 @@
 ﻿// src/bridges/a2a.js - Agent2Agent (A2A) Protocol Bridge & Agent Card Provider
 const { listActiveMailboxes } = require('../core/mesh');
-const { PORT } = require('../config');
+const { getPort } = require('../config');
+
+const MAX_A2A_TASKS = 1000;
+const A2A_TASK_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 const tasks = new Map();
 
-async function generateAgentCard(host = `http://localhost:${PORT}`) {
-  const mailboxes = await listActiveMailboxes();
+function pruneAndStoreTask(taskId, taskRecord) {
+  const now = Date.now();
+  for (const [id, entry] of tasks.entries()) {
+    if (entry.expiresAt <= now) {
+      tasks.delete(id);
+    }
+  }
+  if (tasks.has(taskId)) {
+    tasks.delete(taskId);
+  } else if (tasks.size >= MAX_A2A_TASKS) {
+    const oldestKey = tasks.keys().next().value;
+    if (oldestKey !== undefined) {
+      tasks.delete(oldestKey);
+    }
+  }
+  tasks.set(taskId, {
+    task: taskRecord,
+    expiresAt: now + A2A_TASK_TTL_MS
+  });
+}
+
+async function generateAgentCard(host = `http://localhost:${getPort()}`) {
+  const mailboxes = await listActiveMailboxes({ excludeEphemeral: true });
   const skills = [
     {
       id: "universal-mesh-relay",
@@ -64,31 +88,90 @@ async function generateAgentCard(host = `http://localhost:${PORT}`) {
   };
 }
 
-function processA2AMessage(payload, dispatchFn) {
-  const taskId = "task-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
-  let from = "a2a-client";
-  let to = "suran";
-  let text = "";
+function extractA2AText(body) {
+  if (typeof body.text === 'string' && body.text.trim()) {
+    return body.text;
+  }
+  if (typeof body.prompt === 'string' && body.prompt.trim()) {
+    return body.prompt;
+  }
+  if (typeof body.message === 'string' && body.message.trim()) {
+    return body.message;
+  }
+  if (body.message && typeof body.message === 'object' && !Array.isArray(body.message)) {
+    const msg = body.message;
+    if (msg.content && typeof msg.content === 'object' && typeof msg.content.text === 'string' && msg.content.text.trim()) {
+      return msg.content.text;
+    }
+    if (typeof msg.content === 'string' && msg.content.trim()) {
+      return msg.content;
+    }
+    if (typeof msg.text === 'string' && msg.text.trim()) {
+      return msg.text;
+    }
+    if (Array.isArray(msg.parts)) {
+      const partTexts = msg.parts
+        .map((part) => {
+          if (typeof part === 'string') return part;
+          if (part && typeof part === 'object') {
+            if (typeof part.text === 'string') return part.text;
+            if (typeof part.content === 'string') return part.content;
+          }
+          return '';
+        })
+        .filter(Boolean);
+      if (partTexts.length > 0) {
+        return partTexts.join('\n');
+      }
+    }
+    if (msg.content !== undefined) {
+      return JSON.stringify(msg.content);
+    }
+    if (Object.keys(msg).length > 0) {
+      return JSON.stringify(msg);
+    }
+  }
+  return '';
+}
 
-  // Support both standard A2A schema and simplified schema
-  if (payload.message && typeof payload.message === "object") {
-    text = payload.message.content?.text || payload.message.text || JSON.stringify(payload.message.content || payload.message);
-    if (payload.recipient) to = payload.recipient;
-    if (payload.sender) from = payload.sender;
-  } else if (payload.text || payload.prompt) {
-    text = payload.text || payload.prompt;
-    if (payload.to) to = payload.to;
-    if (payload.from) from = payload.from;
-  } else if (payload.from && payload.to && payload.message) {
-    from = payload.from;
-    to = payload.to;
-    text = typeof payload.message === "string" ? payload.message : JSON.stringify(payload.message);
+function processA2AMessage(payload, dispatchFn) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error("Invalid A2A request payload: payload must be a non-null JSON object");
+  }
+  if (typeof dispatchFn !== 'function') {
+    throw new Error("Invalid A2A dispatch handler");
   }
 
-  if (!text) {
+  // Normalize JSON-RPC params wrapper and flat schemas uniformly
+  const body = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
+    ? { ...payload, ...payload.params }
+    : payload;
+
+  const rawFrom = body.sender
+    ?? body.from
+    ?? body.message?.sender
+    ?? body.metadata?.sender
+    ?? 'a2a-client';
+  const from = (typeof rawFrom === 'string' && rawFrom.trim()) ? rawFrom.trim() : 'a2a-client';
+
+  const rawTo = body.recipient
+    ?? body.to
+    ?? body.target
+    ?? body.message?.recipient
+    ?? body.metadata?.recipient
+    ?? process.env.INTERCOM_DEFAULT_RECIPIENT;
+  const to = (typeof rawTo === 'string') ? rawTo.trim() : '';
+
+  if (!to) {
+    throw new Error("Invalid A2A request payload: missing target recipient ('recipient' or 'to')");
+  }
+
+  const text = extractA2AText(body);
+  if (!text || (typeof text === 'string' && !text.trim())) {
     throw new Error("Invalid A2A request payload: missing message text content");
   }
 
+  const taskId = "task-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
   const dispatched = dispatchFn(from, to, text);
 
   const taskRecord = {
@@ -110,12 +193,21 @@ function processA2AMessage(payload, dispatchFn) {
     }
   };
 
-  tasks.set(taskId, taskRecord);
+  pruneAndStoreTask(taskId, taskRecord);
   return taskRecord;
 }
 
 function getA2ATask(taskId) {
-  return tasks.get(taskId) || null;
+  if (!taskId || !tasks.has(taskId)) return null;
+  const entry = tasks.get(taskId);
+  if (entry.expiresAt <= Date.now()) {
+    tasks.delete(taskId);
+    return null;
+  }
+  // Refresh LRU recency
+  tasks.delete(taskId);
+  tasks.set(taskId, entry);
+  return entry.task;
 }
 
 module.exports = {

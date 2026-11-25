@@ -1,4 +1,6 @@
 // src/mcp/server.js - Model Context Protocol (MCP) Stdio Server for Intercom Tools
+const fs = require('fs');
+const util = require('util');
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontextprotocol/sdk/types.js");
@@ -10,16 +12,18 @@ const {
   ackMessage,
   listActiveMailboxes,
   waitForUnread,
-  validateAgentName
+  clearInbox,
+  getInboxFile,
+  sanitizeName,
+  withLock,
+  atomicWriteFile
 } = require('../core/mesh');
 const {
-  registerAgent,
   getAgentState,
-  listActiveAgents,
-  touchHeartbeat
+  listActiveAgents
 } = require('../core/registry');
 const { interruptAgent } = require('../core/interrupter');
-const { PORT } = require('../config');
+const { getPort, getMeshDir } = require('../config');
 
 const MCP_TOOLS = [
     {
@@ -95,7 +99,8 @@ const MCP_TOOLS = [
         type: "object",
         properties: {
           role: { type: "string", description: "Filter by agent role (worker, reviewer, auditor, etc.)" },
-          ide: { type: "string", description: "Filter by IDE environment" }
+          ide: { type: "string", description: "Filter by IDE environment" },
+          include_ephemeral: { type: "boolean", description: "Include ephemeral test/temporary mailboxes (default: false)" }
         }
       }
     },
@@ -120,6 +125,7 @@ const MCP_TOOLS = [
         type: "object",
         properties: {
           targetAgent: { type: "string" },
+          target: { type: "string", description: "Alias for targetAgent" },
           reason: { type: "string" }
         },
         required: ["targetAgent"]
@@ -164,16 +170,22 @@ const MCP_TOOLS = [
       description: "List all known peers (legacy alias)",
       inputSchema: {
         type: "object",
-        properties: {}
+        properties: {
+          include_ephemeral: { type: "boolean", description: "Include ephemeral test/temporary mailboxes (default: false)" }
+        }
       }
     }
 ];
 
 function startMcpServer() {
   // CRITICAL INVARIANT: Isolate stdout strictly for MCP JSON-RPC protocol
-  const originalLog = console.log;
-  console.log = (...args) => console.error(...args);
-  console.info = (...args) => console.error(...args);
+  const redirectToStderr = (...logArgs) => console.error(...logArgs);
+  console.log = redirectToStderr;
+  console.info = redirectToStderr;
+  console.debug = redirectToStderr;
+  console.dir = (obj, opts) => console.error(util.inspect(obj, opts));
+  console.table = redirectToStderr;
+  console.trace = redirectToStderr;
 
   const server = new Server(
     { name: "intercom-global", version: "2.0.0" },
@@ -185,7 +197,8 @@ function startMcpServer() {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
+    const { name } = request.params;
+    const args = request.params.arguments || {};
 
     try {
       if (name === "send_message" || name === "intercom_send") {
@@ -207,17 +220,16 @@ function startMcpServer() {
           parentId
         });
 
-        // Fast-Path attempt via daemon
-        let deliveredFastPath = false;
+        // Fast-Path attempt via daemon with strict timeout
         try {
-          const res = await fetch(`http://127.0.0.1:${PORT || 4150}/api/intercom/send`, {
+          const res = await fetch(`http://127.0.0.1:${getPort()}/api/intercom/send`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(envelope.toJSON())
+            body: JSON.stringify(envelope.toJSON()),
+            signal: AbortSignal.timeout(1500)
           });
           if (res.ok) {
             const data = await res.json();
-            deliveredFastPath = true;
             if (name === "intercom_send") {
               return {
                 content: [{
@@ -264,15 +276,47 @@ function startMcpServer() {
 
       if (name === "receive_messages") {
         const agent = args.agent;
-        const limit = args.limit || 50;
+        const limit = (typeof args.limit === 'number' && args.limit > 0) ? Math.floor(args.limit) : 50;
         const shouldAck = args.ack === true;
 
-        const envelopes = await readInbox(agent);
+        const envelopes = await readInbox(agent, { limit });
         const sliced = envelopes.slice(0, limit);
 
-        if (shouldAck) {
+        if (shouldAck && sliced.length > 0) {
+          const legacyAckIds = new Set();
           for (const env of sliced) {
-            await ackMessage(agent, env.id);
+            let acked = false;
+            if (env && env.id) {
+              acked = await ackMessage(agent, String(env.id));
+            }
+            if (!acked && env && env.id !== undefined && env.id !== null) {
+              legacyAckIds.add(String(env.id));
+            }
+          }
+
+          if (legacyAckIds.size > 0) {
+            const meshDir = getMeshDir();
+            const legacyFile = getInboxFile(agent, meshDir);
+            if (fs.existsSync(legacyFile)) {
+              await withLock(`legacy_inbox_${sanitizeName(agent)}`, async () => {
+                try {
+                  const raw = await fs.promises.readFile(legacyFile, 'utf8');
+                  const list = JSON.parse(raw);
+                  if (Array.isArray(list)) {
+                    let changed = false;
+                    for (const item of list) {
+                      if (item && item.id !== undefined && legacyAckIds.has(String(item.id)) && !item.read) {
+                        item.read = true;
+                        changed = true;
+                      }
+                    }
+                    if (changed) {
+                      await atomicWriteFile(legacyFile, JSON.stringify(list, null, 2));
+                    }
+                  }
+                } catch {}
+              }, { meshDir });
+            }
           }
         }
 
@@ -281,7 +325,7 @@ function startMcpServer() {
             type: "text",
             text: JSON.stringify({
               count: sliced.length,
-              messages: sliced.map(e => (e.toJSON ? e.toJSON() : e))
+              messages: sliced.map(e => (e && typeof e.toJSON === 'function' ? e.toJSON() : e))
             }, null, 2)
           }]
         };
@@ -346,7 +390,7 @@ function startMcpServer() {
         return {
           content: [{
             type: "text",
-            text: JSON.stringify(msgs.map(m => m.toJSON ? m.toJSON() : m), null, 2)
+            text: JSON.stringify(msgs.map(m => (m && typeof m.toJSON === 'function' ? m.toJSON() : m)), null, 2)
           }]
         };
       }
@@ -367,7 +411,7 @@ function startMcpServer() {
         const forAgent = args.forAgent || args.agent;
         const envelopes = await readInbox(forAgent);
         const formatted = envelopes.map(e => {
-          const raw = e.toJSON ? e.toJSON() : e;
+          const raw = (e && typeof e.toJSON === 'function') ? e.toJSON() : e;
           return {
             ...raw,
             message: (raw.payload && raw.payload.message) || raw.message || ''
@@ -383,7 +427,6 @@ function startMcpServer() {
 
       if (name === "intercom_clear") {
         const agent = args.agent || args.forAgent;
-        const { clearInbox } = require('../core/mesh');
         const count = await clearInbox(agent);
         return {
           content: [{

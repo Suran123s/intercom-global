@@ -1,33 +1,54 @@
 // src/bridges/antigravity-bridge.js - Google Antigravity Web UI & Multi-Mailbox Bridge
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { MESH_DIR } = require('../config');
+const { getMeshDir } = require('../config');
+const {
+  retryNtfsOperation,
+  retryNtfsOperationSync,
+  atomicWriteFile,
+  atomicWriteFileSync,
+  withLock
+} = require('../core/mesh');
 
 const ANTIGRAVITY_DEFAULT_URL = process.env.ANTIGRAVITY_URL || 'https://127.0.0.1:58055/';
 
-let cachedConfig = null;
-let cachedConfigTimestamp = 0;
 const CACHE_TTL_MS = 60 * 1000;
 const OFFLINE_CACHE_TTL_MS = 5000;
-let cachedOfflineResult = null;
-let cachedOfflineTimestamp = 0;
+const MAX_URL_CACHE_ENTRIES = 64;
+const MAX_CONFIG_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MiB response cap
 
-// Shared memory buffer for non-busy Atomics.wait sync sleeps
-const agWaitBuffer = typeof SharedArrayBuffer !== 'undefined' ? new SharedArrayBuffer(4) : null;
-const agWaitInt32 = agWaitBuffer ? new Int32Array(agWaitBuffer) : null;
+const configCache = new Map();
+const offlineCache = new Map();
 
 // Caches for Antigravity dual mailboxes
 const agInboxDirCache = new Map();
 const agFileCache = new Map();
 
 /**
- * Custom HTTPS Agent allowing local self-signed dev certificates for Antigravity web UI
+ * Custom HTTPS Agent allowing local self-signed dev certificates strictly for loopback Antigravity web UI
  */
-const httpsAgent = new https.Agent({
+const loopbackHttpsAgent = new https.Agent({
   rejectUnauthorized: false
 });
+
+function isLoopbackHost(hostname) {
+  if (typeof hostname !== 'string') return false;
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '::1' || host === '127.0.0.1' || /^127\.\d+\.\d+\.\d+$/.test(host);
+}
+
+function setBoundedCache(map, key, value) {
+  if (map.has(key)) {
+    map.delete(key);
+  } else if (map.size >= MAX_URL_CACHE_ENTRIES) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) map.delete(oldestKey);
+  }
+  map.set(key, value);
+}
 
 /**
  * Fetches Antigravity runtime web UI configuration and dynamic CSRF token
@@ -38,148 +59,173 @@ const httpsAgent = new https.Agent({
  * @returns {Promise<{ online: boolean, csrfToken: string|null, config: object|null, url: string, error?: string }>}
  */
 async function getAntigravityConfig(options = {}) {
-  const url = options.url || ANTIGRAVITY_DEFAULT_URL;
+  const rawUrl = options.url || ANTIGRAVITY_DEFAULT_URL;
   const timeoutMs = options.timeoutMs || 3000;
   const now = Date.now();
 
-  if (!options.forceRefresh && cachedConfig && (now - cachedConfigTimestamp < CACHE_TTL_MS)) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch (err) {
     return {
-      online: true,
-      csrfToken: cachedConfig.csrfToken || null,
-      config: cachedConfig,
-      url
+      online: false,
+      csrfToken: null,
+      config: null,
+      url: rawUrl,
+      error: err.message
     };
   }
 
-  if (!options.forceRefresh && cachedOfflineResult && (now - cachedOfflineTimestamp < OFFLINE_CACHE_TTL_MS)) {
-    return cachedOfflineResult;
+  const normalizedUrl = parsedUrl.toString();
+
+  if (!options.forceRefresh) {
+    const cached = configCache.get(normalizedUrl);
+    if (cached && (now - cached.timestamp < CACHE_TTL_MS)) {
+      return {
+        online: true,
+        csrfToken: cached.config.csrfToken || null,
+        config: cached.config,
+        url: normalizedUrl
+      };
+    }
+
+    const offline = offlineCache.get(normalizedUrl);
+    if (offline && (now - offline.timestamp < OFFLINE_CACHE_TTL_MS)) {
+      return offline.result;
+    }
   }
 
   return new Promise((resolve) => {
-    try {
-      const parsedUrl = new URL(url);
-      const req = https.get(
-        {
-          hostname: parsedUrl.hostname,
-          port: parsedUrl.port || 58055,
-          path: parsedUrl.pathname || '/',
-          agent: httpsAgent,
-          timeout: timeoutMs,
-          headers: {
-            'User-Agent': 'intercom-global/2.0.0 (antigravity-bridge)'
-          }
-        },
-        (res) => {
-          let rawData = '';
-          res.setEncoding('utf8');
-          res.on('data', (chunk) => {
-            rawData += chunk;
-          });
-          res.on('end', () => {
-            let extractedConfig = null;
-            let csrfToken = null;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
 
-            // Pattern 1: window.__APP_CONFIG__ = { ... };
-            const appConfigMatch = rawData.match(/window\.__APP_CONFIG__\s*=\s*(\{.*?\});/s);
-            if (appConfigMatch) {
-              try {
-                extractedConfig = JSON.parse(appConfigMatch[1]);
-                csrfToken = extractedConfig.csrfToken || null;
-              } catch {}
-            }
-
-            // Pattern 2: standalone "csrfToken":"..."
-            if (!csrfToken) {
-              const tokenMatch = rawData.match(/csrfToken["']?\s*[:=]\s*["']([^"']+)["']/i);
-              if (tokenMatch) {
-                csrfToken = tokenMatch[1];
-                if (!extractedConfig) extractedConfig = { csrfToken };
-              }
-            }
-
-            if (res.statusCode >= 200 && res.statusCode < 400) {
-              cachedConfig = extractedConfig || { csrfToken };
-              cachedConfigTimestamp = Date.now();
-              cachedOfflineResult = null;
-              cachedOfflineTimestamp = 0;
-
-              resolve({
-                online: true,
-                csrfToken: csrfToken || null,
-                config: cachedConfig,
-                url
-              });
-            } else {
-              const offlineRes = {
-                online: false,
-                csrfToken: null,
-                config: null,
-                url,
-                error: `HTTP ${res.statusCode}`
-              };
-              cachedOfflineResult = offlineRes;
-              cachedOfflineTimestamp = Date.now();
-              resolve(offlineRes);
-            }
-          });
-        }
-      );
-
-      req.on('timeout', () => {
-        req.destroy();
-        const offlineRes = {
-          online: false,
-          csrfToken: null,
-          config: null,
-          url,
-          error: 'Connection timeout'
-        };
-        cachedOfflineResult = offlineRes;
-        cachedOfflineTimestamp = Date.now();
-        resolve(offlineRes);
-      });
-
-      req.on('error', (err) => {
-        const offlineRes = {
-          online: false,
-          csrfToken: null,
-          config: null,
-          url,
-          error: err.message
-        };
-        cachedOfflineResult = offlineRes;
-        cachedOfflineTimestamp = Date.now();
-        resolve(offlineRes);
-      });
-    } catch (err) {
+    const recordOffline = (errorMsg) => {
       const offlineRes = {
         online: false,
         csrfToken: null,
         config: null,
-        url,
-        error: err.message
+        url: normalizedUrl,
+        error: errorMsg
       };
-      cachedOfflineResult = offlineRes;
-      cachedOfflineTimestamp = Date.now();
-      resolve(offlineRes);
+      setBoundedCache(offlineCache, normalizedUrl, { timestamp: Date.now(), result: offlineRes });
+      finish(offlineRes);
+    };
+
+    try {
+      const isHttps = parsedUrl.protocol === 'https:';
+      const transport = isHttps ? https : http;
+      const defaultPort = isHttps ? 443 : 80;
+      const port = parsedUrl.port ? Number(parsedUrl.port) : defaultPort;
+      const reqOptions = {
+        hostname: parsedUrl.hostname,
+        port,
+        path: `${parsedUrl.pathname || '/'}${parsedUrl.search || ''}`,
+        timeout: timeoutMs,
+        headers: {
+          'User-Agent': 'intercom-global/2.0.0 (antigravity-bridge)'
+        }
+      };
+
+      if (isHttps && isLoopbackHost(parsedUrl.hostname)) {
+        reqOptions.agent = loopbackHttpsAgent;
+      }
+
+      const req = transport.get(reqOptions, (res) => {
+        let rawData = '';
+        let receivedBytes = 0;
+        let truncated = false;
+
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          receivedBytes += Buffer.byteLength(chunk, 'utf8');
+          if (receivedBytes > MAX_CONFIG_RESPONSE_BYTES) {
+            truncated = true;
+            req.destroy();
+            recordOffline(`Response exceeded ${MAX_CONFIG_RESPONSE_BYTES} byte cap`);
+            return;
+          }
+          rawData += chunk;
+        });
+
+        res.on('error', (err) => {
+          recordOffline(err.message);
+        });
+
+        res.on('end', () => {
+          if (truncated || settled) return;
+          let extractedConfig = null;
+          let csrfToken = null;
+
+          // Pattern 1: window.__APP_CONFIG__ = { ... };
+          const appConfigMatch = rawData.match(/window\.__APP_CONFIG__\s*=\s*(\{.*?\});/s);
+          if (appConfigMatch) {
+            try {
+              extractedConfig = JSON.parse(appConfigMatch[1]);
+              csrfToken = extractedConfig.csrfToken || null;
+            } catch {}
+          }
+
+          // Pattern 2: standalone "csrfToken":"..."
+          if (!csrfToken) {
+            const tokenMatch = rawData.match(/csrfToken["']?\s*[:=]\s*["']([^"']+)["']/i);
+            if (tokenMatch) {
+              csrfToken = tokenMatch[1];
+              if (!extractedConfig) extractedConfig = { csrfToken };
+            }
+          }
+
+          if (res.statusCode >= 200 && res.statusCode < 400) {
+            const configObj = extractedConfig || { csrfToken };
+            setBoundedCache(configCache, normalizedUrl, { timestamp: Date.now(), config: configObj });
+            offlineCache.delete(normalizedUrl);
+
+            finish({
+              online: true,
+              csrfToken: csrfToken || null,
+              config: configObj,
+              url: normalizedUrl
+            });
+          } else {
+            recordOffline(`HTTP ${res.statusCode}`);
+          }
+        });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        recordOffline('Connection timeout');
+      });
+
+      req.on('error', (err) => {
+        recordOffline(err.message);
+      });
+    } catch (err) {
+      recordOffline(err.message);
     }
   });
 }
 
 /**
  * Resolves Antigravity's dual mailbox directories:
- * 1. User home: ~/.intercom-global/mesh/inbox/antigravity/
- * 2. Workspace: .agents/mesh/inbox/antigravity/
+ * 1. Configured INTERCOM_MESH_DIR (if set) or user home (~/.intercom-global/mesh/inbox/antigravity/)
+ * 2. Workspace (.agents/mesh/inbox/antigravity/)
  * @returns {string[]}
  */
 function getDualMailboxDirs() {
   const dirs = [];
+  const configuredMeshDir = process.env.INTERCOM_MESH_DIR && process.env.INTERCOM_MESH_DIR.trim();
   const homeDir = process.env.USERPROFILE || process.env.HOME || '';
 
-  if (homeDir) {
+  if (configuredMeshDir) {
+    dirs.push(path.join(getMeshDir(), 'inbox', 'antigravity'));
+  } else if (homeDir) {
     dirs.push(path.join(homeDir, '.intercom-global', 'mesh', 'inbox', 'antigravity'));
   } else {
-    dirs.push(path.join(MESH_DIR, 'inbox', 'antigravity'));
+    dirs.push(path.join(getMeshDir(), 'inbox', 'antigravity'));
   }
 
   const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
@@ -188,46 +234,6 @@ function getDualMailboxDirs() {
   }
 
   return dirs;
-}
-
-/**
- * Windows NTFS file-lock retry helper
- */
-async function retryNtfsOperation(fn, maxAttempts = 5) {
-  const delays = [20, 40, 80, 160, 320];
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const isLock = err && (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES');
-      if (!isLock || attempt === maxAttempts - 1) throw err;
-      const delay = delays[attempt] + Math.floor(Math.random() * 15);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-}
-
-/**
- * Synchronous variant of NTFS retry
- */
-function retryNtfsOperationSync(fn, maxAttempts = 5) {
-  const delays = [20, 40, 80, 160, 320];
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      return fn();
-    } catch (err) {
-      const isLock = err && (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES');
-      if (!isLock || attempt === maxAttempts - 1) throw err;
-      const delay = delays[attempt] + Math.floor(Math.random() * 15);
-      if (agWaitInt32) {
-        try {
-          Atomics.wait(agWaitInt32, 0, 0, delay);
-        } catch {
-          // Never busy-spin CPU if Atomics.wait is unsupported in this execution context
-        }
-      }
-    }
-  }
 }
 
 /**
@@ -264,47 +270,39 @@ async function routeMessageToAntigravity(messageData, options = {}) {
   const fileName = `${epochMs}_${messageId}.json`;
   const writtenPaths = [];
 
-  // 2. Deliver to Dual Mailboxes (User home & Workspace)
+  // 2. Deliver to Dual Mailboxes (User home/configured mesh & Workspace)
   const targetDirs = getDualMailboxDirs();
   for (const dir of targetDirs) {
     try {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      const tmpPath = path.join(dir, `.tmp_${messageId}_${Date.now()}.tmp`);
       const finalPath = path.join(dir, fileName);
-
-      await retryNtfsOperation(async () => {
-        await fs.promises.writeFile(tmpPath, serialized, 'utf8');
-      });
-      await retryNtfsOperation(async () => {
-        await fs.promises.rename(tmpPath, finalPath);
-      });
-
+      await atomicWriteFile(finalPath, serialized);
       agInboxDirCache.delete(dir);
       writtenPaths.push(finalPath);
-    } catch (err) {
+    } catch {
       // Continue to next mailbox
     }
   }
 
-  // 3. Deliver to legacy monolithic antigravity.json if exists
+  // 3. Deliver to legacy monolithic antigravity.json if exists (locked + atomic)
   try {
-    const legacyPath = path.join(MESH_DIR, 'antigravity.json');
+    const meshDir = getMeshDir();
+    const legacyPath = path.join(meshDir, 'antigravity.json');
     if (fs.existsSync(legacyPath)) {
-      const raw = fs.readFileSync(legacyPath, 'utf8');
-      const list = JSON.parse(raw);
-      if (Array.isArray(list)) {
-        list.push({
-          id: messageId,
-          from: envelope.sender,
-          message: envelope.payload.message || '',
-          timestamp: envelope.timestamp,
-          read: false
-        });
-        fs.writeFileSync(legacyPath, JSON.stringify(list, null, 2), 'utf8');
-      }
+      await withLock('legacy_inbox_antigravity', async () => {
+        if (!fs.existsSync(legacyPath)) return;
+        const raw = await retryNtfsOperation(() => fs.promises.readFile(legacyPath, 'utf8'));
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          list.push({
+            id: messageId,
+            from: envelope.sender,
+            message: envelope.payload.message || '',
+            timestamp: envelope.timestamp,
+            read: false
+          });
+          await atomicWriteFile(legacyPath, JSON.stringify(list, null, 2));
+        }
+      }, { meshDir });
     }
   } catch {}
 
@@ -345,7 +343,7 @@ function readAntigravityInboxSync(options = {}) {
       const files = retryNtfsOperationSync(() => fs.readdirSync(dir));
       const dirMessages = [];
       for (const file of files) {
-        if (!file.endsWith('.json') || file.startsWith('.tmp_')) continue;
+        if (!file.endsWith('.json') || file.startsWith('.tmp_') || file.startsWith('.')) continue;
         const filePath = path.join(dir, file);
         try {
           const fileStat = fs.statSync(filePath);
@@ -406,7 +404,6 @@ async function syncDualMailboxes(options = {}) {
 
   const [globalDir, workspaceDir] = dirs;
 
-  // Ensure directories exist
   if (!fs.existsSync(globalDir)) {
     try { await fs.promises.mkdir(globalDir, { recursive: true }); } catch {}
   }
@@ -414,7 +411,6 @@ async function syncDualMailboxes(options = {}) {
     try { await fs.promises.mkdir(workspaceDir, { recursive: true }); } catch {}
   }
 
-  // Read files from both directories
   let globalFiles = [];
   let workspaceFiles = [];
 
@@ -436,15 +432,9 @@ async function syncDualMailboxes(options = {}) {
     if (!wSet.has(f)) {
       const src = path.join(globalDir, f);
       const dst = path.join(workspaceDir, f);
-      const tmp = path.join(workspaceDir, `.tmp_sync_${Date.now()}_${f}`);
       try {
-        const content = await fs.promises.readFile(src, 'utf8');
-        await retryNtfsOperation(async () => {
-          await fs.promises.writeFile(tmp, content, 'utf8');
-        });
-        await retryNtfsOperation(async () => {
-          await fs.promises.rename(tmp, dst);
-        });
+        const content = await retryNtfsOperation(() => fs.promises.readFile(src, 'utf8'));
+        await atomicWriteFile(dst, content);
         report.copiedToWorkspace++;
         report.syncedCount++;
         report.files.push(f);
@@ -457,15 +447,9 @@ async function syncDualMailboxes(options = {}) {
     if (!gSet.has(f)) {
       const src = path.join(workspaceDir, f);
       const dst = path.join(globalDir, f);
-      const tmp = path.join(globalDir, `.tmp_sync_${Date.now()}_${f}`);
       try {
-        const content = await fs.promises.readFile(src, 'utf8');
-        await retryNtfsOperation(async () => {
-          await fs.promises.writeFile(tmp, content, 'utf8');
-        });
-        await retryNtfsOperation(async () => {
-          await fs.promises.rename(tmp, dst);
-        });
+        const content = await retryNtfsOperation(() => fs.promises.readFile(src, 'utf8'));
+        await atomicWriteFile(dst, content);
         report.copiedToGlobal++;
         report.syncedCount++;
         report.files.push(f);
@@ -473,7 +457,6 @@ async function syncDualMailboxes(options = {}) {
     }
   }
 
-  // Invalidate cache if any files synced
   if (report.syncedCount > 0) {
     agInboxDirCache.clear();
   }
@@ -520,11 +503,9 @@ function syncDualMailboxesSync(options = {}) {
     if (!wSet.has(f)) {
       const src = path.join(globalDir, f);
       const dst = path.join(workspaceDir, f);
-      const tmp = path.join(workspaceDir, `.tmp_sync_${Date.now()}_${f}`);
       try {
-        const content = fs.readFileSync(src, 'utf8');
-        retryNtfsOperationSync(() => fs.writeFileSync(tmp, content, 'utf8'));
-        retryNtfsOperationSync(() => fs.renameSync(tmp, dst));
+        const content = retryNtfsOperationSync(() => fs.readFileSync(src, 'utf8'));
+        atomicWriteFileSync(dst, content);
         report.copiedToWorkspace++;
         report.syncedCount++;
         report.files.push(f);
@@ -536,11 +517,9 @@ function syncDualMailboxesSync(options = {}) {
     if (!gSet.has(f)) {
       const src = path.join(workspaceDir, f);
       const dst = path.join(globalDir, f);
-      const tmp = path.join(globalDir, `.tmp_sync_${Date.now()}_${f}`);
       try {
-        const content = fs.readFileSync(src, 'utf8');
-        retryNtfsOperationSync(() => fs.writeFileSync(tmp, content, 'utf8'));
-        retryNtfsOperationSync(() => fs.renameSync(tmp, dst));
+        const content = retryNtfsOperationSync(() => fs.readFileSync(src, 'utf8'));
+        atomicWriteFileSync(dst, content);
         report.copiedToGlobal++;
         report.syncedCount++;
         report.files.push(f);
@@ -556,13 +535,21 @@ function syncDualMailboxesSync(options = {}) {
 }
 
 /**
- * Starts a background periodic auto-sync daemon
- * @param {number} [intervalMs=5000] 
+ * Starts a background periodic auto-sync daemon with overlap guard
+ * @param {number} [intervalMs=5000]
  * @returns {{ stop: Function }}
  */
 function startAutoSyncDaemon(intervalMs = 5000) {
-  const timer = setInterval(() => {
-    syncDualMailboxes().catch(() => {});
+  let isSyncing = false;
+  const timer = setInterval(async () => {
+    if (isSyncing) return;
+    isSyncing = true;
+    try {
+      await syncDualMailboxes();
+    } catch {
+    } finally {
+      isSyncing = false;
+    }
   }, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
 
