@@ -15,7 +15,7 @@ const {
   SecurityError
 } = require('../src/core/mesh');
 const { MessageEnvelope, validateMessage } = require('../src/core/message');
-const { MESH_DIR } = require('../src/config');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 test('Adversarial Security: Path traversal inputs strictly rejected by validateAgentName', () => {
   const maliciousTraversalInputs = [
@@ -98,8 +98,9 @@ test('Adversarial Security: Extended Windows DOS device names strictly rejected 
   console.log(`[SECURITY STRESS] Windows DOS device tests passed: ${rejected}/${dosDeviceInputs.length} strictly rejected.`);
 });
 
-test('Adversarial Security: resolveSafePath strictly enforces directory jail', () => {
-  const baseDir = path.join(MESH_DIR, 'inbox');
+test('Adversarial Security: resolveSafePath strictly enforces directory jail', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-stress-sec-');
+  const baseDir = path.join(meshDir, 'inbox');
   const jailBreakInputs = [
     '../',
     '..\\',

@@ -23,24 +23,23 @@ const {
   readInbox,
   clearInbox
 } = require('../src/core/mesh');
-const { MESH_DIR } = require('../src/config');
+const { getMeshDir } = require('../src/config');
+const { createIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 describe('Milestone 4 — #91: Real NTFS Lock Contention Test Harness', () => {
-  const resourceName = `stress-lock-${Date.now()}`;
-  const mailboxAgent = `stress-batch-${Date.now()}`;
+  let iso;
+  let resourceName;
+  let mailboxAgent;
+
+  beforeEach(() => {
+    iso = createIsolatedMeshEnv('intercom-stress-ntfs-');
+    resourceName = `stress-lock-${Date.now()}`;
+    mailboxAgent = `stress-batch-${Date.now()}`;
+  });
 
   afterEach(async () => {
     try { await clearInbox(mailboxAgent); } catch {}
-    // Clean up lock directories
-    const locksDir = path.join(MESH_DIR, 'locks');
-    try {
-      const locks = fs.readdirSync(locksDir);
-      for (const lk of locks) {
-        if (lk.includes(resourceName) || lk.includes(mailboxAgent)) {
-          fs.rmSync(path.join(locksDir, lk), { recursive: true, force: true });
-        }
-      }
-    } catch {}
+    iso.cleanup();
   });
 
   test('Mutual Exclusion Under Extreme Contention (8 concurrent workers)', async () => {
@@ -73,7 +72,7 @@ describe('Milestone 4 — #91: Real NTFS Lock Contention Test Harness', () => {
 
   test('Stale Lock Recovery: Contending worker safely breaks expired lock', async () => {
     const staleResource = `stale-res-${Date.now()}`;
-    const locksDir = path.join(MESH_DIR, 'locks');
+    const locksDir = path.join(getMeshDir(), 'locks');
     fs.mkdirSync(locksDir, { recursive: true });
 
     const lockDir = path.join(locksDir, `${staleResource}.lock`);

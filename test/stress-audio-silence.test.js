@@ -56,7 +56,9 @@ test('Invariant 4: auto-reply in server.js is disabled by default to prevent ech
   );
 });
 
-test('Invariant 5: autowake wakeCliAgent executes without ReferenceError and uses sanitized names', () => {
+test('Invariant 5: autowake wakeCliAgent executes without ReferenceError and uses sanitized names', (t) => {
+  const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
+  withIsolatedMeshEnv(t, 'intercom-silence-');
   const { wakeCliAgent } = require('../src/controllers/autowake');
   const agentName = 'test_silence_' + Date.now();
   

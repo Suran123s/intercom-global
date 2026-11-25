@@ -19,14 +19,17 @@ const os = require('os');
 const { createServer, dispatchMessage } = require('../src/core/server');
 const { FastQueue, SubscriptionFilter } = require('../src/core/fast-queue');
 const { clearInbox } = require('../src/core/mesh');
+const { createIsolatedMeshEnv, closeServer, waitForCondition } = require('./helpers/isolated-env');
 
 describe('Milestone 4 — #92: Multi-Client Fast-Path SSE Real-Time Integration', () => {
+  let iso;
   let server;
   let serverPort;
   let testAgent;
   const connectedClients = new Set();
 
   beforeEach(async () => {
+    iso = createIsolatedMeshEnv('intercom-sse-');
     testAgent = `sse-test-${Date.now()}`;
     server = createServer();
     await new Promise((resolve) => {
@@ -43,20 +46,9 @@ describe('Milestone 4 — #92: Multi-Client Fast-Path SSE Real-Time Integration'
     }
     connectedClients.clear();
 
-    if (server) {
-      try { if (typeof server.closeAllConnections === 'function') server.closeAllConnections(); } catch {}
-      await new Promise((resolve) => {
-        const timer = setTimeout(() => {
-          try { server.destroy?.(); } catch {}
-          resolve();
-        }, 500);
-        server.close(() => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
-    }
+    await closeServer(server);
     try { await clearInbox(testAgent); } catch {}
+    iso.cleanup();
   });
 
   /**

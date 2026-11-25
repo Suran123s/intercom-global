@@ -9,7 +9,10 @@ const { writeMessage, readInbox, clearInbox, getInboxDir } = require('../src/cor
 
 if (!isMainThread) {
   // Worker Thread Execution
-  const { workerId, recipient, messageCount } = workerData;
+  const { workerId, recipient, messageCount, meshDir } = workerData;
+  if (meshDir) {
+    process.env.INTERCOM_MESH_DIR = meshDir;
+  }
   (async () => {
     const results = [];
     for (let i = 0; i < messageCount; i++) {
@@ -34,7 +37,9 @@ if (!isMainThread) {
   });
 } else {
   // Main Thread Test Suite
+  const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
   test('Empirical Concurrency Stress: 12 concurrent workers writing to same recipient inbox', async (t) => {
+    const { meshDir } = withIsolatedMeshEnv(t, 'intercom-stress-conc-');
     const RECIPIENT = 'stress_concurrency_agent_' + Date.now();
     const NUM_WORKERS = 12;
     const MSGS_PER_WORKER = 10;
@@ -53,7 +58,8 @@ if (!isMainThread) {
           workerData: {
             workerId: w,
             recipient: RECIPIENT,
-            messageCount: MSGS_PER_WORKER
+            messageCount: MSGS_PER_WORKER,
+            meshDir
           }
         });
         worker.on('message', resolve);

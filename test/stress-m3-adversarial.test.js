@@ -16,9 +16,11 @@ const {
   dispatchTask,
   readLedger,
   writeLedger,
+  getLedgerPath,
   FileBoundaryExceededError,
   JULES_LIMITS
 } = require('../src/core/jules-delegator');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 const {
   verifyZeroKill,
@@ -160,8 +162,9 @@ test('Adversarial Prompting: strictly rejects omissions of any of the 5 mandator
 });
 
 // --- Experiment 3: Quota Overflow & Concurrent Ceiling ---
-test('Adversarial Quota: detects active session overflow (>=15) and daily overflow (>=100) and routes to fallback', async () => {
-  const ledgerPath = path.join(os.homedir(), '.intercom-global', 'jules-ledger.json');
+test('Adversarial Quota: detects active session overflow (>=15) and daily overflow (>=100) and routes to fallback', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-stress-m3-quota-');
+  const ledgerPath = getLedgerPath();
   const backup = fs.existsSync(ledgerPath) ? fs.readFileSync(ledgerPath, 'utf8') : null;
 
   try {

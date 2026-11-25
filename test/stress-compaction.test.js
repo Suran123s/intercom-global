@@ -24,14 +24,23 @@ const {
   releaseLock,
   clearInbox
 } = require('../src/core/mesh');
+const { createIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 describe('Milestone 4 — #90: Mailbox Compaction Under Concurrent Reader/Writer Contention', () => {
-  const testAgent = `stress-compact-${Date.now()}`;
-  const peerAgent = `stress-peer-${Date.now()}`;
+  let iso;
+  let testAgent;
+  let peerAgent;
+
+  beforeEach(() => {
+    iso = createIsolatedMeshEnv('intercom-stress-compact-');
+    testAgent = `stress-compact-${Date.now()}`;
+    peerAgent = `stress-peer-${Date.now()}`;
+  });
 
   afterEach(async () => {
     try { await clearInbox(testAgent); } catch {}
     try { await clearInbox(peerAgent); } catch {}
+    iso.cleanup();
   });
 
   test('Concurrent Writers + Compaction: No messages lost or corrupted under active compaction', async () => {

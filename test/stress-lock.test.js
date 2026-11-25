@@ -4,8 +4,10 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const { acquireLock, releaseLock, LockTimeoutError } = require('../src/core/mesh');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('CAS Locking: Mutual exclusion prevents concurrent access to same resource', async () => {
+test('CAS Locking: Mutual exclusion prevents concurrent access to same resource', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-stress-lock-1-');
   const resource = 'mutex_test_res_' + Date.now();
 
   const handle1 = await acquireLock(resource, 5000);
@@ -34,7 +36,8 @@ test('CAS Locking: Mutual exclusion prevents concurrent access to same resource'
   console.log('[CAS LOCK STRESS] Mutual exclusion and sequential handover verified.');
 });
 
-test('CAS Locking: Stale lock recovery within TTL (simulated crashed holder)', async () => {
+test('CAS Locking: Stale lock recovery within TTL (simulated crashed holder)', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-stress-lock-2-');
   const resource = 'stale_test_res_' + Date.now();
   const TTL_MS = 600;
 
@@ -67,7 +70,8 @@ test('CAS Locking: Stale lock recovery within TTL (simulated crashed holder)', a
   assert.ok(!fs.existsSync(recoveredHandle.lockDir), 'Lock directory remaining after recovery release');
 });
 
-test('CAS Locking: Multi-worker atomic stale recovery under simultaneous contention', async () => {
+test('CAS Locking: Multi-worker atomic stale recovery under simultaneous contention', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-stress-lock-3-');
   const resource = 'stale_multi_contention_' + Date.now();
   const TTL_MS = 500;
 
@@ -116,7 +120,8 @@ test('CAS Locking: Multi-worker atomic stale recovery under simultaneous content
   console.log(`[CAS LOCK STRESS] Multi-contender stale recovery passed: ${successfulAcquisitions}/5 contenders acquired sequentially without overlap.`);
 });
 
-test('CAS Locking: Multi-worker contention under rapid lock/unlock cycles', async () => {
+test('CAS Locking: Multi-worker contention under rapid lock/unlock cycles', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-stress-lock-4-');
   const resource = 'contention_res_' + Date.now();
   const NUM_CONTENDERS = 6;
   const CYCLES_PER_CONTENDER = 4;
