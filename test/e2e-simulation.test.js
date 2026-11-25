@@ -25,8 +25,10 @@ const {
   hasInterruptFlag,
   consumeInterruptFlag
 } = require('../src/core/interrupter');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('Tier 4 Multi-IDE: Parent <-> Child task dispatch and correlated response delivery across simulated IDEs', async () => {
+test('Tier 4 Multi-IDE: Parent <-> Child task dispatch and correlated response delivery across simulated IDEs', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-e2e-sim-1-');
   const parentName = 'orchestrator_antigravity_' + Date.now();
   const childName = 'worker_cursor_' + Date.now();
 
@@ -134,7 +136,8 @@ test('Tier 4 Multi-IDE: Parent <-> Child task dispatch and correlated response d
   }
 });
 
-test('Tier 4 Multi-IDE: Multi-agent discovery via Agent State Cards across OpenCode, Qoder, and Cursor', async () => {
+test('Tier 4 Multi-IDE: Multi-agent discovery via Agent State Cards across OpenCode, Qoder, and Cursor', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-e2e-sim-2-');
   const ts = Date.now();
   const agent1 = 'reviewer_opencode_' + ts;
   const agent2 = 'auditor_qoder_' + ts;
@@ -191,7 +194,8 @@ test('Tier 4 Multi-IDE: Multi-agent discovery via Agent State Cards across OpenC
   }
 });
 
-test('Tier 4 Multi-IDE: Live agent interruption during active execution with 0 dropped messages', async () => {
+test('Tier 4 Multi-IDE: Live agent interruption during active execution with 0 dropped messages', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-e2e-sim-3-');
   const target = 'active_worker_' + Date.now();
   await clearInbox(target);
 

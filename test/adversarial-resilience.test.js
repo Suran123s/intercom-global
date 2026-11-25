@@ -24,7 +24,8 @@ const { interruptAgent } = require('../src/core/interrupter');
 const {
   checkQuota,
   handleFallback,
-  dispatchTask
+  dispatchTask,
+  getLedgerPath
 } = require('../src/core/jules-delegator');
 const {
   verifyZeroKill,
@@ -32,27 +33,21 @@ const {
   resolveSafeAction,
   GovernanceViolationError
 } = require('../src/core/governance');
-const { MESH_DIR } = require('../src/config');
-
-// Helper to isolate ledger during tests
-function getLedgerPath() {
-  const home = os.homedir();
-  const dir = path.join(home, '.intercom-global');
-  return path.join(dir, 'jules-ledger.json');
-}
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 // -----------------------------------------------------------------------------
 // TIER 3 & 5: DUAL-TRANSPORT FALLBACK
 // -----------------------------------------------------------------------------
 
-test('Tier 3 Fallback: Daemon HTTP offline / peer offline triggers safe-path file-mesh delivery without message loss', async () => {
+test('Tier 3 Fallback: Daemon HTTP offline / peer offline triggers safe-path file-mesh delivery without message loss', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-res-daemon-');
   const recipient = 'fallback_agent_' + Date.now();
   await clearInbox(recipient);
 
   // Sub-test 1: Daemon internal safe-path fallback when peer is not connected via SSE/WS
-  const testPort = 4250 + Math.floor(Math.random() * 500);
-  const daemon = new IntercomDaemon({ port: testPort });
+  const daemon = new IntercomDaemon({ port: 0 });
   await daemon.start();
+  const testPort = daemon.port;
 
   try {
     const envelope1 = MessageEnvelope.create({
@@ -123,7 +118,8 @@ test('Tier 3 Fallback: Daemon HTTP offline / peer offline triggers safe-path fil
 // TIER 3 & 5: JULES DELEGATION FALLBACK
 // -----------------------------------------------------------------------------
 
-test('Tier 3 Fallback: Jules quota full triggers automatic local worker fallback with disallowJulesReDelegation: true', async () => {
+test('Tier 3 Fallback: Jules quota full triggers automatic local worker fallback with disallowJulesReDelegation: true', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-res-jules-');
   const ledgerPath = getLedgerPath();
   let originalLedger = null;
   if (fs.existsSync(ledgerPath)) {
@@ -205,7 +201,8 @@ test('Tier 3 Fallback: Jules quota full triggers automatic local worker fallback
 // TIER 3 & 5: SECURITY FUZZING & WIN32 RESERVED NAMES
 // -----------------------------------------------------------------------------
 
-test('Tier 5 Security: Path traversal & Windows reserved DOS device names rejected across all core APIs', async () => {
+test('Tier 5 Security: Path traversal & Windows reserved DOS device names rejected across all core APIs', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-res-sec-');
   const traversalPayloads = [
     '../',
     '..\\',
@@ -317,7 +314,8 @@ test('Tier 5 Security: Path traversal & Windows reserved DOS device names reject
 // TIER 3 & 5: CORRUPT PACKET RESILIENCE
 // -----------------------------------------------------------------------------
 
-test('Tier 5 Resilience: Corrupt / malformed JSON packets in inbox directory are safely skipped without reader crashing', async () => {
+test('Tier 5 Resilience: Corrupt / malformed JSON packets in inbox directory are safely skipped without reader crashing', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-res-corrupt-');
   const recipient = 'resilience_agent_' + Date.now();
   await clearInbox(recipient);
 

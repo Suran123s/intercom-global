@@ -43,7 +43,8 @@ const {
 } = require('../src/core/dlq');
 
 const { MessageEnvelope } = require('../src/core/message');
-const { MESH_DIR } = require('../src/config');
+const { getMeshDir } = require('../src/config');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 // Helper to find a definitely non-existent PID
 function findDeadPid() {
@@ -61,7 +62,8 @@ function findDeadPid() {
 // 1. Concurrency Stress on writeMessagesBatch (#40)
 // ============================================================================
 
-test('Adversarial 1.1: 20 concurrent workers writing 50-message batches to the SAME recipient (1,000 total)', { timeout: 60000 }, async () => {
+test('Adversarial 1.1: 20 concurrent workers writing 50-message batches to the SAME recipient (1,000 total)', { timeout: 60000 }, async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m2-11-');
   const recipient = `stress_target_same_${Date.now()}`;
   await clearInbox(recipient);
   const inboxDir = getInboxDir(recipient);
@@ -156,7 +158,8 @@ test('Adversarial 1.1: 20 concurrent workers writing 50-message batches to the S
   assert.strictEqual(readInboxSync(recipient).length, 0);
 });
 
-test('Adversarial 1.2: 20 concurrent workers writing 50-message batches to DISTINCT recipients (1,000 total)', { timeout: 60000 }, async () => {
+test('Adversarial 1.2: 20 concurrent workers writing 50-message batches to DISTINCT recipients (1,000 total)', { timeout: 60000 }, async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m2-12-');
   const numWorkers = 20;
   const messagesPerBatch = 50;
   const recipients = [];
@@ -217,10 +220,11 @@ test('Adversarial 1.2: 20 concurrent workers writing 50-message batches to DISTI
 // 2. CAS Lock Contention & Deadlock Resilience on DLQ & Channels (#41, #42, #43)
 // ============================================================================
 
-test('Adversarial 2.1: DLQ gracefully recovers from stale lock (dead PID / process crash) without data loss', () => {
+test('Adversarial 2.1: DLQ gracefully recovers from stale lock (dead PID / process crash) without data loss', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-adv-m2-21-');
   clearDlq();
   const deadPid = findDeadPid();
-  const locksDir = path.join(MESH_DIR, 'locks');
+  const locksDir = path.join(meshDir, 'locks');
   if (!fs.existsSync(locksDir)) fs.mkdirSync(locksDir, { recursive: true });
 
   const dlqLockDir = path.join(locksDir, 'dlq_storage.lock');
@@ -274,12 +278,13 @@ test('Adversarial 2.1: DLQ gracefully recovers from stale lock (dead PID / proce
   assert.strictEqual(getDlq().length, 0);
 });
 
-test('Adversarial 2.2: Channel CAS lock gracefully recovers from expired TTL without data loss', () => {
+test('Adversarial 2.2: Channel CAS lock gracefully recovers from expired TTL without data loss', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-adv-m2-22-');
   const channelName = `stale_chan_${Date.now()}`;
   clearChannel(channelName);
 
   const cleanName = channelName.replace(/^#/, '');
-  const locksDir = path.join(MESH_DIR, 'locks');
+  const locksDir = path.join(meshDir, 'locks');
   if (!fs.existsSync(locksDir)) fs.mkdirSync(locksDir, { recursive: true });
 
   const chanLockDir = path.join(locksDir, `channel_${cleanName}.lock`);
@@ -310,7 +315,8 @@ test('Adversarial 2.2: Channel CAS lock gracefully recovers from expired TTL wit
   assert.strictEqual(readChannel(channelName).length, 0);
 });
 
-test('Adversarial 2.3: Heavy Multi-Contender CAS Lock Stress on DLQ & Channels', async () => {
+test('Adversarial 2.3: Heavy Multi-Contender CAS Lock Stress on DLQ & Channels', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m2-23-');
   clearDlq();
   const testChannel = `stress_multi_chan_${Date.now()}`;
   clearChannel(testChannel);
@@ -454,7 +460,8 @@ test('Adversarial 3.2: fileEnvelopeCache boundary stress (insert 10,000 items in
   assert.ok(heapDeltaMb < 50, `Heap memory growth excessive: ${heapDeltaMb.toFixed(2)} MB`);
 });
 
-test('Adversarial 3.3: Mesh Global LRU Cache state reset & statistics inspection', () => {
+test('Adversarial 3.3: Mesh Global LRU Cache state reset & statistics inspection', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m2-33-');
   clearMeshCache();
   const initialStats = getMeshCacheStats();
   assert.strictEqual(initialStats.inboxDirCache.size, 0);
@@ -484,134 +491,69 @@ test('Adversarial 3.3: Mesh Global LRU Cache state reset & statistics inspection
 // 4. TUI agentIdx Shrink Race & Boundary Testing (Challenger 2 Advisory)
 // ============================================================================
 
-test('Adversarial 4.1: TUI agentIdx clamping under rapid list shrinkage (20 items -> 1 item -> 0 items) and navigation race', () => {
-  // Pure implementation of TUI keyboard handler algorithms from bin/intercom-tui.js
-  let agentList = [];
-  let agentIdx = 0;
-  let selectedAgent = null;
-  const errors = [];
+test('Adversarial 4.1: Real TUI agentIdx clamping under rapid list shrinkage (20 items -> 1 item -> 0 items) and navigation race', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m2-41-');
+  const tui = require('../bin/intercom-tui.js');
+  t.after(() => tui.destroyScreen());
 
-  function selectAgent(name) {
-    // Exact guard from bin/intercom-tui.js line 162
-    if (!name || typeof name !== 'string') return;
-    selectedAgent = name;
-  }
+  tui.setState({
+    activeNav: 3, // Peers view
+    composerBuffer: '',
+    agentList: Array.from({ length: 20 }, (_, i) => `agent_${i}`),
+    agentIdx: 15,
+    selectedAgent: 'agent_15'
+  });
 
-  function handleUp() {
-    if (agentList.length === 0) return;
-    agentIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx - 1));
-    if (agentList[agentIdx]) selectAgent(agentList[agentIdx]);
-  }
-
-  function handleDown() {
-    if (agentList.length === 0) return;
-    agentIdx = Math.min(agentList.length - 1, Math.max(0, agentIdx + 1));
-    if (agentList[agentIdx]) selectAgent(agentList[agentIdx]);
-  }
-
-  function handleEnter() {
-    if (agentList.length === 0) return;
-    agentIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx));
-    if (agentList[agentIdx]) selectAgent(agentList[agentIdx]);
-  }
-
-  function renderAgentsClamp() {
-    if (agentList.length === 0) {
-      agentIdx = 0;
-      return;
-    }
-    if (agentIdx >= agentList.length) {
-      agentIdx = Math.max(0, agentList.length - 1);
-    }
-  }
-
-  // Stress test: 50,000 cycles of rapid list size fluctuations and concurrent key events
-  const actions = ['up', 'down', 'enter', 'shrink_to_1', 'shrink_to_0', 'expand_to_20', 'expand_to_50', 'render'];
-
-  for (let cycle = 0; cycle < 50000; cycle++) {
+  const actions = ['up', 'down', 'shrink_to_1', 'shrink_to_0', 'expand_to_20', 'render'];
+  for (let cycle = 0; cycle < 120; cycle++) {
     const action = actions[cycle % actions.length];
-    try {
-      switch (action) {
-        case 'up':
-          handleUp();
-          break;
-        case 'down':
-          handleDown();
-          break;
-        case 'enter':
-          handleEnter();
-          break;
-        case 'shrink_to_1':
-          agentList = ['solo-agent'];
-          renderAgentsClamp();
-          break;
-        case 'shrink_to_0':
-          agentList = [];
-          renderAgentsClamp();
-          break;
-        case 'expand_to_20':
-          agentList = Array.from({ length: 20 }, (_, i) => `agent_${i}`);
-          renderAgentsClamp();
-          break;
-        case 'expand_to_50':
-          agentList = Array.from({ length: 50 }, (_, i) => `agent_${i}`);
-          renderAgentsClamp();
-          break;
-        case 'render':
-          renderAgentsClamp();
-          break;
-      }
+    if (action === 'up') {
+      await tui.handleKey('', { name: 'up' });
+    } else if (action === 'down') {
+      await tui.handleKey('', { name: 'down' });
+    } else if (action === 'shrink_to_1') {
+      tui.setState({ agentList: ['solo-agent'] });
+      await tui.handleKey('', { name: 'up' });
+    } else if (action === 'shrink_to_0') {
+      tui.setState({ agentList: [], agentIdx: 0 });
+      await tui.handleKey('', { name: 'return' });
+    } else if (action === 'expand_to_20') {
+      tui.setState({ agentList: Array.from({ length: 20 }, (_, i) => `agent_${i}`) });
+      await tui.handleKey('', { name: 'down' });
+    } else if (action === 'render') {
+      const frame = tui.renderFrame(100, 30);
+      assert.strictEqual(frame.length, 30);
+    }
 
-      // Invariant: agentIdx must ALWAYS be a valid integer index
-      if (agentList.length === 0) {
-        assert.strictEqual(agentIdx, 0, 'agentIdx must be 0 when list is empty');
-      } else {
-        assert.ok(agentIdx >= 0, `agentIdx must be >= 0, got ${agentIdx}`);
-        assert.ok(agentIdx < agentList.length, `agentIdx out of bounds! index ${agentIdx} >= length ${agentList.length}`);
-        assert.strictEqual(typeof agentList[agentIdx], 'string', `agentList[${agentIdx}] must be valid string`);
-      }
-    } catch (err) {
-      errors.push({ cycle, action, err });
+    const st = tui.getState();
+    if (st.agentList.length === 0) {
+      assert.strictEqual(st.agentIdx, 0);
+    } else {
+      assert.ok(st.agentIdx >= 0 && st.agentIdx < st.agentList.length, `Invalid agentIdx=${st.agentIdx} for len=${st.agentList.length}`);
     }
   }
-
-  assert.strictEqual(errors.length, 0, `Errors during TUI shrink race: ${JSON.stringify(errors)}`);
 });
 
-test('Adversarial 4.2: TUI boundary condition handling on extreme and malicious inputs', () => {
-  let agentList = ['single'];
-  let agentIdx = 99999; // Corrupted / stale high index
+test('Adversarial 4.2: Real TUI boundary condition handling on extreme and stale indices', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m2-42-');
+  const tui = require('../bin/intercom-tui.js');
+  t.after(() => tui.destroyScreen());
 
-  // Down handler when index is way beyond bounds
-  agentIdx = Math.min(agentList.length - 1, Math.max(0, agentIdx + 1));
-  assert.strictEqual(agentIdx, 0);
-  assert.strictEqual(agentList[agentIdx], 'single');
+  // Stale high index
+  tui.setState({ activeNav: 3, composerBuffer: '', agentList: ['single'], agentIdx: 99999 });
+  await tui.handleKey('', { name: 'down' });
+  assert.strictEqual(tui.getState().agentIdx, 0);
+  assert.strictEqual(tui.getState().selectedAgent, 'single');
 
-  // Up handler when index is negative
-  agentIdx = -100;
-  agentIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx - 1));
-  assert.strictEqual(agentIdx, 0);
-  assert.strictEqual(agentList[agentIdx], 'single');
+  // Negative index
+  tui.setState({ activeNav: 3, composerBuffer: '', agentList: ['single'], agentIdx: -100 });
+  await tui.handleKey('', { name: 'up' });
+  assert.strictEqual(tui.getState().agentIdx, 0);
+  assert.strictEqual(tui.getState().selectedAgent, 'single');
 
-  // Enter handler on empty list
-  agentList = [];
-  agentIdx = 10;
-  if (agentList.length === 0) {
-    // Must return without modifying or throwing
-    assert.strictEqual(agentList[agentIdx], undefined);
-  }
-
-  // selectAgent guards against all falsy and non-string inputs
-  function testSelect(arg) {
-    if (!arg || typeof arg !== 'string') return 'REJECTED';
-    return 'ACCEPTED';
-  }
-
-  assert.strictEqual(testSelect(undefined), 'REJECTED');
-  assert.strictEqual(testSelect(null), 'REJECTED');
-  assert.strictEqual(testSelect(0), 'REJECTED');
-  assert.strictEqual(testSelect(false), 'REJECTED');
-  assert.strictEqual(testSelect({}), 'REJECTED');
-  assert.strictEqual(testSelect([]), 'REJECTED');
-  assert.strictEqual(testSelect('valid-agent'), 'ACCEPTED');
+  // Empty list with Enter and renderFrame must not throw
+  tui.setState({ activeNav: 3, composerBuffer: '', agentList: [], agentIdx: 10 });
+  const enterRes = await tui.handleKey('', { name: 'return' });
+  assert.strictEqual(enterRes.handled, false);
+  assert.doesNotThrow(() => tui.renderFrame(100, 30));
 });

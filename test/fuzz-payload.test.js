@@ -24,12 +24,20 @@ const {
   clearInbox,
   sanitizeWindowsFilename
 } = require('../src/core/mesh');
+const { createIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 describe('Milestone 4 — #93: Message Payload Fuzzing Test Suite', () => {
-  const fuzzAgent = `fuzz-agent-${Date.now()}`;
+  let iso;
+  let fuzzAgent;
+
+  beforeEach(() => {
+    iso = createIsolatedMeshEnv('intercom-fuzz-');
+    fuzzAgent = `fuzz-agent-${Date.now()}`;
+  });
 
   afterEach(async () => {
     try { await clearInbox(fuzzAgent); } catch {}
+    iso.cleanup();
   });
 
   test('Fuzz 1: Malformed and Truncated JSON Files in Mailbox', async () => {

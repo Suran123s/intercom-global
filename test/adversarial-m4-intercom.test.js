@@ -35,14 +35,18 @@ const {
 } = require('../src/core/mesh');
 const { MetricsRegistry } = require('../src/core/metrics');
 const { createServer, dispatchMessage } = require('../src/core/server');
-const { MESH_DIR } = require('../src/config');
-const { cleanAllTestArtifacts } = require('./helpers/cleaner');
+const { getMeshDir } = require('../src/config');
+const { createIsolatedMeshEnv, closeServer } = require('./helpers/isolated-env');
 
 describe('Milestone 4 — Empirical Adversarial Stress Testing (Challenger M4-2)', () => {
+  let iso;
+
+  beforeEach(() => {
+    iso = createIsolatedMeshEnv('intercom-adv-m4-');
+  });
+
   afterEach(async () => {
-    try {
-      cleanAllTestArtifacts(/^adv-/i);
-    } catch {}
+    iso.cleanup();
   });
 
   // =========================================================================
@@ -209,6 +213,7 @@ describe('Milestone 4 — Empirical Adversarial Stress Testing (Challenger M4-2)
 
     const child = cp.spawn(process.execPath, ['-e', childScript], {
       cwd: path.resolve(__dirname, '..'),
+      env: iso.env,
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
@@ -228,7 +233,7 @@ describe('Milestone 4 — Empirical Adversarial Stress Testing (Challenger M4-2)
     assert.ok(lockToken, 'Child must acquire lock');
 
     // Verify lock is currently held on disk
-    const locksDir = path.join(MESH_DIR, 'locks');
+    const locksDir = path.join(getMeshDir(), 'locks');
     const lockDir = path.join(locksDir, `${testAgent}.lock`);
     assert.ok(fs.existsSync(lockDir), 'Lock directory must exist while child is alive');
 
@@ -362,7 +367,7 @@ describe('Milestone 4 — Empirical Adversarial Stress Testing (Challenger M4-2)
       try { surviving.req.destroy(); } catch {}
     }
 
-    await new Promise((resolve) => server.close(resolve));
+    await closeServer(server);
   });
 
   // =========================================================================
@@ -510,7 +515,7 @@ describe('Milestone 4 — Empirical Adversarial Stress Testing (Challenger M4-2)
     const res4 = await postRaw(JSON.stringify({ from: 'alice', to: 'bob', message: 'Hello Bob' }));
     assert.equal(res4.status, 200, 'Valid body must return HTTP 200');
 
-    await new Promise((resolve) => server.close(resolve));
+    await closeServer(server);
     await clearInbox('bob');
   });
 });

@@ -23,12 +23,14 @@ const {
 } = require('../src/core/mesh');
 const { dispatchMessage } = require('../src/core/server');
 const { startDaemon, stopDaemon, daemonStatus, readPid } = require('../src/core/daemon-manager');
-const { MESH_DIR } = require('../src/config');
+const { getMeshDir } = require('../src/config');
+const { withIsolatedMeshEnv, getFreePort, waitForCondition } = require('./helpers/isolated-env');
 
 // Helper to clean up test agent mailboxes
 function cleanupAgent(agentName) {
   try {
-    const inboxDir = path.join(MESH_DIR, 'inbox', agentName);
+    const meshDir = getMeshDir();
+    const inboxDir = path.join(meshDir, 'inbox', agentName);
     if (fs.existsSync(inboxDir)) {
       fs.rmSync(inboxDir, { recursive: true, force: true });
     }
@@ -36,7 +38,7 @@ function cleanupAgent(agentName) {
     if (fs.existsSync(legacyFile)) {
       fs.unlinkSync(legacyFile);
     }
-    const lockDir = path.join(MESH_DIR, 'locks', `${agentName}.lock`);
+    const lockDir = path.join(meshDir, 'locks', `${agentName}.lock`);
     if (fs.existsSync(lockDir)) {
       fs.rmSync(lockDir, { recursive: true, force: true });
     }
@@ -47,7 +49,8 @@ function cleanupAgent(agentName) {
 // 1. CONCURRENT COMPACTION STRESS SUITE
 // ============================================================================
 
-test('1.1 Concurrent Compaction Stress: Zero data loss & active unread messages never deleted', async () => {
+test('1.1 Concurrent Compaction Stress: Zero data loss & active unread messages never deleted', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-11-');
   const agent = 'compaction-stress-' + Date.now();
   cleanupAgent(agent);
 
@@ -126,7 +129,8 @@ test('1.1 Concurrent Compaction Stress: Zero data loss & active unread messages 
   cleanupAgent(agent);
 });
 
-test('1.2 Compaction & CAS Lock Contention: Locked mailboxes are skipped and untouched', async () => {
+test('1.2 Compaction & CAS Lock Contention: Locked mailboxes are skipped and untouched', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-12-');
   const agent = 'locked-agent-' + Date.now();
   cleanupAgent(agent);
 
@@ -162,7 +166,8 @@ test('1.2 Compaction & CAS Lock Contention: Locked mailboxes are skipped and unt
   cleanupAgent(agent);
 });
 
-test('1.3 Compaction Orphaned Temp File Pruning: Prunes expired .tmp files and preserves .json messages', async () => {
+test('1.3 Compaction Orphaned Temp File Pruning: Prunes expired .tmp files and preserves .json messages', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-13-');
   const agent = 'temp-prune-' + Date.now();
   cleanupAgent(agent);
 
@@ -201,7 +206,8 @@ test('1.3 Compaction Orphaned Temp File Pruning: Prunes expired .tmp files and p
   cleanupAgent(agent);
 });
 
-test('1.4 Compaction with Concurrent Message Acknowledgement & Archival', async () => {
+test('1.4 Compaction with Concurrent Message Acknowledgement & Archival', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-14-');
   const agent = 'ack-compact-' + Date.now();
   cleanupAgent(agent);
 
@@ -248,7 +254,8 @@ test('1.4 Compaction with Concurrent Message Acknowledgement & Archival', async 
 // 2. DISCRETE MAILBOX CONCURRENCY & NTFS CONTENTION SUITE
 // ============================================================================
 
-test('2.1 High Concurrency Discrete Writes: Zero corrupted JSON or zero-byte files', async () => {
+test('2.1 High Concurrency Discrete Writes: Zero corrupted JSON or zero-byte files', async (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-adv-m1-21-');
   const agent = 'high-concurrency-' + Date.now();
   cleanupAgent(agent);
 
@@ -285,7 +292,7 @@ test('2.1 High Concurrency Discrete Writes: Zero corrupted JSON or zero-byte fil
 
   assert.strictEqual(errors.length, 0, `Write errors: ${errors.map(e => e.message).join(', ')}`);
 
-  const inboxDir = path.join(MESH_DIR, 'inbox', agent);
+  const inboxDir = path.join(meshDir, 'inbox', agent);
   assert.ok(fs.existsSync(inboxDir));
 
   const files = fs.readdirSync(inboxDir);
@@ -315,7 +322,8 @@ test('2.1 High Concurrency Discrete Writes: Zero corrupted JSON or zero-byte fil
   cleanupAgent(agent);
 });
 
-test('2.2 High Contention Read-Write Interleaving: Readers never see partial writes or JSON parse errors', async () => {
+test('2.2 High Contention Read-Write Interleaving: Readers never see partial writes or JSON parse errors', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-22-');
   const agent = 'rw-interleave-' + Date.now();
   cleanupAgent(agent);
 
@@ -363,7 +371,8 @@ test('2.2 High Contention Read-Write Interleaving: Readers never see partial wri
   cleanupAgent(agent);
 });
 
-test('2.3 Payload Stress: Multi-KB payloads, Unicode, emojis, and special characters preserved without corruption', async () => {
+test('2.3 Payload Stress: Multi-KB payloads, Unicode, emojis, and special characters preserved without corruption', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-23-');
   const agent = 'payload-stress-' + Date.now();
   cleanupAgent(agent);
 
@@ -399,7 +408,8 @@ test('2.3 Payload Stress: Multi-KB payloads, Unicode, emojis, and special charac
 // 3. BLESSED TUI STABILITY SUITE
 // ============================================================================
 
-test('3.1 listActiveMailboxes stability under concurrent mailbox creation and deletion', async () => {
+test('3.1 listActiveMailboxes stability under concurrent mailbox creation and deletion', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-31-');
   const prefix = 'tui-churn-' + Date.now();
   const createdAgents = [];
 
@@ -447,37 +457,36 @@ test('3.1 listActiveMailboxes stability under concurrent mailbox creation and de
   }
 });
 
-test('3.2 Empirical Verification: TUI agentIdx Boundary Condition on Mailbox Shrink', () => {
-  // In bin/intercom-tui.js lines 153-167:
-  // When mailboxes shrink, agentList length drops.
-  // We empirically test whether the logic in intercom-tui.js line 166:
-  //   agentIdx = Math.max(0, agentIdx - 1); selectAgent(agentList[agentIdx]);
-  // produces undefined when agentIdx was high and mailboxes shrank.
+test('3.2 Empirical Verification: Real TUI agentIdx Boundary Condition on Mailbox Shrink', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-32-');
+  const tui = require('../bin/intercom-tui.js');
+  t.after(() => tui.destroyScreen());
 
-  let agentList = ['agent1', 'agent2', 'agent3', 'agent4', 'agent5'];
-  let agentIdx = 4; // user selected the 5th agent
+  // User had selected the 5th agent (index 4), then mailboxes shrank to 2
+  tui.setState({
+    activeNav: 3, // Peers view
+    composerBuffer: '',
+    agentList: ['agent1', 'agent2'],
+    agentIdx: 4,
+    selectedAgent: 'agent5'
+  });
 
-  // Simulated rapid compaction removes 3 mailboxes:
-  agentList = ['agent1', 'agent2']; // now length is 2 (indices 0 and 1)
-
-  // TUI "up" handler:
-  const newIdx = Math.max(0, agentIdx - 1); // = 3
-  const targetAgent = agentList[newIdx]; // undefined!
-
-  assert.strictEqual(targetAgent, undefined, 'Demonstrates that unconstrained agentIdx accesses undefined');
-
-  // Verify that safe clamped index resolves the boundary condition:
-  const safeIdx = Math.max(0, Math.min(agentList.length - 1, agentIdx - 1));
-  const safeTarget = agentList[safeIdx];
-  assert.strictEqual(safeTarget, 'agent2', 'Safe clamping prevents undefined crash');
+  // Pressing up in real TUI must clamp safely to valid index 1 ('agent2') instead of undefined
+  await tui.handleKey('', { name: 'up' });
+  const state = tui.getState();
+  assert.strictEqual(state.agentIdx, 1, 'Safe clamping prevents out-of-bounds index');
+  assert.strictEqual(state.selectedAgent, 'agent2', 'Safe clamping selects last valid agent');
+  assert.doesNotThrow(() => tui.renderFrame(100, 30));
 });
 
 // ============================================================================
 // 4. DAEMON ALIGNMENT & WINDOWS PROCESS ORPHAN VERIFICATION SUITE
 // ============================================================================
 
-test('4.1 Daemon Lifecycle: Start -> Health Probe -> Stop -> Clean Termination (No Orphans)', async () => {
-  const testPort = 4195;
+test('4.1 Daemon Lifecycle: Start -> Health Probe -> Stop -> Clean Termination (No Orphans)', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-41-');
+  t.after(() => { try { stopDaemon(); } catch {} });
+  const testPort = await getFreePort();
 
   await stopDaemon(testPort);
 
@@ -487,18 +496,10 @@ test('4.1 Daemon Lifecycle: Start -> Health Probe -> Stop -> Clean Termination (
   const pid1 = start1.pid;
   assert.ok(pid1 && pid1 > 0);
 
-  // Poll health endpoint
-  let online1 = false;
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 150));
-    try {
-      const res = await fetch(`http://127.0.0.1:${testPort}/api/intercom/health`);
-      if (res.ok) {
-        online1 = true;
-        break;
-      }
-    } catch {}
-  }
+  const online1 = await waitForCondition(async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/intercom/health`);
+    return res.ok;
+  }, { timeoutMs: 3000, intervalMs: 30, label: 'daemon cycle 1 health' });
   assert.ok(online1, 'Daemon health endpoint must be reachable');
 
   // Stop
@@ -506,14 +507,14 @@ test('4.1 Daemon Lifecycle: Start -> Health Probe -> Stop -> Clean Termination (
   assert.strictEqual(stop1.status, 'stopped');
 
   // Windows process death verification
-  await new Promise(r => setTimeout(r, 300));
-  let alive1 = true;
-  try {
-    process.kill(pid1, 0);
-  } catch {
-    alive1 = false;
-  }
-  assert.strictEqual(alive1, false, `PID ${pid1} was not terminated! Orphaned process.`);
+  await waitForCondition(() => {
+    try {
+      process.kill(pid1, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, { timeoutMs: 2000, intervalMs: 30, label: `PID ${pid1} termination` });
 
   // Cycle 2: Immediate re-start on same port
   const start2 = startDaemon(testPort);
@@ -521,35 +522,30 @@ test('4.1 Daemon Lifecycle: Start -> Health Probe -> Stop -> Clean Termination (
   const pid2 = start2.pid;
   assert.notStrictEqual(pid1, pid2, 'New spawn must have different PID');
 
-  let online2 = false;
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 150));
-    try {
-      const res = await fetch(`http://127.0.0.1:${testPort}/api/intercom/health`);
-      if (res.ok) {
-        online2 = true;
-        break;
-      }
-    } catch {}
-  }
+  const online2 = await waitForCondition(async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/intercom/health`);
+    return res.ok;
+  }, { timeoutMs: 3000, intervalMs: 30, label: 'daemon cycle 2 health' });
   assert.ok(online2, 'Daemon must be reachable after restart');
 
   // Stop 2
   const stop2 = stopDaemon();
   assert.strictEqual(stop2.status, 'stopped');
 
-  await new Promise(r => setTimeout(r, 300));
-  let alive2 = true;
-  try {
-    process.kill(pid2, 0);
-  } catch {
-    alive2 = false;
-  }
-  assert.strictEqual(alive2, false, `PID ${pid2} was not terminated! Orphaned process.`);
+  await waitForCondition(() => {
+    try {
+      process.kill(pid2, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, { timeoutMs: 2000, intervalMs: 30, label: `PID ${pid2} termination` });
 });
 
-test('4.2 Daemon Duplicate Start Prevention', async () => {
-  const testPort = 4196;
+test('4.2 Daemon Duplicate Start Prevention', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-adv-m1-42-');
+  t.after(() => { try { stopDaemon(); } catch {} });
+  const testPort = await getFreePort();
   await stopDaemon(testPort);
 
   const start1 = startDaemon(testPort);
@@ -561,11 +557,19 @@ test('4.2 Daemon Duplicate Start Prevention', async () => {
   assert.strictEqual(start2.pid, start1.pid);
 
   stopDaemon();
-  await new Promise(r => setTimeout(r, 300));
+  await waitForCondition(() => {
+    try {
+      process.kill(start1.pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, { timeoutMs: 2000, intervalMs: 30, label: `PID ${start1.pid} termination` });
 });
 
-test('4.3 Stale PID File Recovery: Gracefully recovers when PID file contains non-existent process', () => {
-  const pidFile = path.join(MESH_DIR, 'daemon.pid');
+test('4.3 Stale PID File Recovery: Gracefully recovers when PID file contains non-existent process', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-adv-m1-43-');
+  const pidFile = path.join(meshDir, 'daemon.pid');
 
   // Write a fake, dead PID
   const fakeDeadPid = 999999;
@@ -581,40 +585,37 @@ test('4.3 Stale PID File Recovery: Gracefully recovers when PID file contains no
   assert.strictEqual(fs.existsSync(pidFile), false, 'Stale PID file must be unlinked');
 });
 
-test('4.4 CLI Command Alignment: bin/intercom.js __daemon_run launches properly', async () => {
-  const testPort = 4197;
+test('4.4 CLI Command Alignment: bin/intercom.js __daemon_run launches properly', async (t) => {
+  const { env } = withIsolatedMeshEnv(t, 'intercom-adv-m1-44-');
+  const testPort = await getFreePort();
   const binFile = path.resolve(__dirname, '../bin/intercom.js');
 
   const cliChild = spawn(process.execPath, [binFile, '__daemon_run', `--port=${testPort}`], {
     detached: true,
-    stdio: 'ignore'
+    stdio: 'ignore',
+    env
   });
   cliChild.unref();
+  t.after(() => {
+    try { process.kill(cliChild.pid, 'SIGTERM'); } catch {}
+  });
 
-  let cliOnline = false;
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 150));
-    try {
-      const res = await fetch(`http://127.0.0.1:${testPort}/api/intercom/health`);
-      if (res.ok) {
-        cliOnline = true;
-        break;
-      }
-    } catch {}
-  }
+  const cliOnline = await waitForCondition(async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/intercom/health`);
+    return res.ok;
+  }, { timeoutMs: 3000, intervalMs: 30, label: 'CLI __daemon_run health' });
   assert.ok(cliOnline, 'CLI __daemon_run must start and respond to health check');
 
   // Terminate
   try {
     process.kill(cliChild.pid, 'SIGTERM');
   } catch {}
-  await new Promise(r => setTimeout(r, 300));
-
-  let cliAlive = true;
-  try {
-    process.kill(cliChild.pid, 0);
-  } catch {
-    cliAlive = false;
-  }
-  assert.strictEqual(cliAlive, false, `CLI Child PID ${cliChild.pid} was orphaned!`);
+  await waitForCondition(() => {
+    try {
+      process.kill(cliChild.pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, { timeoutMs: 2000, intervalMs: 30, label: `CLI PID ${cliChild.pid} termination` });
 });

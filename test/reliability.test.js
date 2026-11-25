@@ -4,10 +4,12 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const { getDlq, enqueueDlq, clearDlq, updateMessageStatus, getMessageStatus, retryWithBackoff } = require('../src/core/dlq');
-const { getProfiles, isEndpointReady } = require('../src/controllers/spawner');
-const { getInboxFile, writeInbox } = require('../src/core/mesh');
+const { getProfiles } = require('../src/controllers/spawner');
+const { writeInbox } = require('../src/core/mesh');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('DLQ enqueues and inspects failed tasks with diagnostics', () => {
+test('DLQ enqueues and inspects failed tasks with diagnostics', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-rel-dlq-');
   clearDlq();
   assert.strictEqual(getDlq().length, 0);
 
@@ -31,9 +33,9 @@ test('DLQ enqueues and inspects failed tasks with diagnostics', () => {
   assert.strictEqual(getDlq().length, 0);
 });
 
-test('Task lifecycle tracking: updateMessageStatus and getMessageStatus', () => {
+test('Task lifecycle tracking: updateMessageStatus and getMessageStatus', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-rel-ack-');
   const agent = 'test-ack-agent-' + Date.now();
-  const file = getInboxFile(agent);
   const msgId = 'task-999';
 
   writeInbox(agent, [{
@@ -60,8 +62,6 @@ test('Task lifecycle tracking: updateMessageStatus and getMessageStatus', () => 
   assert.strictEqual(status.status, 'COMPLETED');
   assert.strictEqual(status.result, 'Migration executed in 1.4s. 0 errors.');
   assert.strictEqual(status.read, true);
-
-  if (fs.existsSync(file)) fs.unlinkSync(file);
 });
 
 test('Spawner profiles discovery contains standard agent profiles', () => {
