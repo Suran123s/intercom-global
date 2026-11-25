@@ -2,8 +2,15 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { MESH_DIR } = require('../config');
-const { retryNtfsOperationSync } = require('./mesh');
+const { getMeshDir } = require('../config');
+const {
+  retryNtfsOperation,
+  withLock,
+  validateAgentName,
+  resolveSafePath,
+  atomicWriteFile,
+  atomicWriteFileSync
+} = require('./mesh');
 
 const TRANSIENT_PATTERNS = [
   /EBUSY/i,
@@ -58,8 +65,8 @@ function computeBackoffDelay(retryCount = 0, baseDelayMs = 50, maxDelayMs = 2000
 }
 
 class DlqRetryDaemon {
-  constructor(meshDir = MESH_DIR, options = {}) {
-    this.meshDir = meshDir || MESH_DIR;
+  constructor(meshDir = getMeshDir(), options = {}) {
+    this.meshDir = meshDir || getMeshDir();
     this.dlqDir = path.join(this.meshDir, 'dlq');
     this.poisonDir = path.join(this.meshDir, 'dlq', 'poison');
     this.maxRetries = options.maxRetries !== undefined ? options.maxRetries : 3;
@@ -67,6 +74,7 @@ class DlqRetryDaemon {
     this.maxDelayMs = options.maxDelayMs !== undefined ? options.maxDelayMs : 2000;
     this.timer = null;
     this.running = false;
+    this.isProcessing = false;
 
     if (!fs.existsSync(this.dlqDir)) {
       try { fs.mkdirSync(this.dlqDir, { recursive: true }); } catch {}
@@ -95,8 +103,17 @@ class DlqRetryDaemon {
     return computeBackoffDelay(retryCount, this.baseDelayMs, this.maxDelayMs);
   }
 
-  enqueueDeadLetter(record) {
-    const id = record.id || `dlq_${crypto.randomUUID().slice(0, 8)}`;
+  enqueueDeadLetter(record = {}) {
+    const rawId = record.id !== undefined && record.id !== null
+      ? String(record.id)
+      : `dlq_${crypto.randomUUID().slice(0, 8)}`;
+    const id = validateAgentName(rawId);
+    const filePath = resolveSafePath(this.dlqDir, `${id}.json`);
+
+    if (!fs.existsSync(this.dlqDir)) {
+      fs.mkdirSync(this.dlqDir, { recursive: true });
+    }
+
     const dlqItem = {
       ...record,
       id,
@@ -106,81 +123,109 @@ class DlqRetryDaemon {
       nextRetryAt: record.nextRetryAt || Date.now(),
       enqueuedAt: record.enqueuedAt || new Date().toISOString()
     };
-    const filePath = path.join(this.dlqDir, `${id}.json`);
-    retryNtfsOperationSync(() => fs.writeFileSync(filePath, JSON.stringify(dlqItem, null, 2), 'utf8'));
+
+    atomicWriteFileSync(filePath, JSON.stringify(dlqItem, null, 2));
     return dlqItem;
   }
 
   async processDlqOnce(deliveryFn = null) {
+    if (this.isProcessing) return;
     if (!fs.existsSync(this.dlqDir)) return;
-    const files = fs.readdirSync(this.dlqDir).filter((f) => f.endsWith('.json') && !f.startsWith('.'));
-    this.stats.scanned += files.length;
-    const now = Date.now();
 
-    for (const file of files) {
-      const filePath = path.join(this.dlqDir, file);
-      let item;
-      try {
-        item = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      } catch {
-        continue;
-      }
+    this.isProcessing = true;
+    try {
+      await withLock('dlq_storage', async () => {
+        if (!fs.existsSync(this.dlqDir)) return;
+        const files = (await fs.promises.readdir(this.dlqDir)).filter(
+          (f) => f.endsWith('.json') && !f.startsWith('.')
+        );
+        this.stats.scanned += files.length;
+        const now = Date.now();
 
-      // Check transient status
-      const transient = item.isTransient !== undefined ? item.isTransient : this.isTransientError(item.lastError);
+        for (const file of files) {
+          const filePath = resolveSafePath(this.dlqDir, file);
+          let item;
+          try {
+            item = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+          } catch {
+            continue;
+          }
 
-      // 1. Permanent / Fatal Error -> move to poison immediately
-      if (!transient) {
-        try {
-          retryNtfsOperationSync(() => fs.renameSync(filePath, path.join(this.poisonDir, file)));
-        } catch {}
-        this.stats.poisoned++;
-        continue;
-      }
+          // Re-evaluate transient status cleanly
+          const transient = item.isTransient !== undefined
+            ? (Boolean(item.isTransient) && this.isTransientError(item.lastError))
+            : this.isTransientError(item.lastError);
 
-      // 2. Not yet ready for retry
-      if (item.nextRetryAt && item.nextRetryAt > now) {
-        this.stats.skippedPending++;
-        continue;
-      }
+          // 1. Permanent / Fatal Error -> move to poison immediately
+          if (!transient) {
+            try {
+              const poisonPath = resolveSafePath(this.poisonDir, file);
+              await retryNtfsOperation(() => fs.promises.rename(filePath, poisonPath));
+            } catch {}
+            this.stats.poisoned++;
+            continue;
+          }
 
-      // 3. Exceeded max retries -> move to poison
-      if ((item.retryCount || 0) >= this.maxRetries) {
-        try {
-          retryNtfsOperationSync(() => fs.renameSync(filePath, path.join(this.poisonDir, file)));
-        } catch {}
-        this.stats.poisoned++;
-        continue;
-      }
+          // 2. Not yet ready for retry
+          if (item.nextRetryAt && item.nextRetryAt > now) {
+            this.stats.skippedPending++;
+            continue;
+          }
 
-      // 4. Attempt retry
-      try {
-        if (deliveryFn) {
-          await deliveryFn(item.recipient || item.to, item.payload || item);
-        } else {
-          const { writeMessage } = require('./mesh');
-          await writeMessage(item.recipient || item.to, {
-            sender: item.sender || 'dlq_retry_daemon',
-            type: item.type || 'task_dispatch',
-            priority: item.priority || 'HIGH',
-            payload: item.payload || item
-          });
+          // 3. Exceeded max retries -> move to poison
+          if ((item.retryCount || 0) >= this.maxRetries) {
+            try {
+              const poisonPath = resolveSafePath(this.poisonDir, file);
+              await retryNtfsOperation(() => fs.promises.rename(filePath, poisonPath));
+            } catch {}
+            this.stats.poisoned++;
+            continue;
+          }
+
+          // 4. Attempt retry
+          try {
+            if (deliveryFn) {
+              await deliveryFn(item.recipient || item.to, item.payload || item);
+            } else {
+              const { writeMessage } = require('./mesh');
+              await writeMessage(item.recipient || item.to, {
+                sender: item.sender || 'dlq_retry_daemon',
+                type: item.type || 'task_dispatch',
+                priority: item.priority || 'HIGH',
+                payload: item.payload || item
+              }, { meshDir: this.meshDir });
+            }
+            // Success: remove from DLQ
+            try {
+              await retryNtfsOperation(() => fs.promises.unlink(filePath));
+            } catch {}
+            this.stats.retried++;
+          } catch (err) {
+            const errMsg = (err && err.message) ? err.message : String(err);
+            item.retryCount = (item.retryCount || 0) + 1;
+            item.lastError = errMsg;
+            item.isTransient = this.isTransientError(errMsg);
+
+            if (!item.isTransient) {
+              // Fatal error on retry (e.g. SecurityError): poison-pill immediately
+              try {
+                const poisonPath = resolveSafePath(this.poisonDir, file);
+                await atomicWriteFile(filePath, JSON.stringify(item, null, 2));
+                await retryNtfsOperation(() => fs.promises.rename(filePath, poisonPath));
+              } catch {}
+              this.stats.poisoned++;
+            } else {
+              const delay = this.calculateBackoff(item.retryCount);
+              item.nextRetryAt = Date.now() + delay;
+              try {
+                await atomicWriteFile(filePath, JSON.stringify(item, null, 2));
+              } catch {}
+            }
+          }
         }
-        // Success: remove from DLQ
-        try {
-          retryNtfsOperationSync(() => fs.unlinkSync(filePath));
-        } catch {}
-        this.stats.retried++;
-      } catch (err) {
-        // Failure: increment retryCount and update backoff
-        item.retryCount = (item.retryCount || 0) + 1;
-        item.lastError = err.message || String(err);
-        const delay = this.calculateBackoff(item.retryCount);
-        item.nextRetryAt = Date.now() + delay;
-        try {
-          retryNtfsOperationSync(() => fs.writeFileSync(filePath, JSON.stringify(item, null, 2), 'utf8'));
-        } catch {}
-      }
+      }, { ttlMs: 10000, timeoutMs: 10000, meshDir: this.meshDir });
+    } finally {
+      this.isProcessing = false;
     }
   }
 
@@ -188,6 +233,7 @@ class DlqRetryDaemon {
     if (this.running) return;
     this.running = true;
     this.timer = setInterval(async () => {
+      if (this.isProcessing) return;
       try {
         await this.processDlqOnce();
       } catch {}
@@ -205,7 +251,7 @@ class DlqRetryDaemon {
 }
 
 async function processDlqRetries(options = {}) {
-  const daemon = new DlqRetryDaemon(options.meshDir || MESH_DIR, options);
+  const daemon = new DlqRetryDaemon(options.meshDir || getMeshDir(), options);
   await daemon.processDlqOnce(options.deliveryFn);
   return daemon.stats;
 }

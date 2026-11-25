@@ -1,8 +1,8 @@
 // src/core/session-sync.js - Multi-Harness Session Ledger Synchronization
 const fs = require('fs');
 const path = require('path');
-const { MESH_DIR } = require('../config');
-const { sanitizeAgentName } = require('./mesh');
+const { getMeshDir } = require('../config');
+const { sanitizeAgentName, resolveSafePath, withLockSync, atomicWriteFileSync } = require('./mesh');
 
 const DEFAULT_EXDELEGATE_DIR = process.env.EXDELEGATE_DIR || path.resolve(
   process.env.USERPROFILE || process.env.HOME || '',
@@ -11,8 +11,8 @@ const DEFAULT_EXDELEGATE_DIR = process.env.EXDELEGATE_DIR || path.resolve(
 );
 
 class SessionLedgerSync {
-  constructor(meshDir = MESH_DIR) {
-    this.meshDir = meshDir || MESH_DIR;
+  constructor(meshDir = getMeshDir()) {
+    this.meshDir = meshDir || getMeshDir();
     this.sessionsDir = path.join(this.meshDir, 'sessions');
     if (!fs.existsSync(this.sessionsDir)) {
       try { fs.mkdirSync(this.sessionsDir, { recursive: true }); } catch {}
@@ -25,33 +25,45 @@ class SessionLedgerSync {
     }
 
     const safeId = sanitizeAgentName(String(record.sessionId));
-    const filePath = path.join(this.sessionsDir, `${safeId}.json`);
-    let toSave = {
-      ...record,
-      sessionId: safeId,
-      updatedAt: record.updatedAt || new Date().toISOString()
-    };
-
-    if (fs.existsSync(filePath)) {
-      try {
-        const existing = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
-        const newTime = new Date(toSave.updatedAt).getTime();
-        // Conflict resolution: newest timestamp wins
-        if (existingTime > newTime) {
-          return existing;
-        }
-        toSave = { ...existing, ...toSave };
-      } catch {}
+    const filePath = resolveSafePath(this.sessionsDir, `${safeId}.json`);
+    if (!fs.existsSync(this.sessionsDir)) {
+      fs.mkdirSync(this.sessionsDir, { recursive: true });
     }
 
-    fs.writeFileSync(filePath, JSON.stringify(toSave, null, 2), 'utf8');
-    return toSave;
+    return withLockSync(`session_${safeId}`, () => {
+      let toSave = {
+        ...record,
+        sessionId: safeId,
+        updatedAt: record.updatedAt || new Date().toISOString()
+      };
+
+      const newTime = new Date(toSave.updatedAt).getTime();
+
+      if (fs.existsSync(filePath)) {
+        try {
+          const existing = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          if (Number.isNaN(newTime)) {
+            return existing;
+          }
+          const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+          // Conflict resolution: newest timestamp wins
+          if (!Number.isNaN(existingTime) && existingTime > newTime) {
+            return existing;
+          }
+          toSave = { ...existing, ...toSave };
+        } catch {}
+      } else if (Number.isNaN(newTime)) {
+        toSave.updatedAt = new Date().toISOString();
+      }
+
+      atomicWriteFileSync(filePath, JSON.stringify(toSave, null, 2));
+      return toSave;
+    }, { meshDir: this.meshDir });
   }
 
   getSession(sessionId) {
     const safeId = sanitizeAgentName(String(sessionId));
-    const filePath = path.join(this.sessionsDir, `${safeId}.json`);
+    const filePath = resolveSafePath(this.sessionsDir, `${safeId}.json`);
     if (!fs.existsSync(filePath)) return null;
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -81,11 +93,13 @@ class SessionLedgerSync {
   }
 }
 
-async function syncFromExdelegate(exdelegateDir = DEFAULT_EXDELEGATE_DIR, meshDir = MESH_DIR) {
+async function syncFromExdelegate(exdelegateDir = DEFAULT_EXDELEGATE_DIR, meshDir = getMeshDir()) {
   const ledger = new SessionLedgerSync(meshDir);
   const report = { synced: 0, updated: 0, activeSessions: [] };
 
-  if (!fs.existsSync(exdelegateDir)) {
+  try {
+    await fs.promises.access(exdelegateDir);
+  } catch {
     return report;
   }
 
@@ -93,38 +107,53 @@ async function syncFromExdelegate(exdelegateDir = DEFAULT_EXDELEGATE_DIR, meshDi
   const indexFile = path.join(exdelegateDir, 'sessions-index.json');
   const discovered = new Map();
 
-  if (fs.existsSync(indexFile)) {
-    try {
-      const content = fs.readFileSync(indexFile, 'utf8');
-      const parsed = JSON.parse(content);
-      const list = Array.isArray(parsed) ? parsed : Object.values(parsed);
-      for (const s of list) {
-        if (s && (s.sessionId || s.id)) {
-          discovered.set(s.sessionId || s.id, s);
+  try {
+    const content = await fs.promises.readFile(indexFile, 'utf8');
+    const parsed = JSON.parse(content);
+    const list = Array.isArray(parsed) ? parsed : Object.values(parsed);
+    for (const s of list) {
+      if (s && (s.sessionId || s.id)) {
+        discovered.set(s.sessionId || s.id, s);
+      }
+    }
+  } catch {}
+
+  try {
+    const files = await fs.promises.readdir(sessionsDir);
+    const jsonFiles = files.filter((f) => f.endsWith('.json'));
+    const BATCH_SIZE = 32;
+    for (let i = 0; i < jsonFiles.length; i += BATCH_SIZE) {
+      const batch = jsonFiles.slice(i, i + BATCH_SIZE);
+      const parsedBatch = await Promise.all(
+        batch.map(async (f) => {
+          try {
+            const raw = await fs.promises.readFile(path.join(sessionsDir, f), 'utf8');
+            const s = JSON.parse(raw);
+            return { f, s };
+          } catch {
+            return null;
+          }
+        })
+      );
+      for (const item of parsedBatch) {
+        if (!item || !item.s) continue;
+        const id = item.s.sessionId || item.s.id || item.f.replace('.json', '');
+        if (!discovered.has(id)) {
+          discovered.set(id, item.s);
         }
       }
-    } catch {}
-  }
-
-  if (fs.existsSync(sessionsDir)) {
-    try {
-      const files = fs.readdirSync(sessionsDir);
-      for (const f of files) {
-        if (!f.endsWith('.json')) continue;
-        try {
-          const raw = fs.readFileSync(path.join(sessionsDir, f), 'utf8');
-          const s = JSON.parse(raw);
-          const id = s.sessionId || s.id || f.replace('.json', '');
-          if (!discovered.has(id)) {
-            discovered.set(id, s);
-          }
-        } catch {}
-      }
-    } catch {}
-  }
+    }
+  } catch {}
 
   for (const [id, session] of discovered.entries()) {
-    const exists = ledger.getSession(id);
+    const safeId = sanitizeAgentName(String(id));
+    const targetPath = resolveSafePath(ledger.sessionsDir, `${safeId}.json`);
+    let existed = false;
+    try {
+      await fs.promises.access(targetPath);
+      existed = true;
+    } catch {}
+
     const saved = ledger.recordSession({
       sessionId: id,
       name: session.name || session.session_name || null,
@@ -142,7 +171,7 @@ async function syncFromExdelegate(exdelegateDir = DEFAULT_EXDELEGATE_DIR, meshDi
       metadata: session.metadata || {}
     });
 
-    if (exists) report.updated++;
+    if (existed) report.updated++;
     else report.synced++;
 
     report.activeSessions.push(saved);
@@ -151,7 +180,7 @@ async function syncFromExdelegate(exdelegateDir = DEFAULT_EXDELEGATE_DIR, meshDi
   return report;
 }
 
-function listSynchronizedSessions(meshDir = MESH_DIR) {
+function listSynchronizedSessions(meshDir = getMeshDir()) {
   const ledger = new SessionLedgerSync(meshDir);
   return ledger.listSessions();
 }

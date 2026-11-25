@@ -2,8 +2,14 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { MESH_DIR } = require('../config');
-const { validateAgentName, resolveSafePath, retryNtfsOperation } = require('./mesh');
+const { getMeshDir, getPort } = require('../config');
+const {
+  validateAgentName,
+  resolveSafePath,
+  retryNtfsOperation,
+  withLock,
+  atomicWriteFile
+} = require('./mesh');
 
 const VALID_IDES = [
   'antigravity',
@@ -80,26 +86,20 @@ function validateAgentCard(card) {
 /**
  * Returns registry file path for an agent
  * @param {string} agentName 
+ * @param {string} [meshDir]
  * @returns {string}
  */
-function getRegistryFilePath(agentName) {
+function getRegistryFilePath(agentName, meshDir = getMeshDir()) {
   const clean = validateAgentName(agentName);
-  const regDir = path.join(MESH_DIR, 'registry');
+  const regDir = path.join(meshDir, 'registry');
   if (!fs.existsSync(regDir)) {
     fs.mkdirSync(regDir, { recursive: true });
   }
   return resolveSafePath(regDir, `${clean}.json`);
 }
 
-/**
- * Registers an agent in the registry
- * @param {object} agentData 
- * @returns {Promise<object>}
- */
-async function registerAgent(agentData = {}) {
-  const cleanName = validateAgentName(agentData.name || agentData.agentName);
-  const filePath = getRegistryFilePath(cleanName);
-
+function buildAgentCard(cleanName, agentData, meshDir) {
+  const port = getPort();
   const card = {
     agentId: agentData.agentId || crypto.randomUUID(),
     name: cleanName,
@@ -109,9 +109,9 @@ async function registerAgent(agentData = {}) {
     status: agentData.status || 'IDLE',
     capabilities: Array.isArray(agentData.capabilities) ? agentData.capabilities : [],
     transport: agentData.transport || {
-      daemonUrl: 'http://127.0.0.1:4150',
+      daemonUrl: `http://127.0.0.1:${port}`,
       pipeName: `\\\\.\\pipe\\intercom-${cleanName}`,
-      inboxDir: path.join(MESH_DIR, 'inbox', cleanName)
+      inboxDir: path.join(meshDir, 'inbox', cleanName)
     },
     lastHeartbeat: new Date().toISOString(),
     reuseCount: Number.isInteger(agentData.reuseCount) ? agentData.reuseCount : 0,
@@ -122,12 +122,23 @@ async function registerAgent(agentData = {}) {
   if (!validation.valid) {
     throw new Error(`Invalid AgentStateCard: ${validation.errors.join('; ')}`);
   }
+  return card;
+}
 
-  const tmpPath = `${filePath}.${Date.now()}.tmp`;
-  await retryNtfsOperation(async () => {
-    await fs.promises.writeFile(tmpPath, JSON.stringify(card, null, 2), 'utf8');
-    await fs.promises.rename(tmpPath, filePath);
-  });
+/**
+ * Registers an agent in the registry
+ * @param {object} agentData 
+ * @returns {Promise<object>}
+ */
+async function registerAgent(agentData = {}) {
+  const cleanName = validateAgentName(agentData.name || agentData.agentName);
+  const meshDir = agentData.meshDir || getMeshDir();
+  const filePath = getRegistryFilePath(cleanName, meshDir);
+  const card = buildAgentCard(cleanName, agentData, meshDir);
+
+  await withLock(`registry_${cleanName}`, async () => {
+    await atomicWriteFile(filePath, JSON.stringify(card, null, 2));
+  }, { meshDir });
 
   return card;
 }
@@ -140,29 +151,35 @@ async function registerAgent(agentData = {}) {
  */
 async function unregisterAgent(agentName, purge = false) {
   const cleanName = validateAgentName(agentName);
-  const filePath = getRegistryFilePath(cleanName);
+  const meshDir = getMeshDir();
+  const filePath = getRegistryFilePath(cleanName, meshDir);
 
   if (!fs.existsSync(filePath)) return false;
 
-  if (purge) {
-    await retryNtfsOperation(async () => {
-      if (fs.existsSync(filePath)) {
-        await fs.promises.unlink(filePath);
-      }
-    });
-    return true;
-  }
+  return await withLock(`registry_${cleanName}`, async () => {
+    if (!fs.existsSync(filePath)) return false;
 
-  // Soft unregister: mark OFFLINE
-  const state = await getAgentState(cleanName);
-  if (state) {
-    state.status = 'OFFLINE';
-    state.lastHeartbeat = new Date().toISOString();
-    await retryNtfsOperation(async () => {
-      await fs.promises.writeFile(filePath, JSON.stringify(state, null, 2), 'utf8');
-    });
-  }
-  return true;
+    if (purge) {
+      await retryNtfsOperation(async () => {
+        if (fs.existsSync(filePath)) {
+          await fs.promises.unlink(filePath);
+        }
+      });
+      return true;
+    }
+
+    // Soft unregister: mark OFFLINE atomically
+    try {
+      const raw = await retryNtfsOperation(() => fs.promises.readFile(filePath, 'utf8'));
+      const state = JSON.parse(raw);
+      if (state && typeof state === 'object') {
+        state.status = 'OFFLINE';
+        state.lastHeartbeat = new Date().toISOString();
+        await atomicWriteFile(filePath, JSON.stringify(state, null, 2));
+      }
+    } catch {}
+    return true;
+  }, { meshDir });
 }
 
 /**
@@ -192,44 +209,56 @@ async function getAgentState(agentName) {
  * @returns {Promise<object[]>}
  */
 async function listActiveAgents(options = {}) {
-  const regDir = path.join(MESH_DIR, 'registry');
+  const regDir = path.join(getMeshDir(), 'registry');
   if (!fs.existsSync(regDir)) return [];
 
-  const staleThresholdMs = options.staleThresholdMs || 120000;
+  const staleThresholdMs = options.staleThresholdMs ?? 120000;
   const checkPid = options.checkPid !== false;
-  const files = await fs.promises.readdir(regDir);
+  const files = (await fs.promises.readdir(regDir)).filter(
+    (f) => f.endsWith('.json') && !f.startsWith('.tmp') && f !== 'reuse-tracker.json'
+  );
   const agents = [];
+  const BATCH_SIZE = 32;
 
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue;
-    const fullPath = path.join(regDir, f);
-    try {
-      const content = await fs.promises.readFile(fullPath, 'utf8');
-      const card = JSON.parse(content);
-
-      if (card.status === 'OFFLINE') continue;
-
-      const hbTime = Date.parse(card.lastHeartbeat) || 0;
-      const isStale = Date.now() - hbTime > staleThresholdMs;
-
-      let isAlive = true;
-      if (checkPid && card.pid) {
+  for (let i = 0; i < files.length; i += BATCH_SIZE) {
+    const batch = files.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(async (f) => {
+        const fullPath = path.join(regDir, f);
         try {
-          process.kill(card.pid, 0);
-        } catch (e) {
-          if (e.code === 'ESRCH') {
-            isAlive = false;
-          }
-        }
-      }
+          const content = await fs.promises.readFile(fullPath, 'utf8');
+          const card = JSON.parse(content);
+          if (!card || card.status === 'OFFLINE') return null;
 
-      if (!isStale && isAlive) {
-        agents.push(card);
-      } else if (options.includeStale) {
-        agents.push({ ...card, isStale: true, isAlive });
-      }
-    } catch {
-      continue;
+          const hbTime = Date.parse(card.lastHeartbeat) || 0;
+          const isStale = Date.now() - hbTime > staleThresholdMs;
+
+          let isAlive = true;
+          if (checkPid && card.pid) {
+            try {
+              process.kill(card.pid, 0);
+            } catch (e) {
+              if (e.code === 'ESRCH') {
+                isAlive = false;
+              }
+            }
+          }
+
+          if (!isStale && isAlive) {
+            return card;
+          }
+          if (options.includeStale) {
+            return { ...card, isStale: true, isAlive };
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    for (const item of results) {
+      if (item) agents.push(item);
     }
   }
 
@@ -243,17 +272,27 @@ async function listActiveAgents(options = {}) {
  */
 async function touchHeartbeat(agentName) {
   const cleanName = validateAgentName(agentName);
-  let card = await getAgentState(cleanName);
-  if (!card) {
-    card = await registerAgent({ name: cleanName });
-  } else {
-    card.lastHeartbeat = new Date().toISOString();
-    const filePath = getRegistryFilePath(cleanName);
-    await retryNtfsOperation(async () => {
-      await fs.promises.writeFile(filePath, JSON.stringify(card, null, 2), 'utf8');
-    });
-  }
-  return card;
+  const meshDir = getMeshDir();
+  const filePath = getRegistryFilePath(cleanName, meshDir);
+
+  return await withLock(`registry_${cleanName}`, async () => {
+    let card = null;
+    if (fs.existsSync(filePath)) {
+      try {
+        const content = await retryNtfsOperation(() => fs.promises.readFile(filePath, 'utf8'));
+        card = JSON.parse(content);
+      } catch {}
+    }
+
+    if (!card || typeof card !== 'object') {
+      card = buildAgentCard(cleanName, { name: cleanName }, meshDir);
+    } else {
+      card.lastHeartbeat = new Date().toISOString();
+    }
+
+    await atomicWriteFile(filePath, JSON.stringify(card, null, 2));
+    return card;
+  }, { meshDir });
 }
 
 module.exports = {

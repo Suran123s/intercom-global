@@ -2,28 +2,38 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { MESH_DIR } = require('../config');
+const { getMeshDir } = require('../config');
 const {
   readInbox,
-  writeInbox,
   safeWriteJson,
   acquireLockSync,
   releaseLockSync,
   retryNtfsOperationSync,
-  sanitizeAgentName
+  atomicWriteFileSync,
+  updateDiscreteEnvelopeSync,
+  getInboxFile,
+  withLockSync,
+  sanitizeAgentName,
+  sanitizeName
 } = require('./mesh');
 
-const DLQ_FILE = process.env.INTERCOM_DLQ_FILE || path.join(MESH_DIR, 'dlq.json');
-const DLQ_DIR = process.env.INTERCOM_DLQ_DIR || path.join(MESH_DIR, 'dlq');
+function getDlqFile() {
+  return process.env.INTERCOM_DLQ_FILE || path.join(getMeshDir(), 'dlq.json');
+}
+
+function getDlqDir() {
+  return process.env.INTERCOM_DLQ_DIR || path.join(getMeshDir(), 'dlq');
+}
 
 function ensureDlqDir() {
-  if (!fs.existsSync(DLQ_DIR)) {
+  const dir = getDlqDir();
+  if (!fs.existsSync(dir)) {
     try {
-      fs.mkdirSync(DLQ_DIR, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true });
     } catch {}
   }
+  return dir;
 }
-ensureDlqDir();
 
 /**
  * Executes a function holding the CAS lock for the dead-letter queue
@@ -41,18 +51,19 @@ function withDlqLockSync(fn) {
  * Migrates legacy monolithic dlq.json entries into discrete mesh/dlq/<id>.json files
  */
 function migrateLegacyDlqSync() {
-  if (!fs.existsSync(DLQ_FILE)) return 0;
+  const dlqFile = getDlqFile();
+  if (!fs.existsSync(dlqFile)) return 0;
   let count = 0;
   try {
-    const content = fs.readFileSync(DLQ_FILE, 'utf8');
+    const content = fs.readFileSync(dlqFile, 'utf8');
     const items = JSON.parse(content);
     if (Array.isArray(items) && items.length > 0) {
-      ensureDlqDir();
+      const dlqDir = ensureDlqDir();
       for (const item of items) {
         const id = sanitizeAgentName(String(item.id || `${Date.now()}_${crypto.randomUUID()}`));
-        const targetFile = path.join(DLQ_DIR, `${id}.json`);
+        const targetFile = path.join(dlqDir, `${id}.json`);
         if (!fs.existsSync(targetFile)) {
-          fs.writeFileSync(targetFile, JSON.stringify(item, null, 2), 'utf8');
+          atomicWriteFileSync(targetFile, JSON.stringify(item, null, 2));
           count++;
         }
       }
@@ -67,17 +78,18 @@ function migrateLegacyDlqSync() {
  * @returns {Array<object>}
  */
 function getDlq() {
-  ensureDlqDir();
+  const dlqDir = ensureDlqDir();
+  const dlqFile = getDlqFile();
   const items = [];
   const seenIds = new Set();
 
   // 1. Read discrete DLQ files
   try {
-    const files = retryNtfsOperationSync(() => fs.readdirSync(DLQ_DIR));
+    const files = retryNtfsOperationSync(() => fs.readdirSync(dlqDir));
     for (const f of files) {
       if (!f.endsWith('.json') || f.startsWith('.tmp')) continue;
       try {
-        const content = fs.readFileSync(path.join(DLQ_DIR, f), 'utf8');
+        const content = fs.readFileSync(path.join(dlqDir, f), 'utf8');
         const parsed = JSON.parse(content);
         if (parsed && parsed.id) {
           items.push(parsed);
@@ -88,9 +100,9 @@ function getDlq() {
   } catch {}
 
   // 2. Check legacy monolithic file for any un-migrated items
-  if (fs.existsSync(DLQ_FILE)) {
+  if (fs.existsSync(dlqFile)) {
     try {
-      const content = fs.readFileSync(DLQ_FILE, 'utf8');
+      const content = fs.readFileSync(dlqFile, 'utf8');
       const legacy = JSON.parse(content);
       if (Array.isArray(legacy)) {
         for (const item of legacy) {
@@ -113,10 +125,6 @@ function getDlq() {
   return items;
 }
 
-function writeDlq(items) {
-  safeWriteJson(DLQ_FILE, items);
-}
-
 /**
  * Enqueues a failed message into discrete DLQ storage under directory CAS lock (#41, #43)
  * @param {object} msgObj 
@@ -124,7 +132,7 @@ function writeDlq(items) {
  * @returns {object} enqueued entry
  */
 function enqueueDlq(msgObj, failureReason) {
-  ensureDlqDir();
+  const dlqDir = ensureDlqDir();
   return withDlqLockSync(() => {
     const entryId = sanitizeAgentName(String(msgObj.id || `${Date.now()}_${crypto.randomUUID()}`));
     const entry = {
@@ -135,25 +143,10 @@ function enqueueDlq(msgObj, failureReason) {
       retries: (msgObj.retries || 0) + 1
     };
 
-    const targetFile = path.join(DLQ_DIR, `${entryId}.json`);
-    const tmpFile = path.join(DLQ_DIR, `.tmp_${entryId}_${Date.now()}.tmp`);
-    const serialized = JSON.stringify(entry, null, 2);
+    const targetFile = path.join(dlqDir, `${entryId}.json`);
+    atomicWriteFileSync(targetFile, JSON.stringify(entry, null, 2));
 
-    // 1. Atomic discrete file write
-    retryNtfsOperationSync(() => {
-      fs.writeFileSync(tmpFile, serialized, 'utf8');
-    });
-    retryNtfsOperationSync(() => {
-      fs.renameSync(tmpFile, targetFile);
-    });
-
-    // 2. Backwards-compatible dlq.json index update
-    try {
-      const all = getDlq();
-      safeWriteJson(DLQ_FILE, all);
-    } catch {}
-
-    console.log(`⚠️ [DLQ ENQUEUED] Message #${entry.id} to "${entry.to}" added to Dead Letter Queue (${entry.failureReason})`);
+    console.error(`[DLQ ENQUEUED] Message #${entry.id} to "${entry.to}" added to Dead Letter Queue (${entry.failureReason})`);
     return entry;
   });
 }
@@ -162,21 +155,24 @@ function enqueueDlq(msgObj, failureReason) {
  * Clears all dead-letter messages under directory CAS lock
  */
 function clearDlq() {
-  ensureDlqDir();
+  const dlqDir = ensureDlqDir();
+  const dlqFile = getDlqFile();
   withDlqLockSync(() => {
     try {
-      const files = retryNtfsOperationSync(() => fs.readdirSync(DLQ_DIR));
+      const files = retryNtfsOperationSync(() => fs.readdirSync(dlqDir));
       for (const f of files) {
         if (f.endsWith('.json') || f.startsWith('.tmp')) {
           try {
-            retryNtfsOperationSync(() => fs.unlinkSync(path.join(DLQ_DIR, f)));
+            retryNtfsOperationSync(() => fs.unlinkSync(path.join(dlqDir, f)));
           } catch {}
         }
       }
     } catch {}
 
-    // Clear legacy monolithic file
-    safeWriteJson(DLQ_FILE, []);
+    // Clear legacy monolithic file if present
+    if (fs.existsSync(dlqFile)) {
+      safeWriteJson(dlqFile, []);
+    }
   });
 }
 
@@ -187,16 +183,25 @@ function clearDlq() {
  */
 function getDlqMessage(id) {
   if (!id) return null;
+  const dlqDir = getDlqDir();
   const safeId = sanitizeAgentName(String(id));
-  const file = path.join(DLQ_DIR, `${safeId}.json`);
+  const file = path.join(dlqDir, `${safeId}.json`);
   if (fs.existsSync(file)) {
     try {
       return JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch {}
   }
   // Check monolithic fallback
-  const dlq = getDlq();
-  return dlq.find(m => String(m.id) === String(id)) || null;
+  const dlqFile = getDlqFile();
+  if (fs.existsSync(dlqFile)) {
+    try {
+      const legacy = JSON.parse(fs.readFileSync(dlqFile, 'utf8'));
+      if (Array.isArray(legacy)) {
+        return legacy.find(m => String(m.id) === String(id)) || null;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 /**
@@ -206,45 +211,95 @@ function getDlqMessage(id) {
  */
 function deleteDlqMessage(id) {
   if (!id) return false;
+  const dlqDir = getDlqDir();
+  const dlqFile = getDlqFile();
   return withDlqLockSync(() => {
     const safeId = sanitizeAgentName(String(id));
-    const file = path.join(DLQ_DIR, `${safeId}.json`);
+    const file = path.join(dlqDir, `${safeId}.json`);
     let removed = false;
     if (fs.existsSync(file)) {
       try {
-        fs.unlinkSync(file);
+        retryNtfsOperationSync(() => fs.unlinkSync(file));
         removed = true;
       } catch {}
     }
-    // Update dlq.json
-    try {
-      const all = getDlq().filter(m => String(m.id) !== String(id));
-      safeWriteJson(DLQ_FILE, all);
-    } catch {}
+    // Remove from legacy dlq.json only if it exists and actually contains the item
+    if (fs.existsSync(dlqFile)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(dlqFile, 'utf8'));
+        if (Array.isArray(parsed) && parsed.some(m => String(m.id) === String(id))) {
+          const filtered = parsed.filter(m => String(m.id) !== String(id));
+          safeWriteJson(dlqFile, filtered);
+          removed = true;
+        }
+      } catch {}
+    }
     return removed;
   });
 }
 
+/**
+ * Atomically updates status/result/read fields on a discrete inbox envelope (or legacy fallback).
+ * Never mutates cached MessageEnvelope objects in place.
+ * @param {string} agentName
+ * @param {string} msgId
+ * @param {string} status
+ * @param {any} [result=null]
+ * @returns {object|null}
+ */
 function updateMessageStatus(agentName, msgId, status, result = null) {
-  const inbox = readInbox(agentName);
-  let updated = false;
-  let updatedMsg = null;
+  const applyUpdate = (m) => {
+    const next = {
+      ...m,
+      status,
+      statusUpdatedAt: new Date().toISOString()
+    };
+    if (result !== null) next.result = result;
+    if (status === 'COMPLETED' || status === 'ACKNOWLEDGED') {
+      next.read = true;
+      if (next.metadata && typeof next.metadata === 'object') {
+        next.metadata = { ...next.metadata, read: true };
+      }
+    }
+    return next;
+  };
 
-  inbox.forEach(m => {
-    if (String(m.id) === String(msgId)) {
-      m.status = status;
-      m.statusUpdatedAt = new Date().toISOString();
-      if (result !== null) m.result = result;
-      if (status === 'COMPLETED' || status === 'ACKNOWLEDGED') m.read = true;
-      updated = true;
-      updatedMsg = m;
+  // 1. Try discrete envelope update first (under mailbox CAS lock + cache invalidation)
+  try {
+    const discreteUpdated = updateDiscreteEnvelopeSync(agentName, msgId, applyUpdate);
+    if (discreteUpdated) {
+      return discreteUpdated;
+    }
+  } catch {
+    // Fall through to legacy check if agentName is non-discrete (e.g. contains '#')
+  }
+
+  // 2. Legacy monolithic mailbox fallback (mesh/<agent>.json)
+  const cleanLegacy = sanitizeName(agentName);
+  const legacyFile = getInboxFile(cleanLegacy);
+  if (!fs.existsSync(legacyFile)) return null;
+
+  return withLockSync(`legacy_${cleanLegacy}`, () => {
+    if (!fs.existsSync(legacyFile)) return null;
+    try {
+      const list = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
+      if (!Array.isArray(list)) return null;
+      let updatedMsg = null;
+      const nextList = list.map((m) => {
+        if (m && String(m.id) === String(msgId)) {
+          updatedMsg = applyUpdate(m);
+          return updatedMsg;
+        }
+        return m;
+      });
+      if (updatedMsg) {
+        safeWriteJson(legacyFile, nextList);
+      }
+      return updatedMsg;
+    } catch {
+      return null;
     }
   });
-
-  if (updated) {
-    writeInbox(agentName, inbox);
-  }
-  return updatedMsg;
 }
 
 function getMessageStatus(agentName, msgId) {
@@ -292,6 +347,12 @@ module.exports = {
   updateMessageStatus,
   getMessageStatus,
   retryWithBackoff,
-  DLQ_FILE,
-  DLQ_DIR
+  getDlqFile,
+  getDlqDir,
+  get DLQ_FILE() {
+    return getDlqFile();
+  },
+  get DLQ_DIR() {
+    return getDlqDir();
+  }
 };

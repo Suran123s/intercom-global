@@ -5,12 +5,33 @@ const fs = require('fs');
 
 const USER_HOME = os.homedir();
 const ROOT_DIR = path.resolve(__dirname, '..');
-const MESH_DIR = process.env.INTERCOM_MESH_DIR || path.join(ROOT_DIR, 'mesh');
-const PORT = process.env.INTERCOM_PORT || 4150;
+const DEFAULT_PORT = 4150;
 
-// Ensure mesh directory exists
-if (!fs.existsSync(MESH_DIR)) {
-  fs.mkdirSync(MESH_DIR, { recursive: true });
+/**
+ * Resolves the active mesh directory dynamically from INTERCOM_MESH_DIR or default ROOT_DIR/mesh.
+ * @returns {string}
+ */
+function getMeshDir() {
+  const configured = process.env.INTERCOM_MESH_DIR && process.env.INTERCOM_MESH_DIR.trim();
+  if (configured) {
+    return path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured);
+  }
+  return path.join(ROOT_DIR, 'mesh');
+}
+
+/**
+ * Resolves the active daemon HTTP port dynamically from INTERCOM_PORT with numeric validation.
+ * @returns {number}
+ */
+function getPort() {
+  const raw = process.env.INTERCOM_PORT;
+  if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+    const parsed = parseInt(String(raw).trim(), 10);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
+      return parsed;
+    }
+  }
+  return DEFAULT_PORT;
 }
 
 function sanitizePipeSegment(value) {
@@ -52,15 +73,20 @@ function getBrokerConnectTarget() {
   return path.join(intercomDir, 'broker.sock');
 }
 
-const PI_PIPE_NAME = getBrokerConnectTarget();
-
 module.exports = {
   USER_HOME,
   ROOT_DIR,
-  MESH_DIR,
-  PORT,
+  getMeshDir,
+  getPort,
   getAgentDirPath,
   getBrokerConnectTarget,
-  PI_PIPE_NAME
+  get MESH_DIR() {
+    return getMeshDir();
+  },
+  get PORT() {
+    return getPort();
+  },
+  get PI_PIPE_NAME() {
+    return getBrokerConnectTarget();
+  }
 };
-

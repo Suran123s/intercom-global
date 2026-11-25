@@ -2,18 +2,41 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const { MESH_DIR, PORT } = require('../config');
+const crypto = require('crypto');
+const { getMeshDir, getPort } = require('../config');
 const { MessageEnvelope } = require('./message');
-const { writeMessage, validateAgentName, retryNtfsOperation } = require('./mesh');
+const { writeMessage, validateAgentName, retryNtfsOperation, atomicWriteFile } = require('./mesh');
+
+/**
+ * Strips ANSI escape sequences and ASCII control characters from PTY steering text.
+ * @param {string} text
+ * @returns {string}
+ */
+function sanitizePtyText(text) {
+  return String(text ?? '')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .trim();
+}
 
 class Interrupter {
   constructor(options = {}) {
-    this.port = options.port || PORT || 4150;
-    this.daemonUrl = options.daemonUrl || `http://127.0.0.1:${this.port}`;
-    this.interruptsDir = path.join(MESH_DIR, 'interrupts');
-    if (!fs.existsSync(this.interruptsDir)) {
-      try { fs.mkdirSync(this.interruptsDir, { recursive: true }); } catch {}
-    }
+    this._explicitPort = options.port !== undefined ? options.port : undefined;
+    this._explicitDaemonUrl = options.daemonUrl || undefined;
+    this._explicitMeshDir = options.meshDir || undefined;
+  }
+
+  get port() {
+    return this._explicitPort !== undefined ? this._explicitPort : getPort();
+  }
+
+  get daemonUrl() {
+    return this._explicitDaemonUrl || `http://127.0.0.1:${this.port}`;
+  }
+
+  get interruptsDir() {
+    return path.join(this._explicitMeshDir || getMeshDir(), 'interrupts');
   }
 
   /**
@@ -36,8 +59,9 @@ class Interrupter {
         if (child && child.stdin && !child.stdin.destroyed) {
           // ASCII 0x03 (Ctrl+C / End-of-Text)
           child.stdin.write('\x03');
-          // Steering payload
-          child.stdin.write(`\n[INTERRUPT]: User commanded pivot: ${reason}\n`);
+          // Steering payload (sanitized against control/escape sequence injection)
+          const safeReason = sanitizePtyText(reason);
+          child.stdin.write(`\n[INTERRUPT]: User commanded pivot: ${safeReason}\n`);
           details.tiersExecuted.push('pty_stdin_preemption');
         }
       } catch (e) {
@@ -66,15 +90,13 @@ class Interrupter {
     // Out-of-band HTTP Daemon Interruption
     let httpSuccess = false;
     if (!options.skipHttp && (mode === 'auto' || mode === 'jsonrpc')) {
-      try {
-        httpSuccess = await this.sendHttpInterrupt(cleanTarget, reason, options);
-        if (httpSuccess) {
-          details.tiersExecuted.push('out_of_band_http_daemon');
-          // The daemon delegates to interrupter with { mode: 'mesh', skipHttp: true },
-          // which has already written the Safe-Path envelope and flag file to the mesh.
-          details.tiersExecuted.push('safe_path_envelope');
-        }
-      } catch (e) {
+      httpSuccess = await this.sendHttpInterrupt(cleanTarget, reason, options);
+      if (httpSuccess) {
+        details.tiersExecuted.push('out_of_band_http_daemon');
+        // The daemon delegates to interrupter with { mode: 'mesh', skipHttp: true },
+        // which has already written the Safe-Path envelope and flag file to the mesh.
+        details.tiersExecuted.push('safe_path_envelope');
+      } else {
         details.httpDaemonNotice = 'Daemon offline or unreachable; Safe-Path file-mesh will deliver interrupt';
       }
     }
@@ -82,6 +104,7 @@ class Interrupter {
     // --- Tier 3: Safe-Path File-Mesh Interrupt Flag (Zero-Loss Guarantee) ---
     if (mode === 'mesh' || mode === 'auto') {
       try {
+        const meshDir = this._explicitMeshDir || getMeshDir();
         // 1. Write high-priority interrupt envelope to inbox only if not already written by daemon
         if (!httpSuccess) {
           const interruptEnvelope = MessageEnvelope.create({
@@ -96,12 +119,14 @@ class Interrupter {
             }
           });
 
-          await writeMessage(cleanTarget, interruptEnvelope);
+          await writeMessage(cleanTarget, interruptEnvelope, { meshDir });
           details.tiersExecuted.push('safe_path_envelope');
         }
 
         // 2. Write atomic interrupt flag file (idempotent write ensures flag exists on disk)
-        const flagFile = path.join(this.interruptsDir, `${cleanTarget}.flag`);
+        const dir = this.interruptsDir;
+        await fs.promises.mkdir(dir, { recursive: true });
+        const flagFile = path.join(dir, `${cleanTarget}.flag`);
         const flagContent = JSON.stringify({
           target: cleanTarget,
           reason,
@@ -109,9 +134,7 @@ class Interrupter {
           active: true
         }, null, 2);
 
-        await retryNtfsOperation(async () => {
-          await fs.promises.writeFile(flagFile, flagContent, 'utf8');
-        });
+        await atomicWriteFile(flagFile, flagContent);
         if (!details.tiersExecuted.includes('safe_path_flag_file')) {
           details.tiersExecuted.push('safe_path_flag_file');
         }
@@ -150,8 +173,7 @@ class Interrupter {
         },
         timeout: 1500
       }, (res) => {
-        let body = '';
-        res.on('data', chunk => { body += chunk; });
+        res.resume();
         res.on('end', () => {
           resolve(res.statusCode >= 200 && res.statusCode < 300);
         });
@@ -181,25 +203,32 @@ class Interrupter {
   }
 
   /**
-   * Reads and consumes (clears) the interrupt flag for an agent
+   * Reads and consumes (clears) the interrupt flag for an agent atomically
    */
   async consumeInterruptFlag(target) {
     const cleanTarget = validateAgentName(target);
-    const flagFile = path.join(this.interruptsDir, `${cleanTarget}.flag`);
-    if (!fs.existsSync(flagFile)) return null;
+    const dir = this.interruptsDir;
+    const flagFile = path.join(dir, `${cleanTarget}.flag`);
+    const claimingFile = path.join(
+      dir,
+      `.${cleanTarget}.flag.consuming.${process.pid}.${crypto.randomUUID().slice(0, 8)}`
+    );
 
     try {
-      const content = await retryNtfsOperation(async () => {
-        return await fs.promises.readFile(flagFile, 'utf8');
-      });
-      await retryNtfsOperation(async () => {
-        if (fs.existsSync(flagFile)) {
-          await fs.promises.unlink(flagFile);
-        }
-      });
+      await retryNtfsOperation(() => fs.promises.rename(flagFile, claimingFile));
+    } catch {
+      return null;
+    }
+
+    try {
+      const content = await retryNtfsOperation(() => fs.promises.readFile(claimingFile, 'utf8'));
       return JSON.parse(content);
     } catch {
       return null;
+    } finally {
+      try {
+        await retryNtfsOperation(() => fs.promises.unlink(claimingFile));
+      } catch {}
     }
   }
 }

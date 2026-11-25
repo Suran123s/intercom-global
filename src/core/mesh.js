@@ -1,9 +1,8 @@
 // src/core/mesh.js - Zero-Loss Discrete Atomic File-Mesh & Deadlock-Free CAS Advisory Locking
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const crypto = require('crypto');
-const { MESH_DIR } = require('../config');
+const { getMeshDir } = require('../config');
 const { MessageEnvelope } = require('./message');
 
 // Strict path traversal and DOS device regexes (ARCHITECTURE.md Section 8)
@@ -35,6 +34,9 @@ function validateAgentName(name) {
     throw new SecurityError('Invalid input: path component must be a non-empty string');
   }
   const trimmed = name.trim();
+  if (trimmed.includes('\0')) {
+    throw new SecurityError('Invalid input: null byte rejected');
+  }
   if (PATH_TRAVERSAL_REGEX.test(trimmed)) {
     throw new SecurityError(`Path traversal attack rejected: "${trimmed}" contains illegal traversal tokens`);
   }
@@ -67,8 +69,27 @@ function sanitizeAgentName(name) {
   return clean;
 }
 
+const ILLEGAL_CHARS_REGEX = /[<>:"/\\|?*\x00-\x1f\x7f]/g;
+const TRAILING_DOTS_SPACES_REGEX = /[\s.]+$/;
+const URL_ENCODED_REGEX = /(%2e|%2f|%5c|%00)/i;
+
+function assertWithinBaseDir(baseDir, userInput, rawInput) {
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(resolvedBase, rawInput);
+  const baseWithSep = resolvedBase.endsWith(path.sep) ? resolvedBase : resolvedBase + path.sep;
+  const isWin = process.platform === 'win32';
+  const normBase = isWin ? baseWithSep.toLowerCase() : baseWithSep;
+  const normBaseExact = isWin ? resolvedBase.toLowerCase() : resolvedBase;
+  const normTarget = isWin ? resolvedTarget.toLowerCase() : resolvedTarget;
+
+  if (!normTarget.startsWith(normBase) && normTarget !== normBaseExact) {
+    throw new SecurityError(`Directory jail violation: "${userInput}" resolves outside "${baseDir}"`);
+  }
+  return resolvedTarget;
+}
+
 /**
- * Resolves safe path within baseDir, preventing directory breakout
+ * Resolves safe path within baseDir, preventing directory breakout, ADS streams, and null bytes
  * @param {string} baseDir 
  * @param {string} userInput 
  * @returns {string}
@@ -77,20 +98,21 @@ function resolveSafePath(baseDir, userInput) {
   if (typeof userInput !== 'string' || userInput.trim() === '') {
     throw new SecurityError('Invalid input: path component must be a non-empty string');
   }
-  if (PATH_TRAVERSAL_REGEX.test(userInput)) {
-    throw new SecurityError(`Path traversal attack rejected: "${userInput}" contains illegal traversal tokens`);
+  if (userInput.includes('\0')) {
+    throw new SecurityError('Invalid input: null byte rejected');
   }
-  const resolvedBase = path.resolve(baseDir);
-  const resolvedTarget = path.resolve(resolvedBase, userInput);
-  if (!resolvedTarget.startsWith(resolvedBase + path.sep) && resolvedTarget !== resolvedBase) {
-    throw new SecurityError(`Directory jail violation: "${userInput}" resolves outside "${baseDir}"`);
+  const raw = userInput.trim();
+  if (URL_ENCODED_REGEX.test(raw)) {
+    throw new SecurityError(`Path traversal attack rejected: "${raw}" contains encoded traversal tokens`);
   }
-  return resolvedTarget;
+  if (raw.includes(':')) {
+    throw new SecurityError(`NTFS Alternate Data Stream (ADS) or drive-letter attack rejected: "${raw}" contains illegal colon`);
+  }
+  if (PATH_TRAVERSAL_REGEX.test(raw)) {
+    throw new SecurityError(`Path traversal attack rejected: "${raw}" contains illegal traversal tokens`);
+  }
+  return assertWithinBaseDir(baseDir, userInput, raw);
 }
-
-const ILLEGAL_CHARS_REGEX = /[<>:"/\\|?*\x00-\x1f\x7f]/g;
-const TRAILING_DOTS_SPACES_REGEX = /[\s.]+$/;
-const URL_ENCODED_REGEX = /(%2e|%2f|%5c|%00)/i;
 
 /**
  * Rigorously sanitizes an input string into a safe Windows NTFS filename
@@ -124,7 +146,7 @@ function sanitizeWindowsFilename(name, fallback = 'safe_file') {
 
 /**
  * Rigorously validates and resolves a safe path within a base directory,
- * preventing Windows path traversal, ADS streams, and directory jail breakouts.
+ * preventing Windows path traversal, ADS streams, null bytes, and directory jail breakouts.
  * @param {string} baseDir 
  * @param {string} userInput 
  * @returns {string} safe absolute path
@@ -133,6 +155,9 @@ function sanitizeWindowsPath(baseDir, userInput) {
   if (typeof userInput !== 'string' || userInput.trim() === '') {
     throw new SecurityError('Invalid input: path component must be a non-empty string');
   }
+  if (userInput.includes('\0')) {
+    throw new SecurityError('Invalid input: null byte rejected');
+  }
 
   const raw = userInput.trim();
 
@@ -140,8 +165,7 @@ function sanitizeWindowsPath(baseDir, userInput) {
     throw new SecurityError(`Path traversal attack rejected: "${raw}" contains encoded traversal tokens`);
   }
 
-  const colonIdx = raw.indexOf(':');
-  if (colonIdx !== -1 && colonIdx !== 1) {
+  if (raw.includes(':')) {
     throw new SecurityError(`NTFS Alternate Data Stream (ADS) attack rejected: "${raw}" contains illegal colon`);
   }
 
@@ -149,16 +173,7 @@ function sanitizeWindowsPath(baseDir, userInput) {
     throw new SecurityError(`Path traversal attack rejected: "${raw}" contains traversal tokens`);
   }
 
-  const resolvedBase = path.resolve(baseDir);
-  const resolvedTarget = path.resolve(resolvedBase, raw);
-  const normBase = (resolvedBase + path.sep).toLowerCase();
-  const normTarget = resolvedTarget.toLowerCase();
-
-  if (!normTarget.startsWith(normBase) && normTarget !== resolvedBase.toLowerCase()) {
-    throw new SecurityError(`Directory jail violation: "${userInput}" resolves outside "${baseDir}"`);
-  }
-
-  return resolvedTarget;
+  return assertWithinBaseDir(baseDir, userInput, raw);
 }
 
 let _sharedSleepInt32 = null;
@@ -205,10 +220,6 @@ async function retryNtfsOperation(fn, maxAttempts = 5) {
   }
 }
 
-// Shared memory buffer for non-busy Atomics.wait sync sleeps
-const waitSharedBuffer = typeof SharedArrayBuffer !== 'undefined' ? new SharedArrayBuffer(4) : null;
-const waitInt32View = waitSharedBuffer ? new Int32Array(waitSharedBuffer) : null;
-
 /**
  * Synchronous variant of NTFS retry operation
  */
@@ -234,21 +245,72 @@ function retryNtfsOperationSync(fn, maxAttempts = 5) {
 }
 
 /**
- * Ensures standard mesh subdirectories exist
+ * Atomically writes data to targetPath via a unique temporary file + rename with NTFS retry and cleanup.
+ * @param {string} targetPath
+ * @param {string|Buffer} data
+ * @param {string} [encoding='utf8']
  */
-function ensureMeshDirs() {
+async function atomicWriteFile(targetPath, data, encoding = 'utf8') {
+  const dir = path.dirname(targetPath);
+  const base = path.basename(targetPath);
+  const tmpPath = path.join(dir, `.${base}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`);
+
+  await fs.promises.mkdir(dir, { recursive: true });
+  try {
+    await retryNtfsOperation(() => fs.promises.writeFile(tmpPath, data, encoding));
+    await retryNtfsOperation(() => fs.promises.rename(tmpPath, targetPath));
+  } finally {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        await retryNtfsOperation(() => fs.promises.unlink(tmpPath));
+      }
+    } catch {}
+  }
+}
+
+/**
+ * Synchronous atomic write via unique temporary file + rename with NTFS retry and cleanup.
+ * @param {string} targetPath
+ * @param {string|Buffer} data
+ * @param {string} [encoding='utf8']
+ */
+function atomicWriteFileSync(targetPath, data, encoding = 'utf8') {
+  const dir = path.dirname(targetPath);
+  const base = path.basename(targetPath);
+  const tmpPath = path.join(dir, `.${base}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`);
+
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  try {
+    retryNtfsOperationSync(() => fs.writeFileSync(tmpPath, data, encoding));
+    retryNtfsOperationSync(() => fs.renameSync(tmpPath, targetPath));
+  } finally {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        retryNtfsOperationSync(() => fs.unlinkSync(tmpPath));
+      }
+    } catch {}
+  }
+}
+
+/**
+ * Ensures standard mesh subdirectories exist
+ * @param {string} [meshDir]
+ */
+function ensureMeshDirs(meshDir = getMeshDir()) {
   const dirs = [
-    MESH_DIR,
-    path.join(MESH_DIR, 'inbox'),
-    path.join(MESH_DIR, 'locks'),
-    path.join(MESH_DIR, 'archive'),
-    path.join(MESH_DIR, 'registry'),
-    path.join(MESH_DIR, 'interrupts'),
-    path.join(MESH_DIR, 'handoffs'),
-    path.join(MESH_DIR, 'heartbeats'),
-    path.join(MESH_DIR, 'sessions'),
-    path.join(MESH_DIR, 'dlq'),
-    path.join(MESH_DIR, 'dlq', 'poison')
+    meshDir,
+    path.join(meshDir, 'inbox'),
+    path.join(meshDir, 'locks'),
+    path.join(meshDir, 'archive'),
+    path.join(meshDir, 'registry'),
+    path.join(meshDir, 'interrupts'),
+    path.join(meshDir, 'handoffs'),
+    path.join(meshDir, 'heartbeats'),
+    path.join(meshDir, 'sessions'),
+    path.join(meshDir, 'dlq'),
+    path.join(meshDir, 'dlq', 'poison')
   ];
   for (const d of dirs) {
     if (!fs.existsSync(d)) {
@@ -259,16 +321,15 @@ function ensureMeshDirs() {
   }
 }
 
-ensureMeshDirs();
-
 /**
  * Returns the inbox directory for a given agent
  * @param {string} agentName 
+ * @param {string} [meshDir]
  * @returns {string}
  */
-function getInboxDir(agentName) {
+function getInboxDir(agentName, meshDir = getMeshDir()) {
   const clean = validateAgentName(agentName);
-  const inboxBase = path.join(MESH_DIR, 'inbox');
+  const inboxBase = path.join(meshDir, 'inbox');
   const target = resolveSafePath(inboxBase, clean);
   if (!fs.existsSync(target)) {
     fs.mkdirSync(target, { recursive: true });
@@ -276,65 +337,24 @@ function getInboxDir(agentName) {
   return target;
 }
 
-/**
- * Writes a discrete message envelope atomically into the recipient's inbox
- * Pattern: mesh/inbox/<recipient>/<timestamp>_<uuid>.json
- * @param {string} recipient 
- * @param {MessageEnvelope|object} envelopeData 
- * @returns {Promise<{ messageId: string, path: string, envelope: MessageEnvelope }>}
- */
-async function writeMessage(recipient, envelopeData) {
-  const cleanRecipient = validateAgentName(recipient);
-  const envelope = envelopeData instanceof MessageEnvelope
-    ? envelopeData
-    : (envelopeData && typeof envelopeData.toJSON === 'function'
-      ? envelopeData
-      : MessageEnvelope.create({ ...envelopeData, recipient: cleanRecipient }));
+async function mirrorAntigravityInbox(cleanRecipient, finalFileName, serialized, primaryInboxDir) {
+  if (cleanRecipient.toLowerCase() !== 'antigravity') return;
+  try {
+    const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
+    if (workspaceInbox !== primaryInboxDir) {
+      await atomicWriteFile(path.join(workspaceInbox, finalFileName), serialized);
+    }
+  } catch {}
+}
 
-  const inboxDir = getInboxDir(cleanRecipient);
-  const tmpFileName = `.tmp_${envelope.id}_${Date.now()}.tmp`;
-  const tmpFilePath = path.join(inboxDir, tmpFileName);
-  const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
-  const finalFilePath = path.join(inboxDir, finalFileName);
-
-  const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
-
-  // 1. Write to temporary file in same directory & flush to disk
-  await retryNtfsOperation(async () => {
-    await fs.promises.writeFile(tmpFilePath, serialized, 'utf8');
-  });
-
-  // 2. Atomic rename to final path with Windows NTFS backoff retry
-  await retryNtfsOperation(async () => {
-    await fs.promises.rename(tmpFilePath, finalFilePath);
-  });
-
-  // 3. Mirror to workspace inbox for Antigravity dual mailbox architecture
-  if (cleanRecipient.toLowerCase() === 'antigravity') {
-    try {
-      const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
-      if (workspaceInbox !== inboxDir) {
-        if (!fs.existsSync(workspaceInbox)) fs.mkdirSync(workspaceInbox, { recursive: true });
-        const wsTmp = path.join(workspaceInbox, tmpFileName);
-        const wsFinal = path.join(workspaceInbox, finalFileName);
-        await retryNtfsOperation(async () => {
-          await fs.promises.writeFile(wsTmp, serialized, 'utf8');
-        });
-        await retryNtfsOperation(async () => {
-          await fs.promises.rename(wsTmp, wsFinal);
-        });
-      }
-    } catch {}
-  }
-
-  // Invalidate local in-memory inbox cache
-  inboxDirCache.delete(inboxDir);
-
-  return {
-    messageId: envelope.id,
-    path: finalFilePath,
-    envelope
-  };
+function mirrorAntigravityInboxSync(cleanRecipient, finalFileName, serialized, primaryInboxDir) {
+  if (cleanRecipient.toLowerCase() !== 'antigravity') return;
+  try {
+    const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
+    if (workspaceInbox !== primaryInboxDir) {
+      atomicWriteFileSync(path.join(workspaceInbox, finalFileName), serialized);
+    }
+  } catch {}
 }
 
 /**
@@ -434,6 +454,16 @@ const inboxDirCache = new LruCache(MAX_INBOX_DIR_CACHE_ENTRIES);
 const fileEnvelopeCache = new LruCache(MAX_FILE_CACHE_ENTRIES);
 
 /**
+ * Invalidates cached inbox directory and optional envelope file entries.
+ * @param {string} inboxDir
+ * @param {string} [filePath]
+ */
+function invalidateInboxCache(inboxDir, filePath = null) {
+  if (inboxDir) inboxDirCache.delete(inboxDir);
+  if (filePath) fileEnvelopeCache.delete(filePath);
+}
+
+/**
  * Resets the in-memory inbox and file payload caches
  */
 function clearMeshCache() {
@@ -448,55 +478,100 @@ function getMeshCacheStats() {
   };
 }
 
+function normalizeEnvelope(cleanRecipient, envelopeData) {
+  if (envelopeData instanceof MessageEnvelope) return envelopeData;
+  if (envelopeData && typeof envelopeData.toJSON === 'function') return envelopeData;
+  return MessageEnvelope.create({ ...envelopeData, recipient: cleanRecipient });
+}
+
+function buildEnvelopeFromParsed(parsed) {
+  const env = new MessageEnvelope(parsed);
+  if (parsed && parsed.status !== undefined) env.status = parsed.status;
+  if (parsed && parsed.statusUpdatedAt !== undefined) env.statusUpdatedAt = parsed.statusUpdatedAt;
+  if (parsed && parsed.result !== undefined) env.result = parsed.result;
+  if (parsed && parsed.deadLetterReason !== undefined) env.deadLetterReason = parsed.deadLetterReason;
+  return env;
+}
+
+function freezeEnvelopeDeep(env) {
+  if (!env || typeof env !== 'object') return env;
+  if (env.payload && typeof env.payload === 'object') Object.freeze(env.payload);
+  if (env.metadata && typeof env.metadata === 'object') Object.freeze(env.metadata);
+  return Object.freeze(env);
+}
+
+function cloneEnvelope(env) {
+  if (!env) return env;
+  const raw = typeof env.toJSON === 'function' ? env.toJSON() : { ...env };
+  if (raw.payload && typeof raw.payload === 'object') {
+    raw.payload = typeof structuredClone === 'function'
+      ? structuredClone(raw.payload)
+      : JSON.parse(JSON.stringify(raw.payload));
+  }
+  if (raw.metadata && typeof raw.metadata === 'object') {
+    raw.metadata = typeof structuredClone === 'function'
+      ? structuredClone(raw.metadata)
+      : JSON.parse(JSON.stringify(raw.metadata));
+  }
+  const cloned = new MessageEnvelope(raw);
+  if (env.status !== undefined) cloned.status = env.status;
+  if (env.statusUpdatedAt !== undefined) cloned.statusUpdatedAt = env.statusUpdatedAt;
+  if (env.result !== undefined) cloned.result = env.result;
+  if (env.deadLetterReason !== undefined) cloned.deadLetterReason = env.deadLetterReason;
+  return cloned;
+}
+
+/**
+ * Writes a discrete message envelope atomically into the recipient's inbox
+ * Pattern: mesh/inbox/<recipient>/<timestamp>_<uuid>.json
+ * @param {string} recipient 
+ * @param {MessageEnvelope|object} envelopeData 
+ * @param {object} [options]
+ * @returns {Promise<{ messageId: string, path: string, envelope: MessageEnvelope }>}
+ */
+async function writeMessage(recipient, envelopeData, options = {}) {
+  const cleanRecipient = validateAgentName(recipient);
+  const meshDir = (options && options.meshDir) || getMeshDir();
+  const envelope = normalizeEnvelope(cleanRecipient, envelopeData);
+
+  const inboxDir = getInboxDir(cleanRecipient, meshDir);
+  const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
+  const finalFilePath = path.join(inboxDir, finalFileName);
+  const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
+
+  await atomicWriteFile(finalFilePath, serialized);
+  await mirrorAntigravityInbox(cleanRecipient, finalFileName, serialized, inboxDir);
+
+  invalidateInboxCache(inboxDir, finalFilePath);
+
+  return {
+    messageId: envelope.id,
+    path: finalFilePath,
+    envelope
+  };
+}
+
 /**
  * Synchronous variant of discrete atomic message writing
  * @param {string} recipient 
  * @param {MessageEnvelope|object} envelopeData 
+ * @param {object} [options]
  * @returns {{ messageId: string, path: string, envelope: MessageEnvelope }}
  */
-function writeMessageSync(recipient, envelopeData) {
+function writeMessageSync(recipient, envelopeData, options = {}) {
   const cleanRecipient = validateAgentName(recipient);
-  const envelope = envelopeData instanceof MessageEnvelope
-    ? envelopeData
-    : (envelopeData && typeof envelopeData.toJSON === 'function'
-      ? envelopeData
-      : MessageEnvelope.create({ ...envelopeData, recipient: cleanRecipient }));
+  const meshDir = (options && options.meshDir) || getMeshDir();
+  const envelope = normalizeEnvelope(cleanRecipient, envelopeData);
 
-  const inboxDir = getInboxDir(cleanRecipient);
-  const tmpFileName = `.tmp_${envelope.id}_${Date.now()}.tmp`;
-  const tmpFilePath = path.join(inboxDir, tmpFileName);
+  const inboxDir = getInboxDir(cleanRecipient, meshDir);
   const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
   const finalFilePath = path.join(inboxDir, finalFileName);
-
   const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
 
-  retryNtfsOperationSync(() => {
-    fs.writeFileSync(tmpFilePath, serialized, 'utf8');
-  });
+  atomicWriteFileSync(finalFilePath, serialized);
+  mirrorAntigravityInboxSync(cleanRecipient, finalFileName, serialized, inboxDir);
 
-  retryNtfsOperationSync(() => {
-    fs.renameSync(tmpFilePath, finalFilePath);
-  });
-
-  // Mirror to workspace inbox for Antigravity dual mailbox architecture
-  if (cleanRecipient.toLowerCase() === 'antigravity') {
-    try {
-      const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
-      if (workspaceInbox !== inboxDir) {
-        if (!fs.existsSync(workspaceInbox)) fs.mkdirSync(workspaceInbox, { recursive: true });
-        const wsTmp = path.join(workspaceInbox, tmpFileName);
-        const wsFinal = path.join(workspaceInbox, finalFileName);
-        retryNtfsOperationSync(() => {
-          fs.writeFileSync(wsTmp, serialized, 'utf8');
-        });
-        retryNtfsOperationSync(() => {
-          fs.renameSync(wsTmp, wsFinal);
-        });
-      }
-    } catch {}
-  }
-
-  inboxDirCache.delete(inboxDir);
+  invalidateInboxCache(inboxDir, finalFilePath);
 
   return {
     messageId: envelope.id,
@@ -522,65 +597,31 @@ async function writeMessagesBatch(recipient, envelopesData, options = {}) {
     return [];
   }
 
+  const meshDir = (options && options.meshDir) || getMeshDir();
   const batchCount = envelopesData.length;
-  // Dynamic lock TTL: base 5000ms + 50ms per message to prevent premature stale lock takeover
   const lockTtlMs = options.lockTtlMs || Math.max(5000, batchCount * 50);
   const timeoutMs = options.timeoutMs || 15000;
 
   return await withLock(cleanRecipient, async () => {
-    const inboxDir = getInboxDir(cleanRecipient);
+    const inboxDir = getInboxDir(cleanRecipient, meshDir);
     const results = [];
     const now = Date.now();
 
-    // Prepare envelopes and normalize timestamps
     const prepared = envelopesData.map((data, idx) => {
-      const envelope = data instanceof MessageEnvelope
-        ? data
-        : (data && typeof data.toJSON === 'function'
-          ? data
-          : MessageEnvelope.create({ ...data, recipient: cleanRecipient }));
-      
-      // Ensure epochMs monotonicity within the batch
+      const envelope = normalizeEnvelope(cleanRecipient, data);
       envelope.epochMs = (envelope.epochMs || now) + idx;
       return envelope;
     });
 
-    // Write all messages within the single held lock
     for (let i = 0; i < prepared.length; i++) {
       const envelope = prepared[i];
-      const tmpFileName = `.tmp_${envelope.id}_${now}_${i}.tmp`;
-      const tmpFilePath = path.join(inboxDir, tmpFileName);
       const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
       const finalFilePath = path.join(inboxDir, finalFileName);
       const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
 
-      // 1. Write tmp file
-      await retryNtfsOperation(async () => {
-        await fs.promises.writeFile(tmpFilePath, serialized, 'utf8');
-      });
-
-      // 2. Atomic rename to final message file
-      await retryNtfsOperation(async () => {
-        await fs.promises.rename(tmpFilePath, finalFilePath);
-      });
-
-      // 3. Mirror to Antigravity dual mailbox if applicable
-      if (cleanRecipient.toLowerCase() === 'antigravity') {
-        try {
-          const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
-          if (workspaceInbox !== inboxDir) {
-            if (!fs.existsSync(workspaceInbox)) fs.mkdirSync(workspaceInbox, { recursive: true });
-            const wsTmp = path.join(workspaceInbox, tmpFileName);
-            const wsFinal = path.join(workspaceInbox, finalFileName);
-            await retryNtfsOperation(async () => {
-              await fs.promises.writeFile(wsTmp, serialized, 'utf8');
-            });
-            await retryNtfsOperation(async () => {
-              await fs.promises.rename(wsTmp, wsFinal);
-            });
-          }
-        } catch {}
-      }
+      await atomicWriteFile(finalFilePath, serialized);
+      await mirrorAntigravityInbox(cleanRecipient, finalFileName, serialized, inboxDir);
+      fileEnvelopeCache.delete(finalFilePath);
 
       results.push({
         messageId: envelope.id,
@@ -589,10 +630,9 @@ async function writeMessagesBatch(recipient, envelopesData, options = {}) {
       });
     }
 
-    // Invalidate inbox directory cache once after whole batch
     inboxDirCache.delete(inboxDir);
     return results;
-  }, { ttlMs: lockTtlMs, timeoutMs });
+  }, { ttlMs: lockTtlMs, timeoutMs, meshDir });
 }
 
 /**
@@ -608,58 +648,31 @@ function writeMessagesBatchSync(recipient, envelopesData, options = {}) {
     return [];
   }
 
+  const meshDir = (options && options.meshDir) || getMeshDir();
   const batchCount = envelopesData.length;
   const lockTtlMs = options.lockTtlMs || Math.max(5000, batchCount * 50);
   const timeoutMs = options.timeoutMs || 15000;
 
   return withLockSync(cleanRecipient, () => {
-    const inboxDir = getInboxDir(cleanRecipient);
+    const inboxDir = getInboxDir(cleanRecipient, meshDir);
     const results = [];
     const now = Date.now();
 
     const prepared = envelopesData.map((data, idx) => {
-      const envelope = data instanceof MessageEnvelope
-        ? data
-        : (data && typeof data.toJSON === 'function'
-          ? data
-          : MessageEnvelope.create({ ...data, recipient: cleanRecipient }));
-      
+      const envelope = normalizeEnvelope(cleanRecipient, data);
       envelope.epochMs = (envelope.epochMs || now) + idx;
       return envelope;
     });
 
     for (let i = 0; i < prepared.length; i++) {
       const envelope = prepared[i];
-      const tmpFileName = `.tmp_${envelope.id}_${now}_${i}.tmp`;
-      const tmpFilePath = path.join(inboxDir, tmpFileName);
       const finalFileName = `${envelope.epochMs}_${envelope.id}.json`;
       const finalFilePath = path.join(inboxDir, finalFileName);
       const serialized = JSON.stringify(envelope.toJSON ? envelope.toJSON() : envelope, null, 2);
 
-      retryNtfsOperationSync(() => {
-        fs.writeFileSync(tmpFilePath, serialized, 'utf8');
-      });
-
-      retryNtfsOperationSync(() => {
-        fs.renameSync(tmpFilePath, finalFilePath);
-      });
-
-      if (cleanRecipient.toLowerCase() === 'antigravity') {
-        try {
-          const workspaceInbox = path.resolve(process.cwd(), '.agents', 'mesh', 'inbox', 'antigravity');
-          if (workspaceInbox !== inboxDir) {
-            if (!fs.existsSync(workspaceInbox)) fs.mkdirSync(workspaceInbox, { recursive: true });
-            const wsTmp = path.join(workspaceInbox, tmpFileName);
-            const wsFinal = path.join(workspaceInbox, finalFileName);
-            retryNtfsOperationSync(() => {
-              fs.writeFileSync(wsTmp, serialized, 'utf8');
-            });
-            retryNtfsOperationSync(() => {
-              fs.renameSync(wsTmp, wsFinal);
-            });
-          }
-        } catch {}
-      }
+      atomicWriteFileSync(finalFilePath, serialized);
+      mirrorAntigravityInboxSync(cleanRecipient, finalFileName, serialized, inboxDir);
+      fileEnvelopeCache.delete(finalFilePath);
 
       results.push({
         messageId: envelope.id,
@@ -670,7 +683,45 @@ function writeMessagesBatchSync(recipient, envelopesData, options = {}) {
 
     inboxDirCache.delete(inboxDir);
     return results;
-  }, { ttlMs: lockTtlMs, timeoutMs });
+  }, { ttlMs: lockTtlMs, timeoutMs, meshDir });
+}
+
+/**
+ * Atomically updates a discrete inbox envelope matching msgId under mailbox CAS lock.
+ * Invalidates both fileEnvelopeCache and inboxDirCache.
+ * @param {string} agentName
+ * @param {string} msgId
+ * @param {(msg: object) => object} updaterFn
+ * @param {object} [options]
+ * @returns {object|null}
+ */
+function updateDiscreteEnvelopeSync(agentName, msgId, updaterFn, options = {}) {
+  const cleanRecipient = validateAgentName(agentName);
+  const meshDir = (options && options.meshDir) || getMeshDir();
+  const inboxDir = path.join(meshDir, 'inbox', cleanRecipient);
+  if (!fs.existsSync(inboxDir)) return null;
+
+  const targetId = String(msgId);
+  return withLockSync(cleanRecipient, () => {
+    if (!fs.existsSync(inboxDir)) return null;
+    const files = retryNtfsOperationSync(() => fs.readdirSync(inboxDir));
+
+    for (const f of files) {
+      if (f.startsWith('.tmp') || f.endsWith('.tmp') || !f.endsWith('.json')) continue;
+      const fullPath = path.join(inboxDir, f);
+      try {
+        const raw = retryNtfsOperationSync(() => fs.readFileSync(fullPath, 'utf8'));
+        const parsed = JSON.parse(raw);
+        if (parsed && String(parsed.id) === targetId) {
+          const updated = updaterFn(parsed);
+          atomicWriteFileSync(fullPath, JSON.stringify(updated, null, 2));
+          invalidateInboxCache(inboxDir, fullPath);
+          return updated;
+        }
+      } catch {}
+    }
+    return null;
+  }, { meshDir });
 }
 
 /**
@@ -733,27 +784,37 @@ function isEnvelopeExpired(msg, now = Date.now()) {
 function pruneExpiredInbox(inboxDir, dlqDir = null) {
   if (!fs.existsSync(inboxDir)) return { active: [], pruned: [] };
 
-  const files = fs.readdirSync(inboxDir).filter((f) => f.endsWith('.json') && !f.startsWith('.tmp'));
+  const files = retryNtfsOperationSync(() => fs.readdirSync(inboxDir))
+    .filter((f) => f.endsWith('.json') && !f.startsWith('.tmp'));
   const now = Date.now();
   const active = [];
   const pruned = [];
+  let changed = false;
 
   for (const f of files) {
     const filePath = path.join(inboxDir, f);
     try {
-      const msg = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const msg = JSON.parse(retryNtfsOperationSync(() => fs.readFileSync(filePath, 'utf8')));
       if (isEnvelopeExpired(msg, now)) {
         if (dlqDir) {
           if (!fs.existsSync(dlqDir)) fs.mkdirSync(dlqDir, { recursive: true });
           msg.deadLetterReason = 'EXPIRED_TTL';
-          fs.writeFileSync(path.join(dlqDir, `expired_${f}`), JSON.stringify(msg, null, 2), 'utf8');
+          atomicWriteFileSync(path.join(dlqDir, `expired_${f}`), JSON.stringify(msg, null, 2));
         }
-        try { fs.unlinkSync(filePath); } catch {}
+        try {
+          retryNtfsOperationSync(() => fs.unlinkSync(filePath));
+          fileEnvelopeCache.delete(filePath);
+          changed = true;
+        } catch {}
         pruned.push(msg);
       } else {
         active.push(msg);
       }
     } catch {}
+  }
+
+  if (changed) {
+    inboxDirCache.delete(inboxDir);
   }
 
   return { active, pruned };
@@ -782,11 +843,13 @@ async function compactMailboxes(options = {}) {
   const dryRun = options.dryRun === true;
   const pruneEmpty = options.removeEmpty !== undefined ? Boolean(options.removeEmpty) : (options.pruneEmpty !== false);
   const pruneTemp = options.pruneTemp !== false;
-  const tempTtlMs = options.tempTtlMs || 60000;
+  const tempTtlMs = options.tempTtlMs ?? 60000;
   const targetMailbox = options.targetMailbox ? validateAgentName(options.targetMailbox) : null;
+  const meshDir = options.meshDir || getMeshDir();
 
-  const inboxBase = path.join(MESH_DIR, 'inbox');
-  const locksDir = path.join(MESH_DIR, 'locks');
+  const inboxBase = path.join(meshDir, 'inbox');
+  const locksDir = path.join(meshDir, 'locks');
+  const dlqDir = path.join(meshDir, 'dlq');
   const report = {
     examined: 0,
     prunedDirs: 0,
@@ -797,7 +860,9 @@ async function compactMailboxes(options = {}) {
     dryRun
   };
 
-  if (!fs.existsSync(inboxBase)) {
+  try {
+    await fs.promises.access(inboxBase);
+  } catch {
     return report;
   }
 
@@ -828,7 +893,8 @@ async function compactMailboxes(options = {}) {
 
     // Safety: Check if mailbox is currently CAS locked
     const lockDir = path.join(locksDir, `${entryName}.lock`);
-    if (fs.existsSync(lockDir)) {
+    const isLocked = await fs.promises.access(lockDir).then(() => true, () => false);
+    if (isLocked) {
       report.skippedLocked.push(entryName);
       continue;
     }
@@ -842,6 +908,8 @@ async function compactMailboxes(options = {}) {
 
     let activeMessagesCount = 0;
     let prunedTempInMailbox = 0;
+    let prunedExpiredInMailbox = 0;
+    const messageCandidates = [];
 
     for (const f of files) {
       if (f.startsWith('.tmp') || f.endsWith('.tmp')) {
@@ -854,39 +922,53 @@ async function compactMailboxes(options = {}) {
               prunedTempInMailbox++;
               report.reclaimedBytes += fileStat.size;
               if (!dryRun) {
-                await retryNtfsOperation(async () => {
-                  await fs.promises.unlink(fullFilePath);
-                });
+                await retryNtfsOperation(() => fs.promises.unlink(fullFilePath));
+                invalidateInboxCache(fullDir, fullFilePath);
               }
             }
           } catch {}
         }
       } else if (/^\d+_[a-zA-Z0-9\-]+\.json$/.test(f)) {
-        if (options.pruneExpired !== false) {
-          const fullFilePath = path.join(fullDir, f);
-          try {
-            const raw = fs.readFileSync(fullFilePath, 'utf8');
-            const msg = JSON.parse(raw);
-            if (isEnvelopeExpired(msg, now)) {
-              const dlqDir = path.join(MESH_DIR, 'dlq');
-              if (!fs.existsSync(dlqDir)) fs.mkdirSync(dlqDir, { recursive: true });
-              msg.deadLetterReason = 'EXPIRED_TTL';
-              fs.writeFileSync(path.join(dlqDir, `expired_${f}`), JSON.stringify(msg, null, 2), 'utf8');
-              if (!dryRun) {
-                fs.unlinkSync(fullFilePath);
-              }
-              report.prunedExpired = (report.prunedExpired || 0) + 1;
-              continue;
-            }
-          } catch {}
-        }
-        activeMessagesCount++;
+        messageCandidates.push(f);
       }
+    }
+
+    if (options.pruneExpired !== false && messageCandidates.length > 0) {
+      const BATCH_SIZE = 32;
+      for (let i = 0; i < messageCandidates.length; i += BATCH_SIZE) {
+        const batch = messageCandidates.slice(i, i + BATCH_SIZE);
+        await Promise.all(
+          batch.map(async (f) => {
+            const fullFilePath = path.join(fullDir, f);
+            try {
+              const raw = await retryNtfsOperation(() => fs.promises.readFile(fullFilePath, 'utf8'));
+              const msg = JSON.parse(raw);
+              if (isEnvelopeExpired(msg, now)) {
+                if (!dryRun) {
+                  await fs.promises.mkdir(dlqDir, { recursive: true });
+                  msg.deadLetterReason = 'EXPIRED_TTL';
+                  await atomicWriteFile(path.join(dlqDir, `expired_${f}`), JSON.stringify(msg, null, 2));
+                  await retryNtfsOperation(() => fs.promises.unlink(fullFilePath));
+                  invalidateInboxCache(fullDir, fullFilePath);
+                }
+                prunedExpiredInMailbox++;
+                report.prunedExpired = (report.prunedExpired || 0) + 1;
+                return;
+              }
+            } catch {}
+            activeMessagesCount++;
+          })
+        );
+      }
+    } else {
+      activeMessagesCount += messageCandidates.length;
     }
 
     // Prune empty mailbox directories if 0 active messages remain
     if (pruneEmpty && activeMessagesCount === 0) {
-      const isEmptyNow = dryRun ? (files.length - prunedTempInMailbox === 0) : true;
+      const isEmptyNow = dryRun
+        ? (files.length - prunedTempInMailbox - prunedExpiredInMailbox === 0)
+        : true;
       if (isEmptyNow) {
         if (!dryRun) {
           let remainingFiles = [];
@@ -897,9 +979,7 @@ async function compactMailboxes(options = {}) {
           if (remainingFiles.length === 0) {
             report.prunedEmptyMailboxes.push(entryName);
             try {
-              await retryNtfsOperation(async () => {
-                await fs.promises.rmdir(fullDir);
-              });
+              await retryNtfsOperation(() => fs.promises.rmdir(fullDir));
               inboxDirCache.delete(fullDir);
             } catch {}
           }
@@ -922,7 +1002,8 @@ async function compactMailboxes(options = {}) {
  */
 function readInboxSync(recipient, options = {}) {
   const cleanRecipient = validateAgentName(recipient);
-  const inboxDir = path.join(MESH_DIR, 'inbox', cleanRecipient);
+  const meshDir = (options && options.meshDir) || getMeshDir();
+  const inboxDir = path.join(meshDir, 'inbox', cleanRecipient);
   const envelopes = [];
   const limit = (options && typeof options.limit === 'number') ? options.limit : null;
   const resolvedOrder = (options && options.order) || ((options && options.newestFirst) ? 'desc' : 'asc');
@@ -931,97 +1012,100 @@ function readInboxSync(recipient, options = {}) {
     try {
       const dirStat = fs.statSync(inboxDir);
       const dirCached = inboxDirCache.get(inboxDir);
+      let cacheHandled = false;
 
       if (dirCached && dirCached.mtimeMs === dirStat.mtimeMs) {
         if (dirCached.allLoaded) {
           const list = resolvedOrder === 'desc' ? dirCached.allDesc : dirCached.allAsc;
-          if (list.length > 0) {
-            return limit !== null ? list.slice(0, limit) : [...list];
-          }
+          const sliced = limit !== null ? list.slice(0, limit) : list;
+          envelopes.push(...sliced.map(cloneEnvelope));
+          cacheHandled = true;
         } else if (dirCached.limit !== null && limit !== null && dirCached.limit >= limit && dirCached.order === resolvedOrder) {
-          if (dirCached.envelopes.length > 0) {
-            return dirCached.envelopes.slice(0, limit);
-          }
+          envelopes.push(...dirCached.envelopes.slice(0, limit).map(cloneEnvelope));
+          cacheHandled = true;
         }
       }
 
-      const files = retryNtfsOperationSync(() => fs.readdirSync(inboxDir));
-      const messageFiles = files.filter(f => /^\d+_[a-zA-Z0-9\-]+\.json$/.test(f));
+      if (!cacheHandled) {
+        const files = retryNtfsOperationSync(() => fs.readdirSync(inboxDir));
+        const parsedFiles = [];
+        for (const f of files) {
+          if (!/^\d+_[a-zA-Z0-9\-]+\.json$/.test(f)) continue;
+          const sepIdx = f.indexOf('_');
+          parsedFiles.push({
+            file: f,
+            ts: parseInt(f.slice(0, sepIdx), 10) || 0,
+            idPart: f.slice(sepIdx + 1, -5)
+          });
+        }
 
-      messageFiles.sort((a, b) => {
-        const partsA = a.split('_');
-        const partsB = b.split('_');
-        const tsA = parseInt(partsA[0], 10) || 0;
-        const tsB = parseInt(partsB[0], 10) || 0;
-        if (tsA !== tsB) return tsA - tsB;
-        const idA = partsA.slice(1).join('_').replace(/\.json$/, '');
-        const idB = partsB.slice(1).join('_').replace(/\.json$/, '');
-        return idA.localeCompare(idB);
-      });
+        parsedFiles.sort((a, b) => {
+          if (a.ts !== b.ts) return a.ts - b.ts;
+          return a.idPart.localeCompare(b.idPart);
+        });
 
-      const allLoaded = limit === null || messageFiles.length <= limit;
-      let targetFiles = messageFiles;
+        const messageFiles = parsedFiles.map(p => p.file);
+        const allLoaded = limit === null || messageFiles.length <= limit;
+        let targetFiles = messageFiles;
 
-      if (!allLoaded) {
-        targetFiles = resolvedOrder === 'desc'
-          ? messageFiles.slice(-limit)
-          : messageFiles.slice(0, limit);
-      }
+        if (!allLoaded) {
+          targetFiles = resolvedOrder === 'desc'
+            ? messageFiles.slice(-limit)
+            : messageFiles.slice(0, limit);
+        }
 
-      const loadedEnvelopes = [];
-      for (const file of targetFiles) {
-        const fullPath = path.join(inboxDir, file);
-        try {
-          const fileStat = fs.statSync(fullPath);
-          const cachedFile = fileEnvelopeCache.get(fullPath);
-          if (cachedFile && cachedFile.mtimeMs === fileStat.mtimeMs) {
-            loadedEnvelopes.push(cachedFile.envelope);
-          } else {
-            const content = retryNtfsOperationSync(() => fs.readFileSync(fullPath, 'utf8'));
-            const parsed = JSON.parse(content);
-            const env = new MessageEnvelope(parsed);
-            if (fileEnvelopeCache.size >= MAX_FILE_CACHE_ENTRIES) {
-              const oldestKey = fileEnvelopeCache.keys().next().value;
-              fileEnvelopeCache.delete(oldestKey);
+        const loadedEnvelopes = [];
+        for (const file of targetFiles) {
+          const fullPath = path.join(inboxDir, file);
+          try {
+            const fileStat = fs.statSync(fullPath);
+            const cachedFile = fileEnvelopeCache.get(fullPath);
+            if (cachedFile && cachedFile.mtimeMs === fileStat.mtimeMs) {
+              loadedEnvelopes.push(cachedFile.envelope);
+            } else {
+              const content = retryNtfsOperationSync(() => fs.readFileSync(fullPath, 'utf8'));
+              const parsed = JSON.parse(content);
+              const env = freezeEnvelopeDeep(buildEnvelopeFromParsed(parsed));
+              fileEnvelopeCache.set(fullPath, { mtimeMs: fileStat.mtimeMs, envelope: env });
+              loadedEnvelopes.push(env);
             }
-            fileEnvelopeCache.set(fullPath, { mtimeMs: fileStat.mtimeMs, envelope: env });
-            loadedEnvelopes.push(env);
+          } catch {
+            continue;
           }
-        } catch {
-          continue;
         }
-      }
 
-      if (allLoaded) {
-        const allAsc = loadedEnvelopes;
-        const allDesc = [...loadedEnvelopes].reverse();
-        inboxDirCache.set(inboxDir, {
-          mtimeMs: dirStat.mtimeMs,
-          allLoaded: true,
-          allAsc,
-          allDesc
-        });
-        const list = resolvedOrder === 'desc' ? allDesc : allAsc;
-        envelopes.push(...(limit !== null ? list.slice(0, limit) : list));
-      } else {
-        if (resolvedOrder === 'desc') {
-          loadedEnvelopes.reverse();
+        if (allLoaded) {
+          const allAsc = loadedEnvelopes;
+          const allDesc = [...loadedEnvelopes].reverse();
+          inboxDirCache.set(inboxDir, {
+            mtimeMs: dirStat.mtimeMs,
+            allLoaded: true,
+            allAsc,
+            allDesc
+          });
+          const list = resolvedOrder === 'desc' ? allDesc : allAsc;
+          const sliced = limit !== null ? list.slice(0, limit) : list;
+          envelopes.push(...sliced.map(cloneEnvelope));
+        } else {
+          if (resolvedOrder === 'desc') {
+            loadedEnvelopes.reverse();
+          }
+          inboxDirCache.set(inboxDir, {
+            mtimeMs: dirStat.mtimeMs,
+            allLoaded: false,
+            limit,
+            order: resolvedOrder,
+            envelopes: loadedEnvelopes
+          });
+          envelopes.push(...loadedEnvelopes.map(cloneEnvelope));
         }
-        inboxDirCache.set(inboxDir, {
-          mtimeMs: dirStat.mtimeMs,
-          allLoaded: false,
-          limit,
-          order: resolvedOrder,
-          envelopes: loadedEnvelopes
-        });
-        envelopes.push(...loadedEnvelopes);
       }
     } catch {}
   }
 
   // If no discrete messages found, check legacy file (mesh/<recipient>.json)
   if (envelopes.length === 0) {
-    const legacyFile = getInboxFile(cleanRecipient);
+    const legacyFile = getInboxFile(cleanRecipient, meshDir);
     if (fs.existsSync(legacyFile)) {
       try {
         const content = fs.readFileSync(legacyFile, 'utf8');
@@ -1085,15 +1169,21 @@ function readInbox(recipient, options = {}) {
  */
 async function ackMessage(agentName, messageId, options = {}) {
   const cleanRecipient = validateAgentName(agentName);
-  const inboxDir = getInboxDir(cleanRecipient);
+  if (typeof messageId !== 'string' || !messageId.trim()) return false;
+  const targetId = messageId.trim();
+  const meshDir = (options && options.meshDir) || getMeshDir();
+  const inboxDir = getInboxDir(cleanRecipient, meshDir);
 
   if (!fs.existsSync(inboxDir)) return false;
 
-  const files = await retryNtfsOperation(async () => {
-    return await fs.promises.readdir(inboxDir);
-  });
+  const files = await retryNtfsOperation(() => fs.promises.readdir(inboxDir));
 
-  const targetFile = files.find(f => f.includes(messageId));
+  const targetFile = files.find((f) => {
+    if (f.startsWith('.tmp') || f.endsWith('.tmp') || !f.endsWith('.json')) return false;
+    if (!/^\d+_/.test(f)) return false;
+    const sepIdx = f.indexOf('_');
+    return f.slice(sepIdx + 1, -5) === targetId;
+  });
   if (!targetFile) return false;
 
   const srcPath = path.join(inboxDir, targetFile);
@@ -1104,60 +1194,105 @@ async function ackMessage(agentName, messageId, options = {}) {
         await fs.promises.unlink(srcPath);
       }
     });
-    inboxDirCache.delete(inboxDir);
+    invalidateInboxCache(inboxDir, srcPath);
     return true;
   }
 
   // Move to archive/<date>/<agentName>/<targetFile>
   const today = new Date().toISOString().slice(0, 10);
-  const archiveDir = path.join(MESH_DIR, 'archive', today, cleanRecipient);
-  if (!fs.existsSync(archiveDir)) {
-    await fs.promises.mkdir(archiveDir, { recursive: true });
-  }
+  const archiveDir = path.join(meshDir, 'archive', today, cleanRecipient);
+  await fs.promises.mkdir(archiveDir, { recursive: true });
   const destPath = path.join(archiveDir, targetFile);
 
-  await retryNtfsOperation(async () => {
-    await fs.promises.rename(srcPath, destPath);
-  });
+  await retryNtfsOperation(() => fs.promises.rename(srcPath, destPath));
 
-  inboxDirCache.delete(inboxDir);
+  invalidateInboxCache(inboxDir, srcPath);
   return true;
+}
+
+// ============================================================================
+// Deadlock-Free Compare-And-Swap (CAS) Directory Advisory Locking
+// ============================================================================
+
+function normalizeLockArgs(ttlMsOrOpts, options) {
+  let ttlMs = 3000;
+  let opts = options || {};
+  if (ttlMsOrOpts && typeof ttlMsOrOpts === 'object') {
+    opts = ttlMsOrOpts;
+    ttlMs = Number.isFinite(opts.ttlMs) ? opts.ttlMs : 3000;
+  } else if (Number.isFinite(ttlMsOrOpts)) {
+    ttlMs = ttlMsOrOpts;
+  }
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 10000;
+  const meshDir = opts.meshDir || getMeshDir();
+  return { ttlMs, timeoutMs, meshDir };
+}
+
+function evaluateLockStale(metaRaw, dirStat, ttlMs) {
+  if (metaRaw !== null) {
+    const meta = JSON.parse(metaRaw);
+    const age = Date.now() - meta.createdAt;
+    const effectiveTtl = meta.ttlMs || ttlMs;
+    if (age > effectiveTtl) {
+      return true;
+    }
+    if (meta.ownerPid && meta.ownerPid !== process.pid) {
+      try {
+        process.kill(meta.ownerPid, 0);
+      } catch (killErr) {
+        if (killErr.code === 'ESRCH') {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Empty or broken lock dir lacking metadata.json: fixed short grace window
+  const graceMs = Math.min(1000, Math.max(250, ttlMs));
+  const dirAge = Date.now() - (dirStat.mtimeMs || dirStat.birthtimeMs || 0);
+  return dirAge > graceMs;
+}
+
+function createLockMetadata(cleanName, ttlMs, token) {
+  return JSON.stringify({
+    ownerPid: process.pid,
+    createdAt: Date.now(),
+    ttlMs,
+    resourceName: cleanName,
+    token
+  }, null, 2);
 }
 
 /**
  * Deadlock-Free Compare-And-Swap (CAS) Directory Advisory Locking
  * @param {string} resourceName 
- * @param {number} ttlMs Default 3000ms
- * @param {object} options { timeoutMs: 10000 }
+ * @param {number|object} [ttlMs=3000] Default 3000ms (or options object)
+ * @param {object} [options={}] { timeoutMs: 10000, meshDir }
  * @returns {Promise<{ lockDir: string, resourceName: string, token: string, ownerPid: number }>}
  */
-async function acquireLock(resourceName, ttlMs = 3000, options = {}) {
+async function acquireLock(resourceName, ttlMsOrOpts = 3000, options = {}) {
+  const { ttlMs, timeoutMs, meshDir } = normalizeLockArgs(ttlMsOrOpts, options);
   const cleanName = sanitizeAgentName(resourceName);
-  const locksDir = path.join(MESH_DIR, 'locks');
-  if (!fs.existsSync(locksDir)) {
-    fs.mkdirSync(locksDir, { recursive: true });
-  }
+  const locksDir = path.join(meshDir, 'locks');
+  await fs.promises.mkdir(locksDir, { recursive: true });
 
   const lockDir = path.join(locksDir, `${cleanName}.lock`);
   const metaFile = path.join(lockDir, 'metadata.json');
-  const timeoutMs = options.timeoutMs || 10000;
   const startTime = Date.now();
   const token = crypto.randomUUID();
+  let cachedMeta = null;
+  let lastMetaCheckMs = 0;
 
   while (Date.now() - startTime < timeoutMs) {
     try {
-      // Atomic directory creation
-      fs.mkdirSync(lockDir);
-
-      // Successfully acquired lock - write metadata
-      const meta = {
-        ownerPid: process.pid,
-        createdAt: Date.now(),
-        ttlMs,
-        resourceName: cleanName,
-        token
-      };
-      fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2), 'utf8');
+      await fs.promises.mkdir(lockDir);
+      try {
+        await fs.promises.writeFile(metaFile, createLockMetadata(cleanName, ttlMs, token), 'utf8');
+      } catch (writeErr) {
+        try { await fs.promises.rmdir(lockDir); } catch {}
+        throw writeErr;
+      }
 
       return {
         lockDir,
@@ -1170,50 +1305,50 @@ async function acquireLock(resourceName, ttlMs = 3000, options = {}) {
         throw err;
       }
 
-      // Check for stale lock
       let isStale = false;
+      const now = Date.now();
       try {
-        if (fs.existsSync(metaFile)) {
-          const raw = fs.readFileSync(metaFile, 'utf8');
-          const meta = JSON.parse(raw);
-          const age = Date.now() - meta.createdAt;
-
-          const effectiveTtl = meta.ttlMs || ttlMs;
+        if (cachedMeta && (now - lastMetaCheckMs < 100)) {
+          const age = now - cachedMeta.createdAt;
+          const effectiveTtl = cachedMeta.ttlMs || ttlMs;
           if (age > effectiveTtl) {
             isStale = true;
-          } else if (meta.ownerPid && meta.ownerPid !== process.pid) {
-            // Check if owner process is dead
+          } else if (cachedMeta.ownerPid && cachedMeta.ownerPid !== process.pid) {
             try {
-              process.kill(meta.ownerPid, 0);
+              process.kill(cachedMeta.ownerPid, 0);
             } catch (killErr) {
-              if (killErr.code === 'ESRCH') {
-                isStale = true;
-              }
+              if (killErr.code === 'ESRCH') isStale = true;
             }
           }
         } else {
-          // Empty or broken lock dir older than 1 second is considered stale
-          const stat = fs.statSync(lockDir);
-          if (Date.now() - stat.mtimeMs > ttlMs) {
-            isStale = true;
+          let metaRaw = null;
+          try {
+            metaRaw = await fs.promises.readFile(metaFile, 'utf8');
+            lastMetaCheckMs = now;
+            try { cachedMeta = JSON.parse(metaRaw); } catch { cachedMeta = null; }
+          } catch (readErr) {
+            if (readErr.code !== 'ENOENT') throw readErr;
+            cachedMeta = null;
           }
+          const dirStat = metaRaw === null ? await fs.promises.stat(lockDir) : null;
+          isStale = evaluateLockStale(metaRaw, dirStat, ttlMs);
         }
       } catch {
-        // Inability to read metadata may mean it's being written or is corrupted
+        cachedMeta = null;
       }
 
       if (isStale) {
-        const stalePurgeDir = `${lockDir}.stale.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+        cachedMeta = null;
+        lastMetaCheckMs = 0;
+        const stalePurgeDir = `${lockDir}.stale.${process.pid}.${crypto.randomUUID().slice(0, 8)}`;
         try {
-          fs.renameSync(lockDir, stalePurgeDir);
-          const purgeMeta = path.join(stalePurgeDir, 'metadata.json');
-          if (fs.existsSync(purgeMeta)) fs.unlinkSync(purgeMeta);
-          fs.rmdirSync(stalePurgeDir);
+          await fs.promises.rename(lockDir, stalePurgeDir);
+          try { await fs.promises.unlink(path.join(stalePurgeDir, 'metadata.json')); } catch {}
+          try { await fs.promises.rmdir(stalePurgeDir); } catch {}
         } catch {}
         continue;
       }
 
-      // Lock is actively held; back off with jitter before next attempt
       const jitter = Math.floor(Math.random() * 25) + 15;
       await new Promise(resolve => setTimeout(resolve, jitter));
     }
@@ -1222,64 +1357,92 @@ async function acquireLock(resourceName, ttlMs = 3000, options = {}) {
   throw new LockTimeoutError(`Lock acquisition timed out after ${timeoutMs}ms for resource "${resourceName}"`);
 }
 
+async function verifyLockOwnershipAsync(metaFile, lockDir, token) {
+  if (!token) return true;
+  try {
+    const raw = await fs.promises.readFile(metaFile, 'utf8');
+    const meta = JSON.parse(raw);
+    return !meta.token || meta.token === token;
+  } catch (readErr) {
+    if (readErr.code === 'ENOENT') {
+      try {
+        await fs.promises.access(lockDir);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
 /**
- * Releases a CAS advisory lock safely
+ * Releases a CAS advisory lock safely by verifying ownership and atomically renaming
+ * the lock directory before unlinking its metadata.
  * @param {object} lockHandle 
  */
 async function releaseLock(lockHandle) {
   if (!lockHandle || !lockHandle.lockDir) return;
   const { lockDir, token } = lockHandle;
-
-  if (!fs.existsSync(lockDir)) return;
-
   const metaFile = path.join(lockDir, 'metadata.json');
+
   try {
-    if (fs.existsSync(metaFile)) {
-      if (token) {
-        try {
-          const raw = fs.readFileSync(metaFile, 'utf8');
-          const meta = JSON.parse(raw);
-          if (meta.token && meta.token !== token) {
-            // Token mismatch: lock has been reassigned/expired
-            return;
-          }
-        } catch {}
-      }
-      retryNtfsOperationSync(() => fs.unlinkSync(metaFile));
+    const owned = await verifyLockOwnershipAsync(metaFile, lockDir, token);
+    if (!owned) return;
+
+    const releasingDir = `${lockDir}.releasing.${process.pid}.${crypto.randomUUID().slice(0, 8)}`;
+    try {
+      await retryNtfsOperation(() => fs.promises.rename(lockDir, releasingDir), 3);
+      try {
+        await retryNtfsOperation(() => fs.promises.unlink(path.join(releasingDir, 'metadata.json')));
+      } catch {}
+      try {
+        await retryNtfsOperation(() => fs.promises.rmdir(releasingDir));
+      } catch {}
+      return;
+    } catch (renameErr) {
+      if (renameErr && renameErr.code === 'ENOENT') return;
+      // On Windows NTFS, concurrent contenders reading metadata.json can block dir rename with EPERM/EACCES/EBUSY.
+      // Re-verify ownership token strictly before falling back to unlink+rmdir.
+      const stillOwned = await verifyLockOwnershipAsync(metaFile, lockDir, token);
+      if (!stillOwned) return;
+      try {
+        await retryNtfsOperation(() => fs.promises.unlink(metaFile));
+      } catch {}
+      try {
+        await retryNtfsOperation(() => fs.promises.rmdir(lockDir));
+      } catch {}
     }
-    retryNtfsOperationSync(() => fs.rmdirSync(lockDir));
-  } catch (err) {
-    // If directory already removed or locked, ignore
+  } catch {
+    // Lock already removed, stolen, or released
   }
 }
 
 /**
  * Synchronous variant of acquireLock
  */
-function acquireLockSync(resourceName, ttlMs = 3000, options = {}) {
+function acquireLockSync(resourceName, ttlMsOrOpts = 3000, options = {}) {
+  const { ttlMs, timeoutMs, meshDir } = normalizeLockArgs(ttlMsOrOpts, options);
   const cleanName = sanitizeAgentName(resourceName);
-  const locksDir = path.join(MESH_DIR, 'locks');
+  const locksDir = path.join(meshDir, 'locks');
   if (!fs.existsSync(locksDir)) {
     try { fs.mkdirSync(locksDir, { recursive: true }); } catch {}
   }
 
   const lockDir = path.join(locksDir, `${cleanName}.lock`);
   const metaFile = path.join(lockDir, 'metadata.json');
-  const timeoutMs = options.timeoutMs || 10000;
   const startTime = Date.now();
   const token = crypto.randomUUID();
 
   while (Date.now() - startTime < timeoutMs) {
     try {
       fs.mkdirSync(lockDir);
-      const meta = {
-        ownerPid: process.pid,
-        createdAt: Date.now(),
-        ttlMs,
-        resourceName: cleanName,
-        token
-      };
-      fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2), 'utf8');
+      try {
+        fs.writeFileSync(metaFile, createLockMetadata(cleanName, ttlMs, token), 'utf8');
+      } catch (writeErr) {
+        try { fs.rmdirSync(lockDir); } catch {}
+        throw writeErr;
+      }
       return {
         lockDir,
         resourceName: cleanName,
@@ -1289,31 +1452,18 @@ function acquireLockSync(resourceName, ttlMs = 3000, options = {}) {
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
 
-      // Stale lock detection
       let isStale = false;
       try {
+        let metaRaw = null;
         if (fs.existsSync(metaFile)) {
-          const raw = fs.readFileSync(metaFile, 'utf8');
-          const meta = JSON.parse(raw);
-          const age = Date.now() - meta.createdAt;
-          const effectiveTtl = meta.ttlMs || ttlMs;
-          if (age > effectiveTtl) {
-            isStale = true;
-          } else if (meta.ownerPid && meta.ownerPid !== process.pid) {
-            try {
-              process.kill(meta.ownerPid, 0);
-            } catch (kErr) {
-              if (kErr.code === 'ESRCH') isStale = true;
-            }
-          }
-        } else {
-          const stat = fs.statSync(lockDir);
-          if (Date.now() - stat.mtimeMs > ttlMs) isStale = true;
+          metaRaw = fs.readFileSync(metaFile, 'utf8');
         }
+        const dirStat = metaRaw === null ? fs.statSync(lockDir) : null;
+        isStale = evaluateLockStale(metaRaw, dirStat, ttlMs);
       } catch {}
 
       if (isStale) {
-        const stalePurgeDir = `${lockDir}.stale.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+        const stalePurgeDir = `${lockDir}.stale.${process.pid}.${crypto.randomUUID().slice(0, 8)}`;
         try {
           fs.renameSync(lockDir, stalePurgeDir);
           const purgeMeta = path.join(stalePurgeDir, 'metadata.json');
@@ -1323,13 +1473,26 @@ function acquireLockSync(resourceName, ttlMs = 3000, options = {}) {
         continue;
       }
 
-      // Jitter sleep
       const jitter = Math.floor(Math.random() * 25) + 15;
       sleepSyncSafe(jitter);
     }
   }
 
   throw new LockTimeoutError(`Sync lock acquisition timed out after ${timeoutMs}ms for resource "${resourceName}"`);
+}
+
+function verifyLockOwnershipSync(metaFile, lockDir, token) {
+  if (!token) return true;
+  if (!fs.existsSync(metaFile)) {
+    return fs.existsSync(lockDir);
+  }
+  try {
+    const raw = fs.readFileSync(metaFile, 'utf8');
+    const meta = JSON.parse(raw);
+    return !meta.token || meta.token === token;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1342,17 +1505,33 @@ function releaseLockSync(lockHandle) {
 
   const metaFile = path.join(lockDir, 'metadata.json');
   try {
-    if (fs.existsSync(metaFile)) {
-      if (token) {
-        try {
-          const raw = fs.readFileSync(metaFile, 'utf8');
-          const meta = JSON.parse(raw);
-          if (meta.token && meta.token !== token) return;
-        } catch {}
-      }
-      retryNtfsOperationSync(() => fs.unlinkSync(metaFile));
+    if (!verifyLockOwnershipSync(metaFile, lockDir, token)) return;
+
+    const releasingDir = `${lockDir}.releasing.${process.pid}.${crypto.randomUUID().slice(0, 8)}`;
+    try {
+      retryNtfsOperationSync(() => fs.renameSync(lockDir, releasingDir), 3);
+      try {
+        const relMeta = path.join(releasingDir, 'metadata.json');
+        if (fs.existsSync(relMeta)) {
+          retryNtfsOperationSync(() => fs.unlinkSync(relMeta));
+        }
+      } catch {}
+      try {
+        retryNtfsOperationSync(() => fs.rmdirSync(releasingDir));
+      } catch {}
+      return;
+    } catch (renameErr) {
+      if (renameErr && renameErr.code === 'ENOENT') return;
+      if (!verifyLockOwnershipSync(metaFile, lockDir, token)) return;
+      try {
+        if (fs.existsSync(metaFile)) {
+          retryNtfsOperationSync(() => fs.unlinkSync(metaFile));
+        }
+      } catch {}
+      try {
+        retryNtfsOperationSync(() => fs.rmdirSync(lockDir));
+      } catch {}
     }
-    retryNtfsOperationSync(() => fs.rmdirSync(lockDir));
   } catch {}
 }
 
@@ -1409,6 +1588,13 @@ async function waitForUnread(agentName, timeoutMs = 30000) {
     let timer = null;
     let pollInterval = null;
     let resolved = false;
+    let checking = false;
+    let pendingCheck = false;
+    let lastMtimeMs = 0;
+
+    try {
+      lastMtimeMs = fs.statSync(inboxDir).mtimeMs;
+    } catch {}
 
     const cleanup = () => {
       resolved = true;
@@ -1416,27 +1602,66 @@ async function waitForUnread(agentName, timeoutMs = 30000) {
       if (pollInterval) clearInterval(pollInterval);
       if (watcher) {
         try { watcher.close(); } catch {}
+        watcher = null;
       }
     };
 
-    const check = async () => {
+    const check = async (forceInvalidate = false) => {
       if (resolved) return;
-      inboxDirCache.delete(inboxDir);
-      const msgs = await readInbox(cleanRecipient);
-      if (msgs.length > 0) {
-        cleanup();
-        resolve(msgs);
+      if (checking) {
+        pendingCheck = pendingCheck || forceInvalidate;
+        return;
+      }
+      checking = true;
+      try {
+        if (forceInvalidate) {
+          inboxDirCache.delete(inboxDir);
+        } else {
+          try {
+            const st = await fs.promises.stat(inboxDir);
+            if (st.mtimeMs !== lastMtimeMs) {
+              lastMtimeMs = st.mtimeMs;
+              inboxDirCache.delete(inboxDir);
+            }
+          } catch {
+            inboxDirCache.delete(inboxDir);
+          }
+        }
+
+        const msgs = await readInbox(cleanRecipient);
+        if (!resolved && msgs.length > 0) {
+          cleanup();
+          resolve(msgs);
+          return;
+        }
+      } catch {
+        // Ignore transient watch/read errors while waiting
+      } finally {
+        checking = false;
+      }
+
+      if (!resolved && pendingCheck) {
+        pendingCheck = false;
+        check(true);
       }
     };
 
     try {
       watcher = fs.watch(inboxDir, () => {
-        check();
+        check(true);
       });
-    } catch {}
+      watcher.on('error', () => {
+        if (watcher) {
+          try { watcher.close(); } catch {}
+          watcher = null;
+        }
+      });
+    } catch {
+      watcher = null;
+    }
 
     // Backup polling check every 250ms in case fs.watch events are dropped
-    pollInterval = setInterval(check, 250);
+    pollInterval = setInterval(() => check(false), 250);
 
     timer = setTimeout(() => {
       cleanup();
@@ -1452,7 +1677,8 @@ async function waitForUnread(agentName, timeoutMs = 30000) {
  */
 function clearInboxSync(agentName) {
   const cleanRecipient = validateAgentName(agentName);
-  const inboxDir = getInboxDir(cleanRecipient);
+  const meshDir = getMeshDir();
+  const inboxDir = getInboxDir(cleanRecipient, meshDir);
   let count = 0;
 
   if (fs.existsSync(inboxDir)) {
@@ -1460,8 +1686,10 @@ function clearInboxSync(agentName) {
       const files = retryNtfsOperationSync(() => fs.readdirSync(inboxDir));
       for (const f of files) {
         if (f.endsWith('.json') || f.endsWith('.tmp')) {
+          const fullPath = path.join(inboxDir, f);
           try {
-            retryNtfsOperationSync(() => fs.unlinkSync(path.join(inboxDir, f)));
+            retryNtfsOperationSync(() => fs.unlinkSync(fullPath));
+            fileEnvelopeCache.delete(fullPath);
             count++;
           } catch {}
         }
@@ -1470,7 +1698,7 @@ function clearInboxSync(agentName) {
   }
 
   // Also clear legacy file if present
-  const legacyFile = getInboxFile(cleanRecipient);
+  const legacyFile = getInboxFile(cleanRecipient, meshDir);
   if (fs.existsSync(legacyFile)) {
     try {
       fs.unlinkSync(legacyFile);
@@ -1504,7 +1732,8 @@ function isEphemeralMailboxName(name) {
 
 async function listActiveMailboxes(options = {}) {
   const excludeEphemeral = Boolean(options && options.excludeEphemeral);
-  const inboxBase = path.join(MESH_DIR, 'inbox');
+  const meshDir = (options && options.meshDir) || getMeshDir();
+  const inboxBase = path.join(meshDir, 'inbox');
   const mailboxes = [];
   const seen = new Set();
 
@@ -1545,16 +1774,16 @@ async function listActiveMailboxes(options = {}) {
   }
 
   // Also check legacy mesh/*.json files
-  if (fs.existsSync(MESH_DIR)) {
+  if (fs.existsSync(meshDir)) {
     try {
-      const rootFiles = await fs.promises.readdir(MESH_DIR);
+      const rootFiles = await fs.promises.readdir(meshDir);
       for (const rf of rootFiles) {
         if (rf.endsWith('.json') && rf !== 'dlq.json' && rf !== 'daemon.pid') {
           const name = rf.replace('.json', '');
           if (excludeEphemeral && isEphemeralMailboxName(name)) continue;
           if (!seen.has(name)) {
             try {
-              const content = JSON.parse(await fs.promises.readFile(path.join(MESH_DIR, rf), 'utf8'));
+              const content = JSON.parse(await fs.promises.readFile(path.join(meshDir, rf), 'utf8'));
               mailboxes.push({
                 name,
                 total: Array.isArray(content) ? content.length : 1,
@@ -1575,28 +1804,21 @@ async function listActiveMailboxes(options = {}) {
 function sanitizeName(name) {
   if (typeof name !== 'string') return 'unknown';
   const base = path.basename(name.replace(/\0/g, '').replace(/\\/g, '/'));
-  const clean = base.replace(/[^a-zA-Z0-9_\-#.]/g, '_').replace(/^\.+/, '');
-  return clean || 'unknown';
+  let clean = base.replace(/[^a-zA-Z0-9_\-#.]/g, '_').replace(/^\.+/, '');
+  if (!clean) return 'unknown';
+  if (DOS_DEVICE_REGEX.test(clean)) {
+    clean = `safe_${clean}`;
+  }
+  return clean;
 }
 
 function safeWriteJson(targetPath, data) {
-  const tmp = `${targetPath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(tmp, targetPath);
-  } catch (err) {
-    try {
-      fs.writeFileSync(targetPath, JSON.stringify(data, null, 2), 'utf8');
-    } catch {}
-    try {
-      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-    } catch {}
-  }
+  atomicWriteFileSync(targetPath, JSON.stringify(data, null, 2));
 }
 
-function getInboxFile(agentName) {
+function getInboxFile(agentName, meshDir = getMeshDir()) {
   const raw = (agentName || 'unknown').toString().toLowerCase().trim();
-  const resolvedMeshDir = path.resolve(MESH_DIR);
+  const resolvedMeshDir = path.resolve(meshDir);
   if (raw.includes('#')) {
     const parts = raw.split('#');
     const agent = sanitizeName(parts[0]);
@@ -1607,9 +1829,9 @@ function getInboxFile(agentName) {
   return path.join(resolvedMeshDir, `${clean}.json`);
 }
 
-function getChannelFile(channelName) {
+function getChannelFile(channelName, meshDir = getMeshDir()) {
   const clean = sanitizeName((channelName || '').replace(/^#/, ''));
-  const channelsDir = path.join(MESH_DIR, 'channels');
+  const channelsDir = path.join(meshDir, 'channels');
   if (!fs.existsSync(channelsDir)) {
     try { fs.mkdirSync(channelsDir, { recursive: true }); } catch {}
   }
@@ -1619,9 +1841,10 @@ function getChannelFile(channelName) {
 
 function writeInbox(agentName, messages) {
   const clean = sanitizeName(agentName);
-  const target = getInboxFile(clean);
+  const meshDir = getMeshDir();
+  const target = getInboxFile(clean, meshDir);
   safeWriteJson(target, messages);
-  const inboxDir = path.join(MESH_DIR, 'inbox', clean);
+  const inboxDir = path.join(meshDir, 'inbox', clean);
   inboxDirCache.delete(inboxDir);
 }
 
@@ -1646,7 +1869,6 @@ function sendChannelMessage(channelName, from, message) {
   const normChannel = '#' + (channelName || 'general').replace(/^#/, '');
   const clean = sanitizeName(normChannel.replace(/^#/, ''));
   const file = getChannelFile(clean);
-  const channelsDir = path.dirname(file);
 
   return withLockSync(`channel_${clean}`, () => {
     let history = [];
@@ -1669,20 +1891,7 @@ function sendChannelMessage(channelName, from, message) {
     };
 
     history.push(msgObj);
-
-    if (!fs.existsSync(channelsDir)) {
-      try { fs.mkdirSync(channelsDir, { recursive: true }); } catch {}
-    }
-
-    const tmpFile = path.join(channelsDir, `.tmp_chan_${clean}_${Date.now()}.tmp`);
-    const serialized = JSON.stringify(history, null, 2);
-
-    retryNtfsOperationSync(() => {
-      fs.writeFileSync(tmpFile, serialized, 'utf8');
-    });
-    retryNtfsOperationSync(() => {
-      fs.renameSync(tmpFile, file);
-    });
+    atomicWriteFileSync(file, JSON.stringify(history, null, 2));
 
     return msgObj;
   }, { ttlMs: 3000, timeoutMs: 10000 });
@@ -1717,7 +1926,7 @@ function clearChannel(channelName) {
 }
 
 function listChannels() {
-  const channelsDir = path.join(MESH_DIR, 'channels');
+  const channelsDir = path.join(getMeshDir(), 'channels');
   if (!fs.existsSync(channelsDir)) return [];
   try {
     const files = fs.readdirSync(channelsDir);
@@ -1768,8 +1977,8 @@ async function broadcastToAgents(from, targets, message, customDispatcher) {
 // ============================================================================
 
 class HeartbeatRegistry {
-  constructor(meshDir = process.env.INTERCOM_MESH_DIR || MESH_DIR) {
-    this.meshDir = meshDir || MESH_DIR;
+  constructor(meshDir = getMeshDir()) {
+    this.meshDir = meshDir || getMeshDir();
     this.heartbeatDir = path.join(this.meshDir, 'heartbeats');
     if (!fs.existsSync(this.heartbeatDir)) {
       try { fs.mkdirSync(this.heartbeatDir, { recursive: true }); } catch {}
@@ -1789,9 +1998,11 @@ class HeartbeatRegistry {
       capabilities: metadata.capabilities || []
     };
 
-    const filePath = path.join(this.heartbeatDir, `${clean}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(record, null, 2), 'utf8');
-    return record;
+    const filePath = resolveSafePath(this.heartbeatDir, `${clean}.json`);
+    return withLockSync(`heartbeat_${clean}`, () => {
+      atomicWriteFileSync(filePath, JSON.stringify(record, null, 2));
+      return record;
+    }, { meshDir: this.meshDir });
   }
 
   writeHeartbeat(agent, metadata = {}) {
@@ -1800,7 +2011,8 @@ class HeartbeatRegistry {
 
   getPeerStatus(agent, ttlMs = 30000, options = {}) {
     const clean = validateAgentName(agent);
-    const filePath = path.join(this.heartbeatDir, `${clean}.json`);
+    const effectiveTtl = ttlMs ?? 30000;
+    const filePath = resolveSafePath(this.heartbeatDir, `${clean}.json`);
     if (!fs.existsSync(filePath)) {
       return { status: 'unknown', online: false };
     }
@@ -1808,7 +2020,7 @@ class HeartbeatRegistry {
     try {
       const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       const ageMs = Date.now() - record.epochMs;
-      let isOnline = ageMs <= ttlMs;
+      let isOnline = ageMs <= effectiveTtl;
       let status = isOnline ? record.status : 'stale';
 
       if (options.checkPid && isOnline && record.pid) {
@@ -1839,10 +2051,14 @@ class HeartbeatRegistry {
     const live = [];
 
     for (const f of files) {
-      const agent = f.replace(/\.json$/, '');
-      const st = this.getPeerStatus(agent, ttlMs, options);
-      if (st.online) {
-        live.push(st);
+      try {
+        const agent = f.replace(/\.json$/, '');
+        const st = this.getPeerStatus(agent, ttlMs, options);
+        if (st.online) {
+          live.push(st);
+        }
+      } catch {
+        continue;
       }
     }
     return live;
@@ -1850,6 +2066,7 @@ class HeartbeatRegistry {
 
   evictStalePeers(ttlMs = 60000, options = {}) {
     if (!fs.existsSync(this.heartbeatDir)) return [];
+    const effectiveTtl = ttlMs ?? 60000;
     const files = fs.readdirSync(this.heartbeatDir).filter((f) => f.endsWith('.json') && !f.startsWith('.tmp'));
     const evicted = [];
 
@@ -1858,7 +2075,7 @@ class HeartbeatRegistry {
       try {
         const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
         const ageMs = Date.now() - record.epochMs;
-        let dead = ageMs > ttlMs;
+        let dead = ageMs > effectiveTtl;
 
         if (options.checkPid && !dead && record.pid) {
           try {
@@ -1882,14 +2099,52 @@ class HeartbeatRegistry {
 // #66: Zero-Loss Transactional Cross-Agent Handoff
 // ============================================================================
 
+const MAX_ACTIVE_HANDOFFS = 500;
+const TERMINAL_HANDOFF_STATES = new Set(['COMPLETED', 'REJECTED', 'TIMED_OUT']);
+
 class HandoffCoordinator {
-  constructor(meshDir = process.env.INTERCOM_MESH_DIR || MESH_DIR) {
-    this.meshDir = meshDir || MESH_DIR;
+  constructor(meshDir = getMeshDir()) {
+    this.meshDir = meshDir || getMeshDir();
     this.handoffsDir = path.join(this.meshDir, 'handoffs');
     if (!fs.existsSync(this.handoffsDir)) {
       try { fs.mkdirSync(this.handoffsDir, { recursive: true }); } catch {}
     }
     this.activeHandoffs = new Map();
+  }
+
+  _trackHandoff(cleanId, record) {
+    if (TERMINAL_HANDOFF_STATES.has(record.status)) {
+      this.activeHandoffs.delete(cleanId);
+      return;
+    }
+    if (this.activeHandoffs.has(cleanId)) {
+      this.activeHandoffs.delete(cleanId);
+    } else if (this.activeHandoffs.size >= MAX_ACTIVE_HANDOFFS) {
+      const oldestKey = this.activeHandoffs.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.activeHandoffs.delete(oldestKey);
+      }
+    }
+    this.activeHandoffs.set(cleanId, record);
+  }
+
+  _readFreshHandoffSync(cleanId) {
+    try {
+      const handoffPath = resolveSafePath(this.handoffsDir, `${cleanId}.json`);
+      if (fs.existsSync(handoffPath)) {
+        const raw = retryNtfsOperationSync(() => fs.readFileSync(handoffPath, 'utf8'));
+        const parsed = JSON.parse(raw);
+        this._trackHandoff(cleanId, parsed);
+        return parsed;
+      }
+    } catch {}
+    return null;
+  }
+
+  async _writeHandoffAsync(cleanId, record) {
+    this._trackHandoff(cleanId, record);
+    const handoffPath = resolveSafePath(this.handoffsDir, `${cleanId}.json`);
+    await atomicWriteFile(handoffPath, JSON.stringify(record, null, 2));
   }
 
   async initiateHandoff(senderOrOptions, recipientArg, taskIdArg, contextArg = {}, timeoutMsArg = 5000) {
@@ -1929,11 +2184,11 @@ class HandoffCoordinator {
       expiresAt: new Date(now + timeoutMs).toISOString()
     };
 
-    this.activeHandoffs.set(handoffId, record);
-    const handoffPath = resolveSafePath(this.handoffsDir, `${handoffId}.json`);
-    fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2), 'utf8');
+    await withLock(`handoff_${handoffId}`, async () => {
+      await this._writeHandoffAsync(handoffId, record);
+    }, { meshDir: this.meshDir });
 
-    // Dispatch handoff request message to recipient inbox
+    // Dispatch handoff request message to recipient inbox in this.meshDir
     await writeMessage(cleanRecipient, {
       sender: cleanSender,
       type: 'task_dispatch',
@@ -1945,34 +2200,39 @@ class HandoffCoordinator {
         taskId,
         context
       }
-    });
+    }, { meshDir: this.meshDir });
 
     return record;
   }
 
   async confirmHandoff(handoffId, recipient, metadata = {}) {
     const cleanRecipient = validateAgentName(recipient);
-    const record = this.getHandoff(handoffId);
-    if (!record) throw new Error(`Handoff '${handoffId}' not found`);
-    if (record.recipient !== cleanRecipient) {
-      throw new Error(`Unauthorized recipient '${cleanRecipient}' cannot confirm handoff assigned to '${record.recipient}'`);
-    }
-    if (record.status !== 'INITIATED') {
-      throw new Error(`Cannot confirm handoff in status '${record.status}'`);
-    }
+    const cleanId = sanitizeWindowsFilename(String(handoffId || '').trim());
 
-    if (Date.now() > new Date(record.expiresAt).getTime()) {
-      record.status = 'TIMED_OUT';
-      this.saveHandoff(record);
-      throw new Error(`Handoff '${handoffId}' has expired`);
-    }
+    const record = await withLock(`handoff_${cleanId}`, async () => {
+      const current = this._readFreshHandoffSync(cleanId);
+      if (!current) throw new Error(`Handoff '${handoffId}' not found`);
+      if (current.recipient !== cleanRecipient) {
+        throw new Error(`Unauthorized recipient '${cleanRecipient}' cannot confirm handoff assigned to '${current.recipient}'`);
+      }
+      if (current.status !== 'INITIATED') {
+        throw new Error(`Cannot confirm handoff in status '${current.status}'`);
+      }
 
-    record.status = 'CONFIRMED';
-    record.confirmedAt = new Date().toISOString();
-    record.recipientMetadata = metadata;
-    this.saveHandoff(record);
+      if (Date.now() > new Date(current.expiresAt).getTime()) {
+        current.status = 'TIMED_OUT';
+        await this._writeHandoffAsync(cleanId, current);
+        throw new Error(`Handoff '${handoffId}' has expired`);
+      }
 
-    // Send confirmation ACK to sender
+      current.status = 'CONFIRMED';
+      current.confirmedAt = new Date().toISOString();
+      current.recipientMetadata = metadata;
+      await this._writeHandoffAsync(cleanId, current);
+      return current;
+    }, { meshDir: this.meshDir });
+
+    // Send confirmation ACK to sender in this.meshDir
     await writeMessage(record.sender, {
       sender: cleanRecipient,
       type: 'ack',
@@ -1983,28 +2243,33 @@ class HandoffCoordinator {
         status: 'CONFIRMED',
         recipient: cleanRecipient
       }
-    });
+    }, { meshDir: this.meshDir });
 
     return record;
   }
 
   async rejectHandoff(handoffId, recipient, reason = 'Worker capacity exceeded') {
     const cleanRecipient = validateAgentName(recipient);
-    const record = this.getHandoff(handoffId);
-    if (!record) throw new Error(`Handoff '${handoffId}' not found`);
-    if (record.recipient !== cleanRecipient) {
-      throw new Error(`Unauthorized recipient '${cleanRecipient}' cannot reject handoff assigned to '${record.recipient}'`);
-    }
-    if (record.status !== 'INITIATED') {
-      throw new Error(`Cannot reject handoff in status '${record.status}'`);
-    }
+    const cleanId = sanitizeWindowsFilename(String(handoffId || '').trim());
 
-    record.status = 'REJECTED';
-    record.rejectedAt = new Date().toISOString();
-    record.rejectReason = reason;
-    this.saveHandoff(record);
+    const record = await withLock(`handoff_${cleanId}`, async () => {
+      const current = this._readFreshHandoffSync(cleanId);
+      if (!current) throw new Error(`Handoff '${handoffId}' not found`);
+      if (current.recipient !== cleanRecipient) {
+        throw new Error(`Unauthorized recipient '${cleanRecipient}' cannot reject handoff assigned to '${current.recipient}'`);
+      }
+      if (current.status !== 'INITIATED') {
+        throw new Error(`Cannot reject handoff in status '${current.status}'`);
+      }
 
-    // Send rejection notice to sender so sender retains ownership
+      current.status = 'REJECTED';
+      current.rejectedAt = new Date().toISOString();
+      current.rejectReason = reason;
+      await this._writeHandoffAsync(cleanId, current);
+      return current;
+    }, { meshDir: this.meshDir });
+
+    // Send rejection notice to sender in this.meshDir so sender retains ownership
     await writeMessage(record.sender, {
       sender: cleanRecipient,
       type: 'task_response',
@@ -2016,52 +2281,51 @@ class HandoffCoordinator {
         reason,
         recipient: cleanRecipient
       }
-    });
+    }, { meshDir: this.meshDir });
 
     return record;
   }
 
   completeHandoff(handoffId, sender, result = {}) {
     const cleanSender = validateAgentName(sender);
-    const record = this.getHandoff(handoffId);
-    if (!record) throw new Error(`Handoff '${handoffId}' not found`);
-    if (record.sender !== cleanSender) {
-      throw new Error(`Unauthorized sender '${cleanSender}' cannot complete handoff owned by '${record.sender}'`);
-    }
-    if (record.status !== 'CONFIRMED') {
-      throw new Error(`Cannot complete unconfirmed handoff in status '${record.status}'`);
-    }
+    const cleanId = sanitizeWindowsFilename(String(handoffId || '').trim());
 
-    record.status = 'COMPLETED';
-    record.completedAt = new Date().toISOString();
-    record.result = result;
-    this.saveHandoff(record);
-    return record;
+    return withLockSync(`handoff_${cleanId}`, () => {
+      const record = this._readFreshHandoffSync(cleanId);
+      if (!record) throw new Error(`Handoff '${handoffId}' not found`);
+      if (record.sender !== cleanSender) {
+        throw new Error(`Unauthorized sender '${cleanSender}' cannot complete handoff owned by '${record.sender}'`);
+      }
+      if (record.status !== 'CONFIRMED') {
+        throw new Error(`Cannot complete unconfirmed handoff in status '${record.status}'`);
+      }
+
+      record.status = 'COMPLETED';
+      record.completedAt = new Date().toISOString();
+      record.result = result;
+      this._saveHandoffUnlocked(cleanId, record);
+      return record;
+    }, { meshDir: this.meshDir });
   }
 
   getHandoff(handoffId) {
     if (typeof handoffId !== 'string' || !handoffId.trim()) return null;
     const cleanId = sanitizeWindowsFilename(handoffId.trim());
-    if (this.activeHandoffs.has(cleanId)) {
-      return this.activeHandoffs.get(cleanId);
-    }
-    try {
-      const handoffPath = resolveSafePath(this.handoffsDir, `${cleanId}.json`);
-      if (fs.existsSync(handoffPath)) {
-        const parsed = JSON.parse(fs.readFileSync(handoffPath, 'utf8'));
-        this.activeHandoffs.set(cleanId, parsed);
-        return parsed;
-      }
-    } catch {}
-    return null;
+    return this._readFreshHandoffSync(cleanId);
+  }
+
+  _saveHandoffUnlocked(cleanId, record) {
+    this._trackHandoff(cleanId, record);
+    const handoffPath = resolveSafePath(this.handoffsDir, `${cleanId}.json`);
+    atomicWriteFileSync(handoffPath, JSON.stringify(record, null, 2));
   }
 
   saveHandoff(record) {
     if (!record || !record.handoffId) return;
     const cleanId = sanitizeWindowsFilename(record.handoffId);
-    this.activeHandoffs.set(cleanId, record);
-    const handoffPath = resolveSafePath(this.handoffsDir, `${cleanId}.json`);
-    fs.writeFileSync(handoffPath, JSON.stringify(record, null, 2), 'utf8');
+    withLockSync(`handoff_${cleanId}`, () => {
+      this._saveHandoffUnlocked(cleanId, record);
+    }, { meshDir: this.meshDir });
   }
 }
 
@@ -2101,8 +2365,13 @@ module.exports = {
   LruCache,
   clearMeshCache,
   getMeshCacheStats,
+  invalidateInboxCache,
   retryNtfsOperation,
   retryNtfsOperationSync,
+  atomicWriteFile,
+  atomicWriteFileSync,
+  updateDiscreteEnvelopeSync,
+  ensureMeshDirs,
   waitForUnread,
   clearInbox,
   clearInboxSync,
