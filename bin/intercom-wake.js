@@ -2,26 +2,35 @@
 // bin/intercom-wake.js - Auto-Wake Executable Shortcut
 const { wakeAgent } = require('../src/controllers/autowake');
 
-const args = process.argv.slice(2);
-const toIdx = args.indexOf('--to') !== -1 ? args.indexOf('--to') : (args[0] && !args[0].startsWith('-') ? 0 : -1);
-const msgIdx = args.indexOf('--msg') !== -1 ? args.indexOf('--msg') : (args[1] && !args[1].startsWith('-') ? 1 : -1);
+function parseWakeArgs(argv) {
+  let flagTo = null;
+  let flagMsg = null;
+  let help = false;
+  const positional = [];
 
-let to = null;
-let msg = null;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--help' || arg === '-h') {
+      help = true;
+    } else if (arg === '--to' && i + 1 < argv.length) {
+      flagTo = argv[++i];
+    } else if (arg.startsWith('--to=')) {
+      flagTo = arg.slice('--to='.length);
+    } else if (arg === '--msg' && i + 1 < argv.length) {
+      flagMsg = argv[++i];
+    } else if (arg.startsWith('--msg=')) {
+      flagMsg = arg.slice('--msg='.length);
+    } else if (!arg.startsWith('-')) {
+      positional.push(arg);
+    }
+  }
 
-if (args.includes('--to')) {
-  to = args[args.indexOf('--to') + 1];
-} else if (args[0] && !args[0].startsWith('-')) {
-  to = args[0];
+  const to = flagTo || positional[0] || null;
+  const msg = flagMsg || (flagTo ? positional[0] : positional[1]) || null;
+  return { to, msg, help };
 }
 
-if (args.includes('--msg')) {
-  msg = args[args.indexOf('--msg') + 1];
-} else if (args[1] && !args[1].startsWith('-')) {
-  msg = args[1];
-}
-
-if (!to || !msg) {
+function printUsage() {
   console.log(`
 ⚡ Intercom Auto-Wake Shortcut
 
@@ -33,9 +42,20 @@ Examples:
   intercom-wake Keshav "Check customer routes"
   intercom-wake pal "Run test verification"
 `);
+}
+
+const { to, msg, help } = parseWakeArgs(process.argv.slice(2));
+
+if (help) {
+  printUsage();
+  process.exit(0);
+}
+
+if (!to || !msg) {
+  printUsage();
   process.exit(1);
 }
 
 wakeAgent(to, msg, () => {
-  setTimeout(() => process.exit(0), 400);
+  process.exit(0);
 });

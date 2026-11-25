@@ -2,8 +2,9 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 const { spawn, execSync } = require('child_process');
-const { PORT, MESH_DIR } = require('./config');
+const { PORT, MESH_DIR, getPort, getMeshDir, getBrokerConnectTarget } = require('./config');
 const { MessageEnvelope } = require('./core/message');
 const {
   writeMessage,
@@ -14,6 +15,8 @@ const {
   waitForUnread,
   listActiveMailboxes,
   validateAgentName,
+  updateDiscreteEnvelopeSync,
+  checkAndMarkRead,
   HandoffCoordinator
 } = require('./core/mesh');
 const {
@@ -26,29 +29,62 @@ const {
 const { interruptAgent } = require('./core/interrupter');
 const { IntercomDaemon, startDaemon, stopDaemon, getDaemonStatus } = require('./core/daemon');
 
+const BOOLEAN_FLAGS = new Set([
+  'dry-run', 'dryRun',
+  'no-empty', 'noEmpty',
+  'json',
+  'unlink',
+  'quiet', 'q',
+  'help', 'h',
+  'force', 'f',
+  'apply',
+  'auto-partition', 'autoPartition',
+  'offline',
+  'vars',
+  'write',
+  'in-place', 'inPlace'
+]);
+
+function coerceBooleanFlagValue(rawVal) {
+  const lower = String(rawVal).trim().toLowerCase();
+  if (lower === 'false' || lower === '0' || lower === 'no') return false;
+  return true;
+}
+
 function parseArgs(args) {
   const parsed = { _: [], flags: {} };
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
     if (arg.startsWith('--')) {
-      const key = arg.slice(2);
-      if (key.includes('=')) {
-        const [k, v] = key.split('=');
-        parsed.flags[k] = v;
+      const raw = arg.slice(2);
+      const eqIdx = raw.indexOf('=');
+      if (eqIdx !== -1) {
+        const k = raw.slice(0, eqIdx);
+        const v = raw.slice(eqIdx + 1);
+        parsed.flags[k] = BOOLEAN_FLAGS.has(k) ? coerceBooleanFlagValue(v) : v;
+      } else if (BOOLEAN_FLAGS.has(raw)) {
+        parsed.flags[raw] = true;
       } else if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
-        parsed.flags[key] = args[i + 1];
+        parsed.flags[raw] = args[i + 1];
         i++;
       } else {
-        parsed.flags[key] = true;
+        parsed.flags[raw] = true;
       }
-    } else if (arg.startsWith('-')) {
-      const key = arg.slice(1);
-      if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
-        parsed.flags[key] = args[i + 1];
+    } else if (arg.startsWith('-') && arg.length > 1) {
+      const raw = arg.slice(1);
+      const eqIdx = raw.indexOf('=');
+      if (eqIdx !== -1) {
+        const k = raw.slice(0, eqIdx);
+        const v = raw.slice(eqIdx + 1);
+        parsed.flags[k] = BOOLEAN_FLAGS.has(k) ? coerceBooleanFlagValue(v) : v;
+      } else if (BOOLEAN_FLAGS.has(raw)) {
+        parsed.flags[raw] = true;
+      } else if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
+        parsed.flags[raw] = args[i + 1];
         i++;
       } else {
-        parsed.flags[key] = true;
+        parsed.flags[raw] = true;
       }
     } else {
       parsed._.push(arg);
@@ -220,10 +256,11 @@ async function run(rawArgv = process.argv.slice(2)) {
         // Fast-Path attempt via daemon
         let sent = false;
         try {
-          const res = await fetch(`http://127.0.0.1:${PORT || 4150}/api/intercom/send`, {
+          const res = await fetch(`http://127.0.0.1:${getPort()}/api/intercom/send`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(envelope.toJSON())
+            body: JSON.stringify(envelope.toJSON()),
+            signal: AbortSignal.timeout(1500)
           });
           if (res.ok) {
             const data = await res.json();
@@ -251,8 +288,19 @@ async function run(rawArgv = process.argv.slice(2)) {
 
         const cleanAgent = validateAgentName(agent);
 
+        let timeoutSec = 5;
+        if (flags.timeout !== undefined) {
+          const rawTimeout = String(flags.timeout).trim();
+          const parsedTimeout = Number(rawTimeout);
+          if (flags.timeout === true || rawTimeout === '' || !Number.isFinite(parsedTimeout) || parsedTimeout < 0) {
+            console.error(`Error: Invalid --timeout value "${flags.timeout}". Expected a non-negative number of seconds.`);
+            process.exitCode = 1;
+            return;
+          }
+          timeoutSec = parsedTimeout;
+        }
+
         if (flags.json) {
-          const timeoutSec = flags.timeout ? parseInt(flags.timeout, 10) : 5;
           const msgs = await waitForUnread(cleanAgent, timeoutSec * 1000);
           const formatted = msgs.map(m => {
             const raw = m.toJSON ? m.toJSON() : m;
@@ -267,51 +315,109 @@ async function run(rawArgv = process.argv.slice(2)) {
 
         console.log(`[INTERCOM WATCH] Listening for messages for "${cleanAgent}"... (Press Ctrl+C to exit)`);
 
-        // Attempt Fast-Path SSE connection
-        let sseConnected = false;
-        const port = PORT || 4150;
-        const req = http.request({
-          hostname: '127.0.0.1',
-          port,
-          path: `/api/intercom/events?agent=${cleanAgent}`,
-          method: 'GET',
-          headers: { 'Accept': 'text/event-stream' }
-        }, (res) => {
-          if (res.statusCode === 200) {
-            sseConnected = true;
+        const abortController = new AbortController();
+        const port = getPort();
+        let req = null;
+        let sseActive = false;
+        let fallbackStarted = false;
+
+        await new Promise((resolve) => {
+          const onSig = () => {
+            abortController.abort();
+            if (req) {
+              try { req.destroy(); } catch {}
+            }
+            cleanupSignals();
+            resolve();
+          };
+          const cleanupSignals = () => {
+            process.removeListener('SIGINT', onSig);
+            process.removeListener('SIGTERM', onSig);
+          };
+          process.on('SIGINT', onSig);
+          process.on('SIGTERM', onSig);
+
+          const startFallback = (reason) => {
+            if (abortController.signal.aborted || fallbackStarted) return;
+            fallbackStarted = true;
+            console.log(`[INTERCOM WATCH] ${reason}. Falling back to Safe-Path File-Mesh reactive watcher.`);
+            startFileMeshWatcher(cleanAgent, { signal: abortController.signal })
+              .catch(() => {})
+              .finally(() => {
+                cleanupSignals();
+                resolve();
+              });
+          };
+
+          const handleSseBlock = (block) => {
+            const trimmed = block.trim();
+            if (!trimmed) return;
+            let eventName = 'message';
+            const dataLines = [];
+            for (const line of block.split('\n')) {
+              if (!line || line.startsWith(':')) continue;
+              if (line.startsWith('event:')) {
+                eventName = line.slice(6).trim() || 'message';
+              } else if (line.startsWith('data:')) {
+                const val = line.slice(5);
+                dataLines.push(val.startsWith(' ') ? val.slice(1) : val);
+              }
+            }
+            if (eventName === 'ping' || eventName === 'shutdown') return;
+            if (dataLines.length === 0) return;
+            const dataPayload = dataLines.join('\n');
+            try {
+              const parsed = JSON.parse(dataPayload);
+              printMessage(parsed);
+            } catch {
+              console.log(`[RAW]: ${dataPayload}`);
+            }
+          };
+
+          req = http.request({
+            hostname: '127.0.0.1',
+            port,
+            path: `/api/intercom/events?agent=${encodeURIComponent(cleanAgent)}`,
+            method: 'GET',
+            headers: { 'Accept': 'text/event-stream' }
+          }, (res) => {
+            if (res.statusCode !== 200) {
+              res.resume();
+              startFallback(`Daemon returned HTTP ${res.statusCode}`);
+              return;
+            }
+            sseActive = true;
             console.log(`[INTERCOM WATCH] Connected to Fast-Path SSE stream on :${port}`);
             let buffer = '';
-            res.on('data', chunk => {
-              buffer += chunk.toString();
-              const lines = buffer.split('\n\n');
-              buffer = lines.pop(); // keep remainder
-              for (const block of lines) {
-                if (!block.trim() || block.startsWith(':')) continue;
-                const match = block.match(/data:\s*(.*)/s);
-                if (match) {
-                  try {
-                    const parsed = JSON.parse(match[1]);
-                    printMessage(parsed);
-                  } catch {
-                    console.log(`[RAW]: ${match[1]}`);
-                  }
-                }
+            res.on('data', (chunk) => {
+              buffer += chunk.toString().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+              const blocks = buffer.split('\n\n');
+              buffer = blocks.pop() || '';
+              for (const block of blocks) {
+                handleSseBlock(block);
               }
             });
-          }
+            res.on('end', () => {
+              if (buffer.trim()) handleSseBlock(buffer);
+              buffer = '';
+              startFallback('Daemon SSE stream ended');
+            });
+            res.on('close', () => {
+              startFallback('Daemon SSE stream closed');
+            });
+            res.on('error', (err) => {
+              startFallback(`Daemon SSE error (${err.message})`);
+            });
+          });
+
+          req.on('error', () => {
+            if (!sseActive) {
+              startFallback('Daemon offline');
+            }
+          });
+
+          req.end();
         });
-
-        req.on('error', async () => {
-          if (!sseConnected) {
-            console.log('[INTERCOM WATCH] Daemon offline. Falling back to Safe-Path File-Mesh reactive watcher.');
-            startFileMeshWatcher(cleanAgent);
-          }
-        });
-
-        req.end();
-
-        // Keep process open
-        await new Promise(() => {});
         break;
       }
 
@@ -406,9 +512,18 @@ async function run(rawArgv = process.argv.slice(2)) {
 
       case 'compact': {
         const agent = _[1] || flags.agent;
-        const isDryRun = flags['dry-run'] || flags.dryRun === true;
-        const pruneEmpty = flags['no-empty'] ? false : true;
-        const tempTtlMs = flags['temp-ttl'] ? parseInt(flags['temp-ttl'], 10) : 60000;
+        const isDryRun = flags['dry-run'] === true || flags.dryRun === true;
+        const pruneEmpty = flags['no-empty'] === true ? false : true;
+        let tempTtlMs = 60000;
+        if (flags['temp-ttl'] !== undefined) {
+          const parsedTtl = Number(flags['temp-ttl']);
+          if (flags['temp-ttl'] === true || !Number.isFinite(parsedTtl) || parsedTtl < 0) {
+            console.error(`Error: Invalid --temp-ttl value "${flags['temp-ttl']}". Expected non-negative milliseconds.`);
+            process.exitCode = 1;
+            return;
+          }
+          tempTtlMs = Math.floor(parsedTtl);
+        }
 
         console.log(`[INTERCOM COMPACT] Starting mailbox compaction${isDryRun ? ' [DRY RUN]' : ''}...`);
         const report = await compactMailboxes({
@@ -492,11 +607,14 @@ async function run(rawArgv = process.argv.slice(2)) {
       }
 
       case 'peers': {
-        const daemonStatus = await getDaemonStatus(PORT || 4150);
+        const port = getPort();
+        const daemonStatus = await getDaemonStatus(port);
         let connected = [];
         if (daemonStatus.running) {
           try {
-            const res = await fetch(`http://127.0.0.1:${PORT || 4150}/api/intercom/peers`);
+            const res = await fetch(`http://127.0.0.1:${port}/api/intercom/peers`, {
+              signal: AbortSignal.timeout(1500)
+            });
             if (res.ok) {
               const data = await res.json();
               connected = data.connectedPeers || [];
@@ -540,7 +658,11 @@ async function run(rawArgv = process.argv.slice(2)) {
       case 'metrics': {
         const { metrics } = require('./core/metrics');
         if (flags.json) {
-          console.log(JSON.stringify(metrics.gatherFilesystemGauges(), null, 2));
+          const gauges = metrics.gatherFilesystemGauges(getMeshDir(), { includeMailboxCounts: true });
+          console.log(JSON.stringify({
+            ...gauges,
+            mailboxCounts: Object.fromEntries(gauges.mailboxCounts || [])
+          }, null, 2));
         } else {
           console.log(metrics.formatPrometheus());
         }
@@ -578,6 +700,7 @@ async function run(rawArgv = process.argv.slice(2)) {
         const agent = _[1] || flags.agent;
         if (!agent) {
           console.error('Error: Agent name required: intercom read <agent>');
+          process.exitCode = 1;
           return;
         }
         const msgs = await readInbox(agent);
@@ -597,22 +720,35 @@ async function run(rawArgv = process.argv.slice(2)) {
         const agent = _[1] || flags.agent;
         if (!agent) {
           console.error('Error: Agent name required: intercom check --agent <name>');
+          process.exitCode = 1;
           return;
         }
-        const { checkAndMarkRead } = require('./core/mesh');
-        let unread = checkAndMarkRead(agent);
-        if (!unread || unread.length === 0) {
-          const msgs = await readInbox(agent);
-          unread = msgs.map(m => {
-            const raw = m.toJSON ? m.toJSON() : m;
-            return {
-              ...raw,
-              message: (raw.payload && raw.payload.message) || raw.message || '',
-              read: true
-            };
+        const legacyUnread = checkAndMarkRead(agent) || [];
+        const discreteMsgs = await readInbox(agent);
+        const discreteUnread = [];
+        const nowIso = new Date().toISOString();
+        for (const m of discreteMsgs) {
+          const raw = m.toJSON ? m.toJSON() : m;
+          if (raw.read === true) continue;
+          let updated = null;
+          if (raw.id) {
+            try {
+              updated = updateDiscreteEnvelopeSync(agent, String(raw.id), (env) => ({
+                ...env,
+                read: true,
+                readAt: env.readAt || nowIso
+              }));
+            } catch {}
+          }
+          const finalRaw = updated || { ...raw, read: true, readAt: raw.readAt || nowIso };
+          discreteUnread.push({
+            ...finalRaw,
+            message: (finalRaw.payload && finalRaw.payload.message) || finalRaw.message || '',
+            read: true
           });
         }
-        console.log(JSON.stringify(unread));
+        const combined = [...legacyUnread, ...discreteUnread];
+        console.log(JSON.stringify(combined));
         break;
       }
 
@@ -620,6 +756,7 @@ async function run(rawArgv = process.argv.slice(2)) {
         const agent = _[1] || flags.agent;
         if (!agent) {
           console.error('Error: Agent name required: intercom clear <agent>');
+          process.exitCode = 1;
           return;
         }
         const count = await clearInbox(agent);
@@ -964,7 +1101,16 @@ async function run(rawArgv = process.argv.slice(2)) {
           }
 
           const sender = flags.from || flags.sender || process.env.INTERCOM_AGENT || 'operator';
-          const timeoutMs = flags.timeout ? parseInt(flags.timeout, 10) * 1000 : 30000;
+          let timeoutMs = 30000;
+          if (flags.timeout !== undefined) {
+            const parsedTimeout = Number(flags.timeout);
+            if (flags.timeout === true || !Number.isFinite(parsedTimeout) || parsedTimeout <= 0) {
+              console.error(`Error: Invalid --timeout value "${flags.timeout}". Expected a positive number of seconds.`);
+              process.exitCode = 1;
+              break;
+            }
+            timeoutMs = Math.round(parsedTimeout * 1000);
+          }
 
           const ticket = await coordinator.initiateHandoff({
             sender,
@@ -1003,7 +1149,21 @@ async function run(rawArgv = process.argv.slice(2)) {
           }
 
           const recipient = flags.agent || flags.recipient || flags.as || process.env.INTERCOM_AGENT || existing.recipient;
-          const metadata = flags.metadata ? JSON.parse(flags.metadata) : { confirmedBy: recipient, pid: process.pid };
+          let metadata = { confirmedBy: recipient, pid: process.pid };
+          if (flags.metadata !== undefined) {
+            if (flags.metadata === true || typeof flags.metadata !== 'string') {
+              console.error('Error: --metadata requires a JSON object string.');
+              process.exitCode = 1;
+              break;
+            }
+            try {
+              metadata = JSON.parse(flags.metadata);
+            } catch (err) {
+              console.error(`Error: Invalid JSON in --metadata: ${err.message}`);
+              process.exitCode = 1;
+              break;
+            }
+          }
 
           const confirmed = await coordinator.confirmHandoff(ticketId, recipient, metadata);
           if (flags.json) {
@@ -1145,33 +1305,122 @@ function printMessage(msg) {
   console.log(`--------------------------------------------------------------------------------`);
 }
 
-async function startFileMeshWatcher(agentName) {
+async function startFileMeshWatcher(agentName, options = {}) {
+  const signal = options.signal;
   const seenIds = new Set();
-  while (true) {
+  const seenTimestamps = new Map();
+  let evictedWatermarkMs = -1;
+  let lastDirMtimeMs = -1;
+
+  const sleepCancellable = (ms) => new Promise((resolve) => {
+    if (signal && signal.aborted) return resolve();
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    if (typeof timer.unref === 'function') timer.unref();
+    function onAbort() {
+      clearTimeout(timer);
+      resolve();
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  while (!signal || !signal.aborted) {
     try {
+      const inboxDir = path.join(getMeshDir(), 'inbox', agentName);
+      let currentDirMtimeMs = -1;
+      try {
+        if (fs.existsSync(inboxDir)) {
+          currentDirMtimeMs = fs.statSync(inboxDir).mtimeMs;
+        }
+      } catch {}
+
+      if (currentDirMtimeMs > 0 && currentDirMtimeMs === lastDirMtimeMs && seenIds.size > 0) {
+        await sleepCancellable(500);
+        continue;
+      }
+
       const msgs = await waitForUnread(agentName, 5000);
-      let newCount = 0;
-      for (const m of msgs) {
-        if (!seenIds.has(m.id)) {
-          seenIds.add(m.id);
-          if (seenIds.size > 5000) {
-            const oldest = seenIds.values().next().value;
-            seenIds.delete(oldest);
-          }
-          printMessage(m);
-          newCount++;
+      if (signal && signal.aborted) break;
+
+      try {
+        if (fs.existsSync(inboxDir)) {
+          lastDirMtimeMs = fs.statSync(inboxDir).mtimeMs;
+        }
+      } catch {}
+
+      const currentIds = new Set(msgs.map(m => m && m.id).filter(Boolean));
+      for (const oldId of Array.from(seenIds)) {
+        if (!currentIds.has(oldId)) {
+          seenIds.delete(oldId);
+          seenTimestamps.delete(oldId);
         }
       }
+
+      let newCount = 0;
+      for (const m of msgs) {
+        if (!m || !m.id) continue;
+        const msgTs = Date.parse(m.timestamp || '') || 0;
+        if (seenIds.has(m.id)) continue;
+        if (evictedWatermarkMs >= 0 && msgTs > 0 && msgTs <= evictedWatermarkMs) continue;
+
+        seenIds.add(m.id);
+        seenTimestamps.set(m.id, msgTs);
+        if (seenIds.size > 5000) {
+          const oldestId = seenIds.values().next().value;
+          const oldestTs = seenTimestamps.get(oldestId) || 0;
+          if (oldestTs > evictedWatermarkMs) evictedWatermarkMs = oldestTs;
+          seenIds.delete(oldestId);
+          seenTimestamps.delete(oldestId);
+        }
+        printMessage(m);
+        newCount++;
+      }
       // Yield even on 0ms waitForUnread() returns (e.g. unacknowledged mail still on disk) to prevent 100% CPU spin
-      await new Promise((r) => setTimeout(r, newCount === 0 ? 500 : 50));
+      await sleepCancellable(newCount === 0 ? 500 : 50);
     } catch (e) {
-      await new Promise((r) => setTimeout(r, 1000));
+      await sleepCancellable(1000);
     }
   }
 }
 
+async function probeBrokerIpc(target, timeoutMs = 400) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const done = (online, reason = null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ online, reason });
+    };
+    let socket;
+    try {
+      socket = (typeof target === 'object' && target !== null && target.host && target.port)
+        ? net.connect({ host: target.host, port: target.port }, () => {
+            try { socket.end(); } catch {}
+            done(true);
+          })
+        : net.connect(target, () => {
+            try { socket.end(); } catch {}
+            done(true);
+          });
+      socket.on('error', (err) => done(false, err.message));
+      timer = setTimeout(() => {
+        try { socket.destroy(); } catch {}
+        done(false, 'Timed out');
+      }, timeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    } catch (err) {
+      done(false, err.message);
+    }
+  });
+}
+
 async function runDoctor() {
-  const port = PORT || 4150;
+  const port = getPort();
+  const meshDir = getMeshDir();
   console.log(`================================================================================`);
   console.log(`             INTERCOM GLOBAL MESH HEALTH & CONNECTIVITY DIAGNOSTICS             `);
   console.log(`================================================================================`);
@@ -1187,12 +1436,22 @@ async function runDoctor() {
   } else {
     console.log(`  Local HTTP Daemon (:${port})    : OFFLINE (Start via 'intercom daemon start')`);
   }
-  const pipeName = process.platform === 'win32' ? `\\\\.\\pipe\\intercom-mesh` : `/tmp/intercom-mesh.sock`;
-  console.log(`  Local Named Pipes            : ACTIVE (${pipeName})\n`);
+  const brokerTarget = getBrokerConnectTarget();
+  const brokerLabel = typeof brokerTarget === 'object' ? `${brokerTarget.host}:${brokerTarget.port}` : brokerTarget;
+  const brokerProbe = await probeBrokerIpc(brokerTarget);
+  console.log(`  Pi Broker IPC                : ${brokerProbe.online ? 'ONLINE' : 'OFFLINE'} (${brokerLabel}${brokerProbe.reason ? ` - ${brokerProbe.reason}` : ''})\n`);
 
   // 2. Discrete File-Mesh Storage
   console.log(`[DISCRETE FILE-MESH STORAGE]`);
-  console.log(`  Mesh Directory               : ${MESH_DIR}`);
+  console.log(`  Mesh Directory               : ${meshDir}`);
+  let meshWritable = false;
+  try {
+    fs.mkdirSync(meshDir, { recursive: true });
+    fs.accessSync(meshDir, fs.constants.R_OK | fs.constants.W_OK);
+    meshWritable = true;
+  } catch {}
+  console.log(`  Mesh Storage Permissions     : ${meshWritable ? 'READ/WRITE OK' : 'UNAVAILABLE / READ-ONLY'}`);
+
   const regAgents = await listActiveAgents();
   console.log(`  Registry Active Agents       : ${regAgents.length} agents registered`);
   for (const a of regAgents.slice(0, 5)) {
@@ -1202,21 +1461,26 @@ async function runDoctor() {
   const totalPending = mailboxes.reduce((acc, m) => acc + m.total, 0);
   console.log(`  Inbox Queues                 : ${totalPending} pending messages across ${mailboxes.length} mailboxes`);
 
-  const locksDir = path.join(MESH_DIR, 'locks');
+  const locksDir = path.join(meshDir, 'locks');
   let activeLocks = 0;
   if (fs.existsSync(locksDir)) {
     const files = fs.readdirSync(locksDir);
     activeLocks = files.filter(f => f.endsWith('.lock')).length;
   }
-  console.log(`  CAS Locks                    : ${activeLocks === 0 ? 'CLEAN (0 active locks)' : `${activeLocks} active locks`}\n`);
+  console.log(`  CAS Locks                    : ${activeLocks === 0 ? 'CLEAN (0 active locks)' : `${activeLocks} active locks`}`);
+
+  const dlqDir = path.join(meshDir, 'dlq');
+  let dlqCount = 0;
+  if (fs.existsSync(dlqDir)) {
+    dlqCount = fs.readdirSync(dlqDir).filter(f => f.endsWith('.json')).length;
+  }
+  console.log(`  Dead Letter Queue (DLQ)      : ${dlqCount === 0 ? 'CLEAN (0 failed messages)' : `${dlqCount} failed messages`}\n`);
 
   // 3. External Cloud & Harness Integrations
   console.log(`[EXTERNAL CLOUD & HARNESS INTEGRATIONS]`);
-  let julesDetected = false;
   try {
     const out = execSync('jules --version', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 1500 });
     console.log(`  Google Jules CLI             : DETECTED (${out.toString().trim()})`);
-    julesDetected = true;
   } catch {
     console.log(`  Google Jules CLI             : NOT DETECTED (Fallback to local subagents active)`);
   }
@@ -1228,8 +1492,24 @@ async function runDoctor() {
   console.log(`  Path Traversal Sandboxing    : SECURE (Strict rejection of .. / \\ %2e)`);
   console.log(`  DOS Device Protection        : ENABLED (CON, PRN, AUX, NUL, COM, LPT, CONIN$, CONOUT$)`);
 
+  const issues = [];
+  if (!meshWritable) issues.push('mesh directory not writable');
+  if (!status.running) issues.push('HTTP daemon offline');
+  if (activeLocks > 0) issues.push(`${activeLocks} active CAS lock(s)`);
+  if (dlqCount > 0) issues.push(`${dlqCount} DLQ message(s)`);
+
+  let resultLine;
+  if (!meshWritable) {
+    resultLine = `Result: UNHEALTHY - ${issues.join('; ')}`;
+    process.exitCode = 1;
+  } else if (status.running && activeLocks === 0 && dlqCount === 0) {
+    resultLine = 'Result: HEALTHY - HTTP Daemon and Discrete File-Mesh operating normally.';
+  } else {
+    resultLine = `Result: DEGRADED - File-Mesh ready; notices: ${issues.join(', ')}.`;
+  }
+
   console.log(`================================================================================`);
-  console.log(`Result: 100% HEALTHY - Core transport operating within nominal parameters.`);
+  console.log(resultLine);
   console.log(`================================================================================\n`);
 }
 

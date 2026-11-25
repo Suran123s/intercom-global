@@ -2,11 +2,14 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { PORT, MESH_DIR, ROOT_DIR } = require('./config');
+const { PORT, MESH_DIR, ROOT_DIR, getMeshDir } = require('./config');
+const { isEphemeralMailboxName, retryNtfsOperationSync } = require('./core/mesh');
+const { getLedgerPath } = require('./core/jules-delegator');
 
 const DEFAULT_TIMEOUT_MS = 2500;
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
 const OFFLINE_COOLDOWN_MS = 2 * 60 * 1000;
+const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_CACHE_PATH = path.join(MESH_DIR, 'purified-live-cache.json');
 
 const SCRAPE_SOURCES = [
@@ -18,6 +21,8 @@ const SCRAPE_SOURCES = [
 // Explicit Qoder invocations are restricted exclusively to verified free-tier models.
 const QODER_ALLOWED_MODELS = [
   'qwen3.8-flash',
+  'qwen3.8',
+  'qoder/qwen3.8-flash',
   'glm-5.3-flash',
   'deepseek-flash',
   'minimax-m3.1-flash'
@@ -249,6 +254,45 @@ function collapseWhitespace(input) {
     .trim();
 }
 
+const AD_CHROME_ATTR_RE = /(?:(?:class|id)\s*=\s*["'][^"']*\b(?:ad-banner|ad-slot|ads|advertisement|cookie-banner|cookie-consent|tracking|analytics|telemetry|promo-banner|sponsor|newsletter-popup|sidebar-ad)\b[^"']*["']|style\s*=\s*["'][^"']*display\s*:\s*none[^"']*["']|\bhidden\b|aria-hidden\s*=\s*["']true["'])/i;
+
+function stripExecutableAndChromeBlocks(text) {
+  let out = text;
+  const strippedBlockTags = [
+    'script', 'style', 'noscript', 'svg', 'template',
+    'iframe', 'object', 'embed', 'canvas'
+  ];
+  for (const tag of strippedBlockTags) {
+    const blockRegex = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
+    out = out.replace(blockRegex, ' ');
+    const selfCloseRegex = new RegExp(`<${tag}\\b[^>]*\\/?>`, 'gi');
+    out = out.replace(selfCloseRegex, ' ');
+  }
+
+  // Strip balanced layout chrome tags innermost-first (bounded passes, linear per match)
+  for (const tag of ['nav', 'footer', 'header', 'aside', 'form']) {
+    const re = new RegExp(`<${tag}\\b[^>]*>(?:(?!<${tag}\\b)[\\s\\S])*?<\\/${tag}>`, 'gi');
+    let prev;
+    for (let pass = 0; pass < 6; pass++) {
+      prev = out;
+      out = out.replace(re, ' ');
+      if (out === prev) break;
+    }
+  }
+
+  // Strip hidden/ad/tracking containers safely without nested attribute backtracking
+  for (const tag of ['div', 'section', 'span', 'p', 'ul']) {
+    const re = new RegExp(`<${tag}\\b([^>]*)>((?:(?!<${tag}\\b)[\\s\\S])*?)<\\/${tag}>`, 'gi');
+    let prev;
+    for (let pass = 0; pass < 5; pass++) {
+      prev = out;
+      out = out.replace(re, (full, attrs) => (AD_CHROME_ATTR_RE.test(attrs) ? ' ' : full));
+      if (out === prev) break;
+    }
+  }
+  return out;
+}
+
 /**
  * Ultra-purifies HTML into clean normalized Markdown/text, stripping scripts, styles,
  * SVGs, navigation/footer/ad/tracking containers, hidden nodes, entities, and injections.
@@ -263,27 +307,8 @@ function purifyHtmlInternal(rawHtml) {
   // 1. Strip HTML comments
   text = text.replace(/<!--[\s\S]*?-->/g, ' ');
 
-  // 2. Strip executable, styling, media-chrome, and layout boilerplate containers
-  const strippedBlockTags = [
-    'script', 'style', 'noscript', 'svg', 'template',
-    'iframe', 'object', 'embed', 'canvas',
-    'nav', 'footer', 'header', 'aside', 'form'
-  ];
-  for (const tag of strippedBlockTags) {
-    const blockRegex = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
-    text = text.replace(blockRegex, ' ');
-    const selfCloseRegex = new RegExp(`<${tag}\\b[^>]*\\/?>`, 'gi');
-    text = text.replace(selfCloseRegex, ' ');
-  }
-
-  // 3. Strip hidden elements (style="display:none", hidden attribute) and ad/tracking/cookie boxes
-  for (const tag of ['div', 'section', 'span', 'p']) {
-    const adClassRegex = new RegExp(
-      `<${tag}\\b[^>]*(?:(?:class|id)\\s*=\\s*["'][^"']*\\b(?:ad-banner|ad-slot|ads|advertisement|cookie-banner|cookie-consent|tracking|analytics|telemetry|promo-banner|sponsor|newsletter-popup|sidebar-ad)\\b[^"']*["']|style\\s*=\\s*["'][^"']*display\\s*:\\s*none[^"']*["']|\\bhidden\\b)[^>]*>(?:(?!<${tag}\\b)[\\s\\S])*?<\\/${tag}>`,
-      'gi'
-    );
-    text = text.replace(adClassRegex, ' ');
-  }
+  // 2-3. Strip executable, styling, media-chrome, layout boilerplate, and ad/hidden containers
+  text = stripExecutableAndChromeBlocks(text);
 
   // 4. Convert safe links while neutralizing javascript:/data: hrefs
   text = text.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (_m, attrs, inner) => {
@@ -309,9 +334,14 @@ function purifyHtmlInternal(rawHtml) {
   // 6. Strip remaining HTML tags
   text = text.replace(/<[^>]+>/g, ' ');
 
-  // 7. Decode entities, clean tracking params, strip injections, and normalize whitespace
+  // 7. Decode entities and re-scrub decoded invisibles & hidden executable tags (second pass)
   text = decodeHtmlEntities(text);
   text = stripControlAndInvisible(text);
+  if (/<(?:script|style|noscript|svg|iframe|object|embed|template|img|video|audio|meta|link|base)\b/i.test(text)) {
+    text = stripExecutableAndChromeBlocks(text);
+    text = text.replace(/<\/?(?:img|video|audio|source|meta|link|base|body|html)\b[^>]*>/gi, ' ');
+    text = stripControlAndInvisible(text);
+  }
   text = stripTrackingParamsFromText(text);
   const inj = stripPromptInjections(text);
   return {
@@ -390,7 +420,7 @@ function purifyContent(rawInput, options = {}) {
     : content;
 }
 
-function purifyJsonValue(value) {
+function purifyJsonValue(value, seen = new WeakSet()) {
   let strippedInjections = 0;
   if (typeof value === 'string') {
     let text = stripControlAndInvisible(decodeHtmlEntities(value));
@@ -400,19 +430,26 @@ function purifyJsonValue(value) {
     return { value: collapseWhitespace(inj.text), strippedInjections };
   }
   if (Array.isArray(value)) {
+    if (seen.has(value)) return { value: '[Circular]', strippedInjections: 0 };
+    seen.add(value);
     const out = [];
     for (const item of value) {
-      const res = purifyJsonValue(item);
+      const res = purifyJsonValue(item, seen);
       strippedInjections += res.strippedInjections;
       out.push(res.value);
     }
     return { value: out, strippedInjections };
   }
   if (value && typeof value === 'object') {
+    if (seen.has(value)) return { value: '[Circular]', strippedInjections: 0 };
+    seen.add(value);
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      const cleanKey = stripControlAndInvisible(String(k));
-      const res = purifyJsonValue(v);
+      const cleanKey = stripControlAndInvisible(String(k)).trim();
+      if (!cleanKey || cleanKey === '__proto__' || cleanKey === 'constructor' || cleanKey === 'prototype') {
+        continue;
+      }
+      const res = purifyJsonValue(v, seen);
       strippedInjections += res.strippedInjections;
       out[cleanKey] = res.value;
     }
@@ -447,7 +484,7 @@ function isQoderFreeModel(modelId) {
   const clean = sanitizeIdentifier(modelId).toLowerCase();
   if (!clean) return false;
   const bare = clean.includes('/') ? clean.split('/').pop() : clean;
-  return QODER_ALLOWED_MODELS.includes(bare);
+  return QODER_ALLOWED_MODELS.includes(clean) || QODER_ALLOWED_MODELS.includes(bare);
 }
 
 /**
@@ -518,7 +555,7 @@ function scoreModel(model) {
   return score;
 }
 
-function normalizeModelRecord(raw, sourceId = 'unknown') {
+function normalizeModelRecord(raw, sourceId = 'unknown', statsAcc = null) {
   if (!raw || typeof raw !== 'object') return null;
 
   const id = sanitizeIdentifier(String(raw.id || raw.modelId || ''));
@@ -555,7 +592,11 @@ function normalizeModelRecord(raw, sourceId = 'unknown') {
     supportedParams.includes('tool_choice')
   );
 
-  const purifiedName = purifyContent(String(raw.name || id), { format: 'text' }) || id;
+  const purifiedNameRes = purifyContent(String(raw.name || id), { format: 'text', withStats: true });
+  if (statsAcc && purifiedNameRes?.stats?.strippedInjections) {
+    statsAcc.strippedInjections += purifiedNameRes.stats.strippedInjections;
+  }
+  const purifiedName = purifiedNameRes?.content || id;
   const record = {
     id,
     name: purifiedName.slice(0, 120),
@@ -578,7 +619,27 @@ function parseFiniteNumber(val) {
   return Number.isFinite(num) ? num : null;
 }
 
-function extractModelsFromPayload(payload, sourceId) {
+function pickCandidateFields(item, overrides = {}) {
+  return {
+    id: overrides.id ?? item.id ?? item.modelId,
+    name: item.name,
+    provider: overrides.provider ?? item.provider,
+    isFree: item.isFree,
+    promptCost: item.promptCost,
+    completionCost: item.completionCost,
+    pricing: item.pricing,
+    cost: item.cost,
+    contextWindow: item.contextWindow,
+    context_length: item.context_length,
+    limit: item.limit,
+    supported_parameters: item.supported_parameters,
+    reasoning: item.reasoning,
+    toolCall: item.toolCall,
+    tool_call: item.tool_call
+  };
+}
+
+function extractModelsFromPayload(payload, sourceId, statsAcc = null) {
   const models = [];
   if (!payload || typeof payload !== 'object') return models;
 
@@ -586,7 +647,8 @@ function extractModelsFromPayload(payload, sourceId) {
   const list = Array.isArray(payload) ? payload : (Array.isArray(payload.data) ? payload.data : null);
   if (list) {
     for (const item of list) {
-      const norm = normalizeModelRecord(item, sourceId);
+      if (!item || typeof item !== 'object') continue;
+      const norm = normalizeModelRecord(pickCandidateFields(item), sourceId, statsAcc);
       if (norm) models.push(norm);
     }
     return models;
@@ -594,15 +656,17 @@ function extractModelsFromPayload(payload, sourceId) {
 
   // Format 2: models.dev ({ providerKey: { id, models: { modelKey: { ... } } } })
   for (const [providerKey, providerBlock] of Object.entries(payload)) {
-    if (!providerBlock || typeof providerBlock !== 'object' || !providerBlock.models) continue;
+    if (providerKey === '__proto__' || providerKey === 'constructor' || providerKey === 'prototype') continue;
+    if (!providerBlock || typeof providerBlock !== 'object' || !providerBlock.models || typeof providerBlock.models !== 'object') continue;
     for (const [modelKey, modelInfo] of Object.entries(providerBlock.models)) {
+      if (modelKey === '__proto__' || modelKey === 'constructor' || modelKey === 'prototype') continue;
       if (!modelInfo || typeof modelInfo !== 'object') continue;
       const fullId = modelKey.includes('/') ? modelKey : `${providerKey}/${modelKey}`;
-      const norm = normalizeModelRecord({
-        ...modelInfo,
-        id: fullId,
-        provider: providerKey
-      }, sourceId);
+      const norm = normalizeModelRecord(
+        pickCandidateFields(modelInfo, { id: fullId, provider: providerKey }),
+        sourceId,
+        statsAcc
+      );
       if (norm) models.push(norm);
     }
   }
@@ -619,7 +683,7 @@ function extractModelsFromPayload(payload, sourceId) {
 function purifyScrapedData(rawDatasets = [], options = {}) {
   const byId = new Map();
   let rawCount = 0;
-  let strippedInjections = 0;
+  const statsAcc = { strippedInjections: 0 };
 
   const mergeEntry = (entry) => {
     if (!entry) return;
@@ -634,6 +698,7 @@ function purifyScrapedData(rawDatasets = [], options = {}) {
       || (existing.promptCost !== null && existing.promptCost > 0)
       || (existing.completionCost !== null && existing.completionCost > 0);
     const hasFreeSuffix = key.endsWith(':free') || key.endsWith('-free');
+    const existingIsFallback = existing.source === 'baseline' || existing.source === 'stale-cache';
     const merged = {
       ...existing,
       name: existing.name.length >= entry.name.length ? existing.name : entry.name,
@@ -643,7 +708,7 @@ function purifyScrapedData(rawDatasets = [], options = {}) {
       contextWindow: Math.max(existing.contextWindow || 0, entry.contextWindow || 0),
       reasoning: existing.reasoning || entry.reasoning,
       toolCall: existing.toolCall || entry.toolCall,
-      source: existing.source === 'baseline' ? entry.source : existing.source
+      source: existingIsFallback && entry.source !== 'baseline' ? entry.source : existing.source
     };
     merged.score = scoreModel(merged);
     byId.set(key, merged);
@@ -651,16 +716,14 @@ function purifyScrapedData(rawDatasets = [], options = {}) {
 
   for (const ds of rawDatasets) {
     if (!ds || !ds.data) continue;
-    const purifiedJson = purifyJsonValue(ds.data);
-    strippedInjections += purifiedJson.strippedInjections;
-    const extracted = extractModelsFromPayload(purifiedJson.value, ds.sourceId || 'live');
+    const extracted = extractModelsFromPayload(ds.data, ds.sourceId || 'live', statsAcc);
     rawCount += extracted.length;
     for (const m of extracted) mergeEntry(m);
   }
 
   if (options.includeBaseline !== false || byId.size === 0) {
     for (const base of CURATED_BASELINE_MODELS) {
-      const norm = normalizeModelRecord(base, 'baseline');
+      const norm = normalizeModelRecord(base, 'baseline', statsAcc);
       if (norm) mergeEntry(norm);
     }
   }
@@ -679,7 +742,7 @@ function purifyScrapedData(rawDatasets = [], options = {}) {
       rawExtracted: rawCount,
       deduplicatedCount: allModels.length,
       freeModelCount: freeModels.length,
-      strippedInjections
+      strippedInjections: statsAcc.strippedInjections
     }
   };
 }
@@ -691,7 +754,15 @@ function purifyScrapedData(rawDatasets = [], options = {}) {
  * @returns {Promise<{ ok: boolean, status: number, contentType: string, bodyText: string, json?: any, error?: string }>}
  */
 async function fetchWithTimeout(url, options = {}) {
-  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : DEFAULT_TIMEOUT_MS;
+  const rawTimeout = options.timeoutMs;
+  const parsedTimeout = rawTimeout !== undefined && rawTimeout !== null && rawTimeout !== '' ? Number(rawTimeout) : NaN;
+  const timeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout >= 0 ? parsedTimeout : DEFAULT_TIMEOUT_MS;
+  const capCandidate = options.maxResponseBytes !== undefined && options.maxResponseBytes !== null
+    ? Number(options.maxResponseBytes)
+    : NaN;
+  const maxResponseBytes = Number.isFinite(capCandidate) && capCandidate >= 0
+    ? capCandidate
+    : DEFAULT_MAX_RESPONSE_BYTES;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
 
   let parsedUrl;
@@ -709,12 +780,13 @@ async function fetchWithTimeout(url, options = {}) {
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  if (typeof timer.unref === 'function') timer.unref();
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  if (timer && typeof timer.unref === 'function') timer.unref();
 
   try {
     const res = await fetchImpl(parsedUrl.toString(), {
       method: 'GET',
+      redirect: options.redirect === 'follow' ? 'follow' : 'error',
       headers: {
         'Accept': 'application/json, text/html, text/plain;q=0.9',
         'User-Agent': 'intercom-global-live-scraper/2.0.0'
@@ -725,7 +797,61 @@ async function fetchWithTimeout(url, options = {}) {
     const contentType = (res.headers && typeof res.headers.get === 'function')
       ? (res.headers.get('content-type') || '')
       : '';
-    const bodyText = await res.text();
+
+    if (maxResponseBytes > 0 && res.headers && typeof res.headers.get === 'function') {
+      const declaredLength = Number(res.headers.get('content-length'));
+      if (Number.isFinite(declaredLength) && declaredLength > 0 && declaredLength > maxResponseBytes) {
+        return {
+          ok: false,
+          status: res.status || 0,
+          contentType,
+          bodyText: '',
+          error: `Response too large: content-length ${declaredLength} exceeds ${maxResponseBytes} byte cap`
+        };
+      }
+    }
+
+    let bodyText = '';
+    if (maxResponseBytes > 0 && res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const chunks = [];
+      let received = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          received += value ? value.byteLength : 0;
+          if (received > maxResponseBytes) {
+            try { await reader.cancel(); } catch {}
+            return {
+              ok: false,
+              status: res.status || 0,
+              contentType,
+              bodyText: '',
+              error: `Response too large: body exceeded ${maxResponseBytes} byte cap`
+            };
+          }
+          if (value) chunks.push(decoder.decode(value, { stream: true }));
+        }
+        chunks.push(decoder.decode());
+        bodyText = chunks.join('');
+      } finally {
+        try { reader.releaseLock(); } catch {}
+      }
+    } else {
+      bodyText = typeof res.text === 'function' ? await res.text() : '';
+      if (maxResponseBytes > 0 && Buffer.byteLength(bodyText, 'utf8') > maxResponseBytes) {
+        return {
+          ok: false,
+          status: res.status || 0,
+          contentType,
+          bodyText: '',
+          error: `Response too large: body exceeded ${maxResponseBytes} byte cap`
+        };
+      }
+    }
+
     if (!res.ok) {
       return { ok: false, status: res.status, contentType, bodyText, error: `HTTP ${res.status}` };
     }
@@ -747,7 +873,7 @@ async function fetchWithTimeout(url, options = {}) {
       error: err && err.name === 'AbortError' ? `Timeout after ${timeoutMs}ms` : (err?.message || 'Network error')
     };
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -785,24 +911,172 @@ async function scrapeUrl(url, options = {}) {
   };
 }
 
-function isBinaryOnPath(binaryName) {
-  if (!binaryName) return false;
+let _mcpToolsCache = { stamp: null, value: null };
+let _cliCommandsCountCache = { stamp: null, value: null };
+let _testStatsCache = { stamp: null, suitesCount: 0, testsCount: 0 };
+
+function getFileStampSafe(filePath) {
+  try {
+    const st = fs.statSync(filePath);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return 'missing';
+  }
+}
+
+function scanPathExecutables() {
+  const available = new Set();
   const pathEnv = process.env.PATH || process.env.Path || '';
-  if (!pathEnv) return false;
-  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-  const exts = process.platform === 'win32'
-    ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  if (!pathEnv) return available;
+
+  const isWin = process.platform === 'win32';
+  const exts = isWin
+    ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map(e => e.toLowerCase())
     : [''];
+  const dirs = Array.from(new Set(pathEnv.split(path.delimiter).filter(Boolean)));
 
   for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = path.join(dir, process.platform === 'win32' ? `${binaryName}${ext}` : binaryName);
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      let isRegularFile = false;
       try {
-        if (fs.existsSync(candidate)) return true;
-      } catch {}
+        if (entry.isFile()) {
+          isRegularFile = true;
+        } else if (entry.isSymbolicLink()) {
+          isRegularFile = fs.statSync(path.join(dir, entry.name)).isFile();
+        }
+      } catch {
+        isRegularFile = false;
+      }
+      if (!isRegularFile) continue;
+
+      if (isWin) {
+        const lower = entry.name.toLowerCase();
+        for (const ext of exts) {
+          if (lower.endsWith(ext)) {
+            available.add(lower.slice(0, -ext.length));
+            available.add(lower);
+            break;
+          }
+        }
+      } else {
+        available.add(entry.name);
+      }
     }
   }
-  return false;
+  return available;
+}
+
+function isBinaryOnPath(binaryName, preScannedSet = null) {
+  if (!binaryName) return false;
+  const set = preScannedSet || scanPathExecutables();
+  const key = process.platform === 'win32' ? binaryName.toLowerCase() : binaryName;
+  return set.has(key);
+}
+
+function discoverMcpToolNames() {
+  const fallback = [
+    'send_message', 'receive_messages', 'interrupt_agent', 'get_agent_status', 'list_agents',
+    'intercom_send', 'intercom_wake', 'intercom_watch', 'intercom_read', 'intercom_clear', 'intercom_list_peers'
+  ];
+  const serverPath = path.join(ROOT_DIR, 'src', 'mcp', 'server.js');
+  const stamp = getFileStampSafe(serverPath);
+  if (_mcpToolsCache.stamp === stamp && _mcpToolsCache.value) {
+    return _mcpToolsCache.value;
+  }
+  let value = fallback;
+  if (stamp !== 'missing') {
+    try {
+      const src = fs.readFileSync(serverPath, 'utf8');
+      const blockMatch = src.match(/const\s+MCP_TOOLS\s*=\s*\[([\s\S]*?)\n\];/);
+      if (blockMatch) {
+        const found = [];
+        const seen = new Set();
+        const nameRe = /^\s*name\s*:\s*["']([a-z0-9_]+)["']/gm;
+        let m;
+        while ((m = nameRe.exec(blockMatch[1])) !== null) {
+          if (!seen.has(m[1])) {
+            seen.add(m[1]);
+            found.push(m[1]);
+          }
+        }
+        if (found.length > 0) value = found;
+      }
+    } catch {
+      value = fallback;
+    }
+  }
+  _mcpToolsCache = { stamp, value };
+  return value;
+}
+
+function discoverCliCommandsCount() {
+  const cliPath = path.join(ROOT_DIR, 'src', 'cli.js');
+  const stamp = getFileStampSafe(cliPath);
+  if (_cliCommandsCountCache.stamp === stamp && _cliCommandsCountCache.value !== null) {
+    return _cliCommandsCountCache.value;
+  }
+  let value = 18;
+  if (stamp !== 'missing') {
+    try {
+      const src = fs.readFileSync(cliPath, 'utf8');
+      const blockMatch = src.match(/const\s+CLI_COMMANDS\s*=\s*\[([\s\S]*?)\];/);
+      if (blockMatch) {
+        const found = new Set();
+        const cmdRe = /["']([a-z][a-z0-9-]*)["']/g;
+        let m;
+        while ((m = cmdRe.exec(blockMatch[1])) !== null) {
+          found.add(m[1]);
+        }
+        if (found.size > 0) value = found.size;
+      }
+    } catch {
+      value = 18;
+    }
+  }
+  _cliCommandsCountCache = { stamp, value };
+  return value;
+}
+
+function countTestsAndSuites() {
+  const testDir = path.join(ROOT_DIR, 'test');
+  const unitDir = path.join(testDir, 'unit');
+  const helpersDir = path.join(testDir, 'helpers');
+  const dirStamp = [testDir, unitDir, helpersDir].map(getFileStampSafe).join('|');
+  if (_testStatsCache.stamp === dirStamp && _testStatsCache.suitesCount > 0) {
+    return { suitesCount: _testStatsCache.suitesCount, testsCount: _testStatsCache.testsCount };
+  }
+
+  const testFiles = [];
+  for (const dir of [testDir, unitDir, helpersDir]) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      for (const entry of fs.readdirSync(dir)) {
+        if (entry.endsWith('.test.js')) {
+          testFiles.push(path.join(dir, entry));
+        }
+      }
+    } catch {}
+  }
+
+  let testsCount = 0;
+  const testDeclRe = /^\s*(?:test|it)(?:\.(?:only|skip|todo))?\s*\(/gm;
+  for (const file of testFiles) {
+    try {
+      const src = fs.readFileSync(file, 'utf8');
+      const matches = src.match(testDeclRe);
+      if (matches) testsCount += matches.length;
+    } catch {}
+  }
+
+  const suitesCount = testFiles.length;
+  _testStatsCache = { stamp: dirStamp, suitesCount, testsCount };
+  return { suitesCount, testsCount };
 }
 
 /**
@@ -824,8 +1098,9 @@ function probeLocalRuntime() {
     }
   } catch {}
 
+  const pathExecs = scanPathExecutables();
   const harnesses = SUPPORTED_HARNESSES.map((h) => {
-    const installed = h.binary ? isBinaryOnPath(h.binary) : false;
+    const installed = h.binary ? isBinaryOnPath(h.binary, pathExecs) : false;
     return {
       ...h,
       installed,
@@ -833,42 +1108,12 @@ function probeLocalRuntime() {
     };
   });
 
-  // MCP tool names from src/mcp/server.js (lazy require avoids circular load)
-  let mcpToolNames = [
-    'send_message', 'receive_messages', 'interrupt_agent', 'get_agent_status', 'list_agents',
-    'intercom_send', 'intercom_wake', 'intercom_watch', 'intercom_read', 'intercom_clear', 'intercom_list_peers'
-  ];
-  try {
-    const mcpMod = require('./mcp/server');
-    if (Array.isArray(mcpMod.MCP_TOOLS) && mcpMod.MCP_TOOLS.length > 0) {
-      mcpToolNames = mcpMod.MCP_TOOLS.map(t => t.name);
-    }
-  } catch {}
-
-  // CLI commands from src/cli.js
-  let cliCommandsCount = 16;
-  try {
-    const cliMod = require('./cli');
-    if (Array.isArray(cliMod.CLI_COMMANDS) && cliMod.CLI_COMMANDS.length > 0) {
-      cliCommandsCount = cliMod.CLI_COMMANDS.length;
-    }
-  } catch {}
-
-  // Test suite files count
-  let testSuitesCount = 0;
-  try {
-    const testDir = path.join(ROOT_DIR, 'test');
-    if (fs.existsSync(testDir)) {
-      testSuitesCount = fs.readdirSync(testDir).filter(f => f.endsWith('.test.js')).length;
-      const helpersDir = path.join(testDir, 'helpers');
-      if (fs.existsSync(helpersDir)) {
-        testSuitesCount += fs.readdirSync(helpersDir).filter(f => f.endsWith('.test.js')).length;
-      }
-    }
-  } catch {}
+  const mcpToolNames = discoverMcpToolNames();
+  const cliCommandsCount = discoverCliCommandsCount();
+  const { suitesCount: testSuitesCount, testsCount: realTestsCount } = countTestsAndSuites();
 
   // Mesh peers & pending tasks (excluding ephemeral test mailboxes)
-  const EPHEMERAL_PEER_RE = /^(test|worker|stress|a2a|wake|ephem|fuzz|dry-agent|tmp_|agent[-_]|alpha_|architect_|beta_|coordinator_|reviewer_|challenger_|auditor_|batch[-_]|brand[-_]|cli[-_]|ended[-_]|epipe[-_]|live[-_]|task[-_]|sess[-_]|subworker[-_]|slow[-_]|executor[-_]|explorer[-_]?|crash[-_]|unit[-_]|recursion[-_]|burst[-_]|chrono[-_]|adv[-_]|sse[-_]|resilience[-_]|interrupt[-_]|mtime[-_]|locked[-_]|fallback[-_]|orchestrator[-_]|peer[-_]|merge[-_]|fast-path[-_]?|inbox[-_]|operator|boss[-_]|general|mimo[-_]|external_daemon[-_]?|offline[-_]|online[-_]|simulated[-_]|tester[-_]|[ab]$)|[-_]\d{10,}$/i;
+  const meshDir = getMeshDir();
   const activePeersSet = new Set();
   let activeTasksCount = 0;
   let totalTasksCount = 0;
@@ -877,23 +1122,23 @@ function probeLocalRuntime() {
   let sampleSessionId = `sess-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-001`;
 
   try {
-    const regDir = path.join(MESH_DIR, 'registry');
+    const regDir = path.join(meshDir, 'registry');
     if (fs.existsSync(regDir)) {
       for (const f of fs.readdirSync(regDir)) {
         if (!f.endsWith('.json') || f === 'reuse-tracker.json') continue;
         try {
           const card = JSON.parse(fs.readFileSync(path.join(regDir, f), 'utf8'));
-          if (card && card.name && card.status !== 'OFFLINE' && !EPHEMERAL_PEER_RE.test(card.name)) {
+          if (card && card.name && card.status !== 'OFFLINE' && !isEphemeralMailboxName(card.name)) {
             activePeersSet.add(sanitizeIdentifier(card.name));
           }
         } catch {}
       }
     }
 
-    const inboxBase = path.join(MESH_DIR, 'inbox');
+    const inboxBase = path.join(meshDir, 'inbox');
     if (fs.existsSync(inboxBase)) {
       for (const entry of fs.readdirSync(inboxBase, { withFileTypes: true })) {
-        if (!entry.isDirectory() || EPHEMERAL_PEER_RE.test(entry.name)) continue;
+        if (!entry.isDirectory() || isEphemeralMailboxName(entry.name)) continue;
         activePeersSet.add(sanitizeIdentifier(entry.name));
         const files = fs.readdirSync(path.join(inboxBase, entry.name)).filter(x => x.endsWith('.json'));
         activeTasksCount += files.length;
@@ -904,7 +1149,7 @@ function probeLocalRuntime() {
       }
     }
 
-    const handoffsDir = path.join(MESH_DIR, 'handoffs');
+    const handoffsDir = path.join(meshDir, 'handoffs');
     if (fs.existsSync(handoffsDir)) {
       const hFiles = fs.readdirSync(handoffsDir).filter(f => f.endsWith('.json'));
       totalTasksCount += hFiles.length;
@@ -913,12 +1158,12 @@ function probeLocalRuntime() {
       }
     }
 
-    const dlqDir = path.join(MESH_DIR, 'dlq');
+    const dlqDir = path.join(meshDir, 'dlq');
     if (fs.existsSync(dlqDir)) {
       totalTasksCount += fs.readdirSync(dlqDir).filter(f => f.endsWith('.json')).length;
     }
 
-    const julesLedgerPath = path.join(ROOT_DIR, 'jules-ledger.json');
+    const julesLedgerPath = getLedgerPath();
     if (fs.existsSync(julesLedgerPath)) {
       const ledger = JSON.parse(fs.readFileSync(julesLedgerPath, 'utf8'));
       if (Array.isArray(ledger.activeSessions)) {
@@ -944,8 +1189,8 @@ function probeLocalRuntime() {
     mcpServerName: 'intercom-global',
     mcpToolsCount: mcpToolNames.length,
     mcpToolsList: mcpToolNames.join(', '),
-    testSuitesCount: testSuitesCount || 19,
-    testsCount: '248+',
+    testSuitesCount,
+    testsCount: String(realTestsCount || testSuitesCount),
     harnesses,
     activePeers: Array.from(activePeersSet).filter(Boolean),
     activeTasksCount,
@@ -971,22 +1216,25 @@ function loadCache(cachePath = DEFAULT_CACHE_PATH) {
 }
 
 function saveCacheAtomic(cachePath, snapshot) {
+  if (!cachePath || !snapshot) return false;
+  const dir = path.dirname(cachePath);
+  const tmp = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2, 8)}.tmp`;
   try {
-    const dir = path.dirname(cachePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    const tmp = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2), 'utf8');
-    fs.renameSync(tmp, cachePath);
+    const serialized = JSON.stringify(snapshot, null, 2);
+    retryNtfsOperationSync(() => fs.writeFileSync(tmp, serialized, 'utf8'));
+    retryNtfsOperationSync(() => fs.renameSync(tmp, cachePath));
     return true;
   } catch {
+    return false;
+  } finally {
     try {
-      fs.writeFileSync(cachePath, JSON.stringify(snapshot, null, 2), 'utf8');
-      return true;
-    } catch {
-      return false;
-    }
+      if (fs.existsSync(tmp)) {
+        retryNtfsOperationSync(() => fs.unlinkSync(tmp));
+      }
+    } catch {}
   }
 }
 
@@ -1004,12 +1252,17 @@ function isCacheFresh(cache, ttlMs = DEFAULT_TTL_MS) {
  */
 async function syncLiveRegistry(options = {}) {
   const cachePath = options.cachePath || process.env.INTERCOM_SCRAPE_CACHE || DEFAULT_CACHE_PATH;
-  const ttlMs = Number(options.ttlMs) > 0 ? Number(options.ttlMs) : DEFAULT_TTL_MS;
-  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : DEFAULT_TIMEOUT_MS;
+  const ttlProvided = options.ttlMs !== undefined && options.ttlMs !== null && options.ttlMs !== '';
+  const ttlParsed = ttlProvided ? Number(options.ttlMs) : NaN;
+  const ttlMs = Number.isFinite(ttlParsed) && ttlParsed >= 0 ? ttlParsed : DEFAULT_TTL_MS;
+  const timeoutProvided = options.timeoutMs !== undefined && options.timeoutMs !== null && options.timeoutMs !== '';
+  const timeoutParsed = timeoutProvided ? Number(options.timeoutMs) : NaN;
+  const timeoutMs = Number.isFinite(timeoutParsed) && timeoutParsed >= 0 ? timeoutParsed : DEFAULT_TIMEOUT_MS;
+  const offline = Boolean(options.offline);
   const sources = Array.isArray(options.sources) ? options.sources : SCRAPE_SOURCES;
 
   const existingCache = loadCache(cachePath);
-  if (!options.force && isCacheFresh(existingCache, ttlMs)) {
+  if (!options.force && ttlMs > 0 && isCacheFresh(existingCache, ttlMs)) {
     const runtime = options.refreshRuntime === false && existingCache.runtime
       ? existingCache.runtime
       : probeLocalRuntime();
@@ -1024,43 +1277,56 @@ async function syncLiveRegistry(options = {}) {
   const sourceStatus = [];
   let npmLatestVersion = null;
 
-  const results = await Promise.allSettled(
-    sources.map(async (src) => {
-      const started = Date.now();
-      const res = await fetchWithTimeout(src.url, {
-        timeoutMs,
-        fetchImpl: options.fetchImpl
-      });
-      return { src, res, durationMs: Date.now() - started };
-    })
-  );
+  if (!offline) {
+    const results = await Promise.allSettled(
+      sources.map(async (src) => {
+        const started = Date.now();
+        const res = await fetchWithTimeout(src.url, {
+          timeoutMs,
+          fetchImpl: options.fetchImpl
+        });
+        return { src, res, durationMs: Date.now() - started };
+      })
+    );
 
-  for (const settled of results) {
-    if (settled.status !== 'fulfilled') {
-      sourceStatus.push({ id: 'unknown', ok: false, error: settled.reason?.message || 'Fetch rejected' });
-      continue;
-    }
-    const { src, res, durationMs } = settled.value;
-    if (res.ok && res.json) {
-      if (src.kind === 'npm') {
-        const latest = sanitizeIdentifier(String(res.json['dist-tags']?.latest || res.json.version || ''));
-        if (latest) npmLatestVersion = latest;
-      } else {
-        rawDatasets.push({ sourceId: src.id, data: res.json });
+    for (const settled of results) {
+      if (settled.status !== 'fulfilled') {
+        sourceStatus.push({ id: 'unknown', ok: false, error: settled.reason?.message || 'Fetch rejected' });
+        continue;
       }
-      sourceStatus.push({ id: src.id, url: src.url, ok: true, durationMs });
-    } else {
-      sourceStatus.push({ id: src.id, url: src.url, ok: false, durationMs, error: res.error || 'No JSON payload' });
+      const { src, res, durationMs } = settled.value;
+      if (res.ok && res.json) {
+        if (src.kind === 'npm') {
+          const latest = sanitizeIdentifier(String(res.json['dist-tags']?.latest || res.json.version || ''));
+          if (latest) npmLatestVersion = latest;
+        } else {
+          rawDatasets.push({ sourceId: src.id, data: res.json });
+        }
+        sourceStatus.push({ id: src.id, url: src.url, ok: true, durationMs });
+      } else {
+        sourceStatus.push({ id: src.id, url: src.url, ok: false, durationMs, error: res.error || 'No JSON payload' });
+      }
     }
   }
 
   const onlineSucceeded = sourceStatus.some(s => s.ok);
+  const completeSuccess = !offline
+    && sources.length > 0
+    && sourceStatus.length === sources.length
+    && sourceStatus.every(s => s.ok);
+  const hasCachedModels = Boolean(existingCache && Array.isArray(existingCache.models) && existingCache.models.length > 0);
+  const usedCacheFallback = !completeSuccess && hasCachedModels;
+
   let purified;
   let offlineFallback = false;
 
   if (rawDatasets.length > 0) {
-    purified = purifyScrapedData(rawDatasets, { includeBaseline: true });
-  } else if (existingCache && Array.isArray(existingCache.models) && existingCache.models.length > 0) {
+    const datasets = usedCacheFallback
+      ? [{ sourceId: 'stale-cache', data: existingCache.models }, ...rawDatasets]
+      : rawDatasets;
+    purified = purifyScrapedData(datasets, { includeBaseline: true });
+    offlineFallback = false;
+  } else if (hasCachedModels) {
     offlineFallback = !onlineSucceeded;
     purified = {
       models: existingCache.models,
@@ -1092,10 +1358,17 @@ async function syncLiveRegistry(options = {}) {
     if (!topIds.has(ex.id)) topModels.push(ex);
   }
 
+  const syncedAt = usedCacheFallback && existingCache.syncedAt
+    ? existingCache.syncedAt
+    : now.toISOString();
+  const syncedAtEpochMs = usedCacheFallback && typeof existingCache.syncedAtEpochMs === 'number'
+    ? existingCache.syncedAtEpochMs
+    : now.getTime();
+
   const snapshot = {
     schemaVersion: 1,
-    syncedAt: now.toISOString(),
-    syncedAtEpochMs: now.getTime(),
+    syncedAt,
+    syncedAtEpochMs,
     ttlMs,
     offlineFallback,
     fromCache: false,
@@ -1106,7 +1379,9 @@ async function syncLiveRegistry(options = {}) {
     runtime
   };
 
-  if (options.writeCache !== false) {
+  const shouldPersist = options.writeCache !== false
+    && (completeSuccess || onlineSucceeded || !existingCache);
+  if (shouldPersist) {
     saveCacheAtomic(cachePath, snapshot);
   }
 
@@ -1231,12 +1506,12 @@ function buildDynamicContext(snapshot = null, overrides = {}) {
     NODE_VERSION: runtime.nodeVersion || process.version,
     REPO_URL: runtime.repoUrl || 'https://github.com/Suran123s/intercom-global',
     CLI_COMMAND: runtime.cliCommand || 'intercom',
-    CLI_COMMANDS_COUNT: String(runtime.cliCommandsCount || 16),
+    CLI_COMMANDS_COUNT: String(runtime.cliCommandsCount ?? discoverCliCommandsCount()),
     MCP_SERVER_NAME: runtime.mcpServerName || 'intercom-global',
-    MCP_TOOLS_COUNT: String(runtime.mcpToolsCount || 11),
+    MCP_TOOLS_COUNT: String(runtime.mcpToolsCount ?? discoverMcpToolNames().length),
     MCP_TOOLS_LIST: runtime.mcpToolsList || '',
-    TEST_SUITES_COUNT: String(runtime.testSuitesCount || 19),
-    TESTS_COUNT: String(runtime.testsCount || '248+'),
+    TEST_SUITES_COUNT: String(runtime.testSuitesCount ?? countTestsAndSuites().suitesCount),
+    TESTS_COUNT: String(runtime.testsCount ?? countTestsAndSuites().testsCount),
 
     // 3) Harnesses & Zero-Qoder Routing
     DEFAULT_HARNESS: 'opencode',
@@ -1321,6 +1596,11 @@ function scheduleBackgroundSync(options = {}) {
     return { scheduled: false, reason: 'cache-fresh' };
   }
 
+  const inTestEnv = Boolean(process.env.NODE_TEST_CONTEXT) || process.env.NODE_ENV === 'test';
+  if (inTestEnv && !options.fetchImpl) {
+    return { scheduled: false, reason: 'disabled-in-test' };
+  }
+
   const mode = options.mode || (options.fetchImpl ? 'in-process' : 'subprocess');
   if (mode === 'in-process') {
     setImmediate(() => {
@@ -1356,6 +1636,7 @@ function scheduleBackgroundSync(options = {}) {
 module.exports = {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_TTL_MS,
+  DEFAULT_MAX_RESPONSE_BYTES,
   DEFAULT_CACHE_PATH,
   SCRAPE_SOURCES,
   QODER_ALLOWED_MODELS,
