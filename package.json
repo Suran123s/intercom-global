@@ -22,8 +22,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 \"test/*.test.js\" \"test/unit/*.test.js\" \"test/helpers/*.test.js\"",
-    "test:unit": "node --test --test-concurrency=1 \"test/unit/*.test.js\"",
+    "test": "node --test \"test/*.test.js\" \"test/unit/*.test.js\" \"test/helpers/*.test.js\"",
+    "test:unit": "node --test \"test/unit/*.test.js\"",
     "test:all": "npm test && node test/empirical_adversarial_m2.js && node test/empirical_adversarial_m3.js && node test/e2e-opencode-hermes.js",
     "start": "node bin/intercom.js daemon start",
     "daemon": "node bin/intercom.js daemon",
