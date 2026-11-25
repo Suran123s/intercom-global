@@ -10,8 +10,13 @@ const {
   getDualMailboxDirs,
   routeMessageToAntigravity
 } = require('../src/bridges/antigravity-bridge');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('#47: syncDualMailboxes reconciles asymmetric messages between inboxes', async () => {
+test('#47: syncDualMailboxes reconciles asymmetric messages between inboxes', async (t) => {
+  const { root } = withIsolatedMeshEnv(t, 'intercom-ag-sync-');
+  const prevCwd = process.cwd();
+  process.chdir(root);
+  t.after(() => process.chdir(prevCwd));
   const dirs = getDualMailboxDirs();
   if (dirs.length < 2) return; // Skip if workspace equals home directory
 

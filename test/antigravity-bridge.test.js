@@ -9,8 +9,10 @@ const {
   routeMessageToAntigravity,
   readAntigravityInboxSync
 } = require('../src/bridges/antigravity-bridge');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('antigravity-bridge: getDualMailboxDirs returns user and workspace inboxes', () => {
+test('antigravity-bridge: getDualMailboxDirs returns user and workspace inboxes', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-ag-dirs-');
   const dirs = getDualMailboxDirs();
   assert(Array.isArray(dirs), 'getDualMailboxDirs should return an array');
   assert(dirs.length >= 2, 'Should contain at least user and workspace inboxes');
@@ -28,7 +30,11 @@ test('antigravity-bridge: getAntigravityConfig probes 58055 and extracts csrfTok
   }
 });
 
-test('antigravity-bridge: routeMessageToAntigravity delivers to dual mailboxes', async () => {
+test('antigravity-bridge: routeMessageToAntigravity delivers to dual mailboxes', async (t) => {
+  const { root } = withIsolatedMeshEnv(t, 'intercom-ag-route-');
+  const prevCwd = process.cwd();
+  process.chdir(root);
+  t.after(() => process.chdir(prevCwd));
   const testMsg = {
     id: `test_ag_${Date.now()}`,
     sender: 'test_parent',
@@ -53,7 +59,11 @@ test('antigravity-bridge: routeMessageToAntigravity delivers to dual mailboxes',
   }
 });
 
-test('antigravity-bridge: readAntigravityInboxSync reads and sorts messages', async () => {
+test('antigravity-bridge: readAntigravityInboxSync reads and sorts messages', async (t) => {
+  const { root } = withIsolatedMeshEnv(t, 'intercom-ag-read-');
+  const prevCwd = process.cwd();
+  process.chdir(root);
+  t.after(() => process.chdir(prevCwd));
   const testMsg = {
     id: `test_read_${Date.now()}`,
     sender: 'test_harness',

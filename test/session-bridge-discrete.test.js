@@ -3,17 +3,27 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { writeMessage, clearInbox } = require('../src/core/mesh');
+const { writeMessage } = require('../src/core/mesh');
 const { MessageEnvelope } = require('../src/core/message');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('Improvement #22: session-bridge routes discrete inbox messages to child stdin', async () => {
+test('Improvement #22: session-bridge routes discrete inbox messages to child stdin', async (t) => {
+  const { root, env } = withIsolatedMeshEnv(t, 'intercom-sbridge-disc-');
   const agent = 'test-sbridge-disc-' + Date.now();
   const session = 'sess-' + Math.random().toString(36).substring(2, 8);
 
-  const helperScript = path.join(__dirname, `dummy_disc_${Date.now()}.js`);
+  const helperScript = path.join(root, `dummy_disc_${Date.now()}.js`);
   fs.writeFileSync(
     helperScript,
-    'process.stdin.on("data", d => console.log("DISC_RECVD:" + d.toString().trim())); setTimeout(() => process.exit(0), 2800);'
+    [
+      'const readline = require("readline");',
+      'const rl = readline.createInterface({ input: process.stdin });',
+      'const timer = setTimeout(() => process.exit(1), 6000);',
+      'rl.on("line", (line) => {',
+      '  console.log("DISC_RECVD:" + line.trim());',
+      '  clearTimeout(timer); rl.close(); process.exit(0);',
+      '});'
+    ].join('\n')
   );
 
   const bridgeProcess = spawn('node', [
@@ -22,24 +32,27 @@ test('Improvement #22: session-bridge routes discrete inbox messages to child st
     '--session', session,
     '--',
     'node', helperScript
-  ]);
+  ], { env });
 
   let stdout = '';
-  bridgeProcess.stdout.on('data', d => { stdout += d.toString(); });
-
-  // Write discrete message to agent's discrete inbox
-  setTimeout(async () => {
-    const env = MessageEnvelope.create({
-      sender: 'controller',
-      recipient: agent,
-      type: 'task_dispatch',
-      payload: { message: 'execute-discrete-task' }
-    });
-    await writeMessage(agent, env);
-  }, 1000);
+  let injected = false;
+  bridgeProcess.stdout.on('data', async (d) => {
+    stdout += d.toString();
+    if (!injected && stdout.includes('GLOBAL INTERCOM SESSION BRIDGE ACTIVE')) {
+      injected = true;
+      const envMsg = MessageEnvelope.create({
+        sender: 'controller',
+        recipient: agent,
+        type: 'task_dispatch',
+        payload: { message: 'execute-discrete-task' }
+      });
+      await writeMessage(agent, envMsg);
+    }
+  });
 
   await new Promise((resolve, reject) => {
-    bridgeProcess.on('close', async (code) => {
+    bridgeProcess.on('error', reject);
+    bridgeProcess.on('close', (code) => {
       try {
         assert.strictEqual(code, 0);
         assert.match(stdout, /INJECTING TASK FROM CONTROLLER/);
@@ -47,9 +60,6 @@ test('Improvement #22: session-bridge routes discrete inbox messages to child st
         resolve();
       } catch (err) {
         reject(err);
-      } finally {
-        if (fs.existsSync(helperScript)) fs.unlinkSync(helperScript);
-        try { await clearInbox(agent); } catch {}
       }
     });
   });

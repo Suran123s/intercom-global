@@ -13,6 +13,7 @@ const {
   GovernanceViolationError,
   REUSE_LIMITS
 } = require('../src/core/governance');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 // --- Group 1: Zero-Kill Protocol Invariant (INVIOLABLE) ---
 test('governance: Zero-Kill invariant strictly forbids kill/terminate on active or stopped agents', () => {
@@ -78,7 +79,8 @@ test('governance: resolveSafeAction converts kill/terminate into resume or messa
 });
 
 // --- Group 2: Bounded Subagent Reuse Protocol ---
-test('governance: tracks subagent turn counts and enforces bounded reuse (3x big / 10x small)', () => {
+test('governance: tracks subagent turn counts and enforces bounded reuse (3x big / 10x small)', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-gov-reuse-');
   const smallWorkerId = 'worker_test_small_' + Date.now();
   resetWorkerUsage(smallWorkerId);
 

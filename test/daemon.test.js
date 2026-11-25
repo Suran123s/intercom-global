@@ -2,72 +2,65 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { MESH_DIR } = require('../src/config');
 const { startDaemon, stopDaemon, daemonStatus, readPid } = require('../src/core/daemon-manager');
+const { withIsolatedMeshEnv, getFreePort } = require('./helpers/isolated-env');
 
-const PID_FILE = path.join(MESH_DIR, 'daemon.pid');
-
-function cleanPidFile() {
-  if (fs.existsSync(PID_FILE)) {
-    try { fs.unlinkSync(PID_FILE); } catch {}
-  }
-}
-
-test('readPid handles missing, corrupt, and valid PID files', () => {
-  cleanPidFile();
+test('readPid handles missing, corrupt, and valid PID files', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-daemon-pid-');
+  const pidFile = path.join(meshDir, 'daemon.pid');
 
   // Non-existent PID file
   assert.strictEqual(readPid(), null);
 
   // Non-numeric / corrupt content
-  fs.writeFileSync(PID_FILE, 'not-a-pid-string', 'utf8');
+  fs.writeFileSync(pidFile, 'not-a-pid-string', 'utf8');
   assert.strictEqual(readPid(), null);
 
   // Unreadable content / invalid JSON or symbol
-  fs.writeFileSync(PID_FILE, 'NaN', 'utf8');
+  fs.writeFileSync(pidFile, 'NaN', 'utf8');
   assert.strictEqual(readPid(), null);
 
   // Valid PID number with trailing spaces/newlines
-  fs.writeFileSync(PID_FILE, '  88888 \n', 'utf8');
+  fs.writeFileSync(pidFile, '  88888 \n', 'utf8');
   assert.strictEqual(readPid(), 88888);
-
-  cleanPidFile();
 });
 
-test('daemonStatus returns offline when PID file is missing or PID is not running', () => {
-  cleanPidFile();
+test('daemonStatus returns offline when PID file is missing or PID is not running', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-daemon-status-');
+  const pidFile = path.join(meshDir, 'daemon.pid');
 
   // Missing PID file
   assert.deepStrictEqual(daemonStatus(), { status: 'offline', pid: null });
 
   // Stale PID file for process that does not exist
-  fs.writeFileSync(PID_FILE, '9999999', 'utf8');
+  fs.writeFileSync(pidFile, '9999999', 'utf8');
   assert.deepStrictEqual(daemonStatus(), { status: 'offline', pid: null });
-
-  cleanPidFile();
 });
 
-test('stopDaemon handles non-running and stale PID files', () => {
-  cleanPidFile();
+test('stopDaemon handles non-running and stale PID files', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-daemon-stop-');
+  const pidFile = path.join(meshDir, 'daemon.pid');
 
   // No PID file
   const resNoFile = stopDaemon();
   assert.strictEqual(resNoFile.status, 'not_running');
 
   // Stale PID file -> removes file and returns not_running
-  fs.writeFileSync(PID_FILE, '9999999', 'utf8');
+  fs.writeFileSync(pidFile, '9999999', 'utf8');
   const resStale = stopDaemon();
   assert.strictEqual(resStale.status, 'not_running');
-  assert.strictEqual(fs.existsSync(PID_FILE), false);
-
-  cleanPidFile();
+  assert.strictEqual(fs.existsSync(pidFile), false);
 });
 
-test('startDaemon, daemonStatus, duplicate start, and stopDaemon lifecycle', () => {
-  cleanPidFile();
+test('startDaemon, daemonStatus, duplicate start, and stopDaemon lifecycle', async (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-daemon-life-');
+  const pidFile = path.join(meshDir, 'daemon.pid');
+  t.after(() => {
+    try { stopDaemon(); } catch {}
+  });
 
-  // 1. Start daemon process
-  const port = 4199;
+  // 1. Start daemon process on ephemeral free port
+  const port = await getFreePort();
   const startRes = startDaemon(port);
   assert.strictEqual(startRes.status, 'started');
   assert.strictEqual(typeof startRes.pid, 'number');
@@ -90,12 +83,10 @@ test('startDaemon, daemonStatus, duplicate start, and stopDaemon lifecycle', () 
   const stopRes = stopDaemon();
   assert.strictEqual(stopRes.status, 'stopped');
   assert.strictEqual(stopRes.pid, startRes.pid);
-  assert.strictEqual(fs.existsSync(PID_FILE), false);
+  assert.strictEqual(fs.existsSync(pidFile), false);
 
   // 5. Query status after stop -> offline
   const finalStatus = daemonStatus();
   assert.strictEqual(finalStatus.status, 'offline');
   assert.strictEqual(finalStatus.pid, null);
-
-  cleanPidFile();
 });

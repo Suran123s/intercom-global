@@ -16,9 +16,11 @@ const {
   dispatchTask,
   readLedger,
   writeLedger,
+  getLedgerPath,
   FileBoundaryExceededError,
   JULES_LIMITS
 } = require('../src/core/jules-delegator');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 const julesBridge = require('../src/bridges/jules-bridge');
 
 // --- Group 1: Single-File Heavy Edit Classifier ---
@@ -163,8 +165,9 @@ test('jules-delegator: generates and validates unambiguous 5-pillar Markdown pro
 });
 
 // --- Group 4: Quota & Concurrency Gating ---
-test('jules-delegator: detects and enforces concurrency (15) and daily (100) session caps', async () => {
-  const ledgerPath = path.join(os.homedir(), '.intercom-global', 'jules-ledger.json');
+test('jules-delegator: detects and enforces concurrency (15) and daily (100) session caps', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-jules-quota-');
+  const ledgerPath = getLedgerPath();
   const backup = fs.existsSync(ledgerPath) ? fs.readFileSync(ledgerPath, 'utf8') : null;
 
   try {
@@ -242,8 +245,9 @@ test('jules-delegator: triggers automatic fallback with disallowJulesReDelegatio
 });
 
 // --- Group 6: Full Dispatch Orchestration (Dry-Run) ---
-test('jules-delegator: end-to-end task dispatch in dry-run mode', async () => {
-  const ledgerPath = path.join(os.homedir(), '.intercom-global', 'jules-ledger.json');
+test('jules-delegator: end-to-end task dispatch in dry-run mode', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-jules-dispatch-');
+  const ledgerPath = getLedgerPath();
   try { fs.unlinkSync(ledgerPath); } catch {}
 
   const taskSpec = {

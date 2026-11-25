@@ -2,15 +2,14 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
-const fs = require('fs');
 const path = require('path');
-const { wakeCliAgent, wakeOpenCodeAgent, wakeHermesAgent } = require('../src/controllers/autowake');
-const { getInboxFile, readInbox } = require('../src/core/mesh');
-const { MESH_DIR } = require('../src/config');
+const { wakeCliAgent, wakeOpenCodeAgent, wakeHermesAgent, wakeAgent } = require('../src/controllers/autowake');
+const { readInbox } = require('../src/core/mesh');
+const { withIsolatedMeshEnv, listenEphemeral, closeServer } = require('./helpers/isolated-env');
 
-test('wakeCliAgent writes to mailbox with beep and unread status', () => {
+test('wakeCliAgent writes to mailbox with beep and unread status', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-autowake-cli-');
   const agent = 'wake-test-' + Date.now();
-  const file = getInboxFile(agent);
 
   wakeCliAgent(agent, 'Direct wake message');
 
@@ -18,27 +17,21 @@ test('wakeCliAgent writes to mailbox with beep and unread status', () => {
   assert.strictEqual(inbox.length, 1);
   assert.strictEqual(inbox[0].message, 'Direct wake message');
   assert.strictEqual(inbox[0].read, false);
-
-  if (fs.existsSync(file)) {
-    fs.unlinkSync(file);
-  }
 });
 
-test('wakeCliAgent sanitizes targetName to prevent path traversal', () => {
+test('wakeCliAgent sanitizes targetName to prevent path traversal', (t) => {
+  const { meshDir } = withIsolatedMeshEnv(t, 'intercom-autowake-trav-');
   const dangerousTarget = '../../traversal-test-' + Date.now();
   const res = wakeCliAgent(dangerousTarget, 'Malicious payload');
 
-  const resolvedMeshDir = path.resolve(MESH_DIR);
+  const resolvedMeshDir = path.resolve(meshDir);
   const resolvedFile = path.resolve(res.file);
 
   assert.ok(resolvedFile.startsWith(resolvedMeshDir + path.sep), 'File path must be inside MESH_DIR');
-
-  if (fs.existsSync(resolvedFile)) {
-    fs.unlinkSync(resolvedFile);
-  }
 });
 
-test('wakeOpenCodeAgent connects to OpenCode API server when present', async () => {
+test('wakeOpenCodeAgent connects to OpenCode API server when present', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-autowake-oc-');
   let receivedPrompt = false;
 
   const mockOpenCodeServer = http.createServer((req, res) => {
@@ -55,9 +48,14 @@ test('wakeOpenCodeAgent connects to OpenCode API server when present', async () 
     res.end();
   });
 
-  await new Promise(r => mockOpenCodeServer.listen(0, '127.0.0.1', r));
-  const port = mockOpenCodeServer.address().port;
+  const port = await listenEphemeral(mockOpenCodeServer);
+  const prevUrl = process.env.OPENCODE_URL;
   process.env.OPENCODE_URL = `http://127.0.0.1:${port}`;
+  t.after(async () => {
+    if (prevUrl === undefined) delete process.env.OPENCODE_URL;
+    else process.env.OPENCODE_URL = prevUrl;
+    await closeServer(mockOpenCodeServer);
+  });
 
   await new Promise(resolve => {
     wakeOpenCodeAgent('opencode', 'Test wake task', (result) => {
@@ -67,13 +65,10 @@ test('wakeOpenCodeAgent connects to OpenCode API server when present', async () 
       resolve();
     });
   });
-
-  if (mockOpenCodeServer.closeAllConnections) mockOpenCodeServer.closeAllConnections();
-  await new Promise(r => mockOpenCodeServer.close(r));
-  delete process.env.OPENCODE_URL;
 });
 
-test('wakeHermesAgent connects to Hermes Gateway API when present', async () => {
+test('wakeHermesAgent connects to Hermes Gateway API when present', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-autowake-hermes-');
   let receivedChat = false;
 
   const mockHermesServer = http.createServer((req, res) => {
@@ -86,9 +81,14 @@ test('wakeHermesAgent connects to Hermes Gateway API when present', async () => 
     res.end();
   });
 
-  await new Promise(r => mockHermesServer.listen(0, '127.0.0.1', r));
-  const port = mockHermesServer.address().port;
+  const port = await listenEphemeral(mockHermesServer);
+  const prevUrl = process.env.HERMES_URL;
   process.env.HERMES_URL = `http://127.0.0.1:${port}`;
+  t.after(async () => {
+    if (prevUrl === undefined) delete process.env.HERMES_URL;
+    else process.env.HERMES_URL = prevUrl;
+    await closeServer(mockHermesServer);
+  });
 
   await new Promise(resolve => {
     wakeHermesAgent('hermes', 'Test hermes task', (result) => {
@@ -97,20 +97,14 @@ test('wakeHermesAgent connects to Hermes Gateway API when present', async () => 
       resolve();
     });
   });
-
-  if (mockHermesServer.closeAllConnections) mockHermesServer.closeAllConnections();
-  await new Promise(r => mockHermesServer.close(r));
-  delete process.env.HERMES_URL;
 });
 
-const { wakeAgent } = require("../src/controllers/autowake");
-
-test("wakeAgent coordinates channel dispatch and invokes callback with report", async () => {
-  const agent = "wake-report-test-" + Date.now();
-  const file = getInboxFile(agent);
+test('wakeAgent coordinates channel dispatch and invokes callback with report', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-autowake-rep-');
+  const agent = 'wake-report-test-' + Date.now();
 
   await new Promise((resolve) => {
-    wakeAgent(agent, "Test full wake report", (report) => {
+    wakeAgent(agent, 'Test full wake report', (report) => {
       assert.strictEqual(report.target, agent);
       assert.ok(report.timestamp);
       assert.ok(report.channels);
@@ -122,8 +116,4 @@ test("wakeAgent coordinates channel dispatch and invokes callback with report", 
       resolve();
     });
   });
-
-  if (fs.existsSync(file)) {
-    fs.unlinkSync(file);
-  }
 });

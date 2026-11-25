@@ -2,9 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const { wakeCliAgent } = require('../src/controllers/autowake');
-const { readInbox, clearInbox } = require('../src/core/mesh');
+const { readInbox } = require('../src/core/mesh');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
-test('Improvement #23: wakeCliAgent writes atomic discrete envelope', async () => {
+test('Improvement #23: wakeCliAgent writes atomic discrete envelope', async (t) => {
+  withIsolatedMeshEnv(t, 'intercom-autowake-disc-');
   const target = 'autowake_disc_' + Date.now();
   const res = wakeCliAgent(target, 'Discrete wake instruction');
 
@@ -15,6 +17,4 @@ test('Improvement #23: wakeCliAgent writes atomic discrete envelope', async () =
   assert.strictEqual(inbox.length, 1);
   assert.strictEqual(inbox[0].message, 'Discrete wake instruction');
   assert.strictEqual(inbox[0].read, false);
-
-  await clearInbox(target);
 });

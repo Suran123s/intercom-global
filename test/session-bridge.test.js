@@ -4,9 +4,9 @@ const childProcess = require('child_process');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { MESH_DIR } = require('../src/config');
 const { writeInbox } = require('../src/core/mesh');
 const { startSessionBridge, sanitizeName } = require('../src/bridges/session-bridge');
+const { withIsolatedMeshEnv } = require('./helpers/isolated-env');
 
 test('startSessionBridge function exists and exports correctly', () => {
   assert.strictEqual(typeof startSessionBridge, 'function');
@@ -26,6 +26,7 @@ test('session-bridge sanitizeName cleans input and prevents path traversal', () 
 });
 
 test('session bridge spawns process with shell set to false', (t) => {
+  withIsolatedMeshEnv(t, 'intercom-sbridge-shell-');
   let capturedOptions = null;
   const originalSpawn = childProcess.spawn;
   const originalExit = process.exit;
@@ -55,15 +56,26 @@ test('session bridge spawns process with shell set to false', (t) => {
   }
 });
 
-test('session-bridge CLI spawns command and routes inbox messages to child stdin', async () => {
+test('session-bridge CLI spawns command and routes inbox messages to child stdin', async (t) => {
+  const { root, meshDir, env } = withIsolatedMeshEnv(t, 'intercom-sbridge-cli-');
   const agent = 'test-sbridge-' + Date.now();
   const session = 'sess-' + Math.random().toString(36).substring(2, 8);
   const fullTag = `${agent}#${session}`;
 
-  const helperScript = path.join(__dirname, `dummy_cli_${Date.now()}.js`);
+  const helperScript = path.join(root, `dummy_cli_${Date.now()}.js`);
   fs.writeFileSync(
     helperScript,
-    'process.stdin.on("data", d => console.log("RECVD:" + d.toString().trim())); setTimeout(() => process.exit(0), 2800);'
+    [
+      'const readline = require("readline");',
+      'const rl = readline.createInterface({ input: process.stdin });',
+      'let count = 0;',
+      'const timer = setTimeout(() => process.exit(1), 6000);',
+      'rl.on("line", (line) => {',
+      '  console.log("RECVD:" + line.trim());',
+      '  count++;',
+      '  if (count >= 2) { clearTimeout(timer); rl.close(); process.exit(0); }',
+      '});'
+    ].join('\n')
   );
 
   const bridgeProcess = spawn('node', [
@@ -72,24 +84,21 @@ test('session-bridge CLI spawns command and routes inbox messages to child stdin
     '--session', session,
     '--',
     'node', helperScript
-  ]);
+  ], { env });
 
   let stdout = '';
+  let injected = false;
   bridgeProcess.stdout.on('data', (d) => {
     stdout += d.toString();
+    if (!injected && stdout.includes('GLOBAL INTERCOM SESSION BRIDGE ACTIVE')) {
+      injected = true;
+      writeInbox(fullTag, [{ id: 'sb-1', from: 'master', to: fullTag, message: 'do session task', read: false }]);
+      writeInbox(agent, [{ id: 'sb-2', from: 'master', to: agent, message: 'do general task', read: false }]);
+    }
   });
 
-  // Inject session-specific message
-  setTimeout(() => {
-    writeInbox(fullTag, [{ id: 'sb-1', from: 'master', to: fullTag, message: 'do session task', read: false }]);
-  }, 1100);
-
-  // Inject targeted general message
-  setTimeout(() => {
-    writeInbox(agent, [{ id: 'sb-2', from: 'master', to: agent, message: 'do general task', read: false }]);
-  }, 1900);
-
   await new Promise((resolve, reject) => {
+    bridgeProcess.on('error', reject);
     bridgeProcess.on('close', (code) => {
       try {
         assert.strictEqual(code, 0);
@@ -97,22 +106,15 @@ test('session-bridge CLI spawns command and routes inbox messages to child stdin
         assert.match(stdout, /RECVD:do session task/);
         assert.match(stdout, /RECVD:do general task/);
 
-        // Verify that inbox messages were marked as read
-        const sessionInbox = JSON.parse(fs.readFileSync(path.join(MESH_DIR, `${agent}-${session}.json`), 'utf8'));
+        const sessionInbox = JSON.parse(fs.readFileSync(path.join(meshDir, `${agent}-${session}.json`), 'utf8'));
         assert.strictEqual(sessionInbox[0].read, true);
 
-        const generalInbox = JSON.parse(fs.readFileSync(path.join(MESH_DIR, `${agent}.json`), 'utf8'));
+        const generalInbox = JSON.parse(fs.readFileSync(path.join(meshDir, `${agent}.json`), 'utf8'));
         assert.strictEqual(generalInbox[0].read, true);
 
         resolve();
       } catch (err) {
         reject(err);
-      } finally {
-        if (fs.existsSync(helperScript)) fs.unlinkSync(helperScript);
-        const f1 = path.join(MESH_DIR, `${agent}.json`);
-        const f2 = path.join(MESH_DIR, `${agent}-${session}.json`);
-        if (fs.existsSync(f1)) fs.unlinkSync(f1);
-        if (fs.existsSync(f2)) fs.unlinkSync(f2);
       }
     });
   });
