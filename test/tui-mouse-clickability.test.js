@@ -18,6 +18,8 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const path = require("path");
 
+const { writeMessage } = require("../src/core/mesh");
+const { withIsolatedMeshEnv } = require("./helpers/isolated-env");
 const tui = require("../bin/intercom-tui.js");
 
 const TUI_PATH = path.resolve(__dirname, "..", "bin", "intercom-tui.js");
@@ -620,6 +622,150 @@ describe("Intercom Global TUI — Wave 6 Minimalist UX & Full Mouse Clickability
       assert.equal(tui.getState().composerFocusZone, "target");
       await tui.handleKey("", { name: "return" });
       assert.equal(tui.getState().targetDropdownOpen, true);
+    });
+  });
+
+  describe("11. Phase 2 UX Upgrades: Two-Way Threads, Unread Badges, Light Sidebar, Help Padding & True Zen Mode", () => {
+    it("Loads & merges two-way conversation messages (incoming in inbox/<self> + outgoing in inbox/<peer>) chronologically", async (t) => {
+      withIsolatedMeshEnv(t, "intercom-tui-twoway-");
+      const prevAgent = process.env.INTERCOM_AGENT;
+      process.env.INTERCOM_AGENT = "operator";
+      t.after(() => {
+        if (prevAgent === undefined) delete process.env.INTERCOM_AGENT;
+        else process.env.INTERCOM_AGENT = prevAgent;
+      });
+
+      await writeMessage("opencode", {
+        sender: "operator",
+        recipient: "opencode",
+        type: "task_dispatch",
+        timestamp: "2026-11-25T10:00:00.000Z",
+        payload: { message: "Outbound question to opencode" }
+      });
+      await writeMessage("operator", {
+        sender: "opencode",
+        recipient: "operator",
+        type: "task_response",
+        timestamp: "2026-11-25T10:01:00.000Z",
+        payload: { message: "Inbound reply from opencode" }
+      });
+
+      const merged = await tui.loadThreadMessages(false, "opencode", { force: true });
+      assert.equal(merged.length, 2, "Must merge outgoing and incoming messages");
+      assert.equal(merged[0].from || merged[0].sender, "operator");
+      assert.equal(merged[1].from || merged[1].sender, "opencode");
+
+      tui.setState({
+        activeNav: 1,
+        selectedAgent: "opencode",
+        subTabs: [
+          { id: "home", kind: "home", target: null, label: "✦ Home", closable: false },
+          { id: "peer:opencode", kind: "peer", target: "opencode", label: "@opencode", closable: true }
+        ],
+        activeSubTabIndex: 1
+      });
+      await tui.loadLists();
+      const frame = tui.renderFrame(100, 30).map(stripAnsi);
+      const text = frame.join("\n");
+      assert.ok(text.includes("@operator"), "Must render outgoing self bubble");
+      assert.ok(text.includes("Outbound question to opencode"));
+      assert.ok(text.includes("@opencode"), "Must render incoming peer bubble");
+      assert.ok(text.includes("Inbound reply from opencode"));
+      assert.ok(text.includes("[UNREAD]"), "Must render unread receipt badges");
+      assert.ok(frame[0].includes("@opencode (2)"), "Row-1 tab reflects merged unread count before mark-read");
+
+      await tui.markPeerInboxRead("opencode");
+      const reloaded = await tui.loadThreadMessages(false, "opencode", { force: true });
+      assert.ok(reloaded.every((m) => m.read || (m.metadata && m.metadata.read)), "Mark Read must persist across both inboxes");
+      const afterFrame = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(afterFrame.includes("[READ]"));
+      assert.ok(!afterFrame.includes("[UNREAD]"));
+    });
+
+    it("Row-1 @peer sub-tab renders unread badge from meshStats.unread for matched active inbox with exact hitboxes", () => {
+      tui.setState({
+        activeNav: 1,
+        selectedAgent: "opencode",
+        subTabs: [
+          { id: "home", kind: "home", target: null, label: "✦ Home", closable: false },
+          { id: "peer:opencode", kind: "peer", target: "opencode", label: "@opencode", closable: true }
+        ],
+        activeSubTabIndex: 1,
+        agentMeta: {},
+        meshStats: { peers: 5, unread: 1, channels: 3, dlq: 0 }
+      });
+
+      const frame = tui.renderFrame(100, 30).map(stripAnsi);
+      const topLine = frame[0];
+      assert.ok(topLine.includes("@opencode (1)"), "Active matched @peer sub-tab must show unread count from meshStats");
+
+      const switchHit = tui.getHitboxes().find((h) => h.row === 1 && h.action === "switch_subtab" && h.payload.id === "peer:opencode");
+      const closeHit = tui.getHitboxes().find((h) => h.row === 1 && h.action === "close_subtab" && h.payload.id === "peer:opencode");
+      assert.ok(switchHit && closeHit, "Must register switch_subtab and close_subtab hitboxes");
+      assert.equal(topLine.slice(switchHit.startCol - 1, switchHit.endCol), "[ @opencode (1) ");
+      assert.equal(topLine.slice(closeHit.startCol - 1, closeHit.endCol), "× ]");
+    });
+
+    it("Sidebar [ Activity ] uses sharp accent/subtle foreground and Light Theme unused rows have no box stripes", () => {
+      for (const darkTheme of [true, false]) {
+        tui.setState({
+          activeNav: 0,
+          rightSidebarOpen: true,
+          settings: { darkTheme }
+        });
+        const sb = tui.renderSidebar(26, 28, 2, 100);
+        const actLine = sb.find((l) => stripAnsi(l).includes("[ Activity ]"));
+        assert.ok(actLine, "Sidebar must render [ Activity ]");
+        assert.ok(!actLine.includes("\x1b[38;5;240m[ Activity ]"), "[ Activity ] must not use muted 240 fg");
+        assert.ok(!actLine.includes("\x1b[38;5;244m[ Activity ]"), "[ Activity ] must not use muted 244 fg");
+
+        if (!darkTheme) {
+          // Last several rows below Channels must be clean bgSidebar padding without vertical borders or bottom stripes
+          const unusedRows = sb.slice(-4);
+          for (const row of unusedRows) {
+            assert.equal(stripAnsi(row).trim(), "", "Light Theme unused sidebar rows below Channels must be clean padding");
+            assert.ok(row.includes("\x1b[48;5;252m"), "Light Theme unused rows must use theme.bgSidebar");
+            assert.ok(!row.includes("│") && !row.includes("─"), "Unused sidebar rows must not draw border stripes");
+          }
+        }
+      }
+    });
+
+    it("Help overlay adds internal padding before Keys footer and True Zen Mode suppresses mid-screen headers", () => {
+      tui.setState({ activeNav: 6, zenMode: false });
+      const helpFrame = tui.renderFrame(100, 30).map(stripAnsi);
+      const helpCmdIdx = helpFrame.findIndex((l) => l.includes("/help"));
+      const keysIdx = helpFrame.findIndex((l) => l.includes("Keys:"));
+      assert.ok(helpCmdIdx > 0 && keysIdx > helpCmdIdx + 1, "Help box must have blank internal padding row between commands and Keys footer");
+      assert.equal(stripAnsi(helpFrame[helpCmdIdx + 1]).replace(/[│\s]/g, ""), "", "Row between /help and Keys must be clean internal padding");
+      assert.ok(helpFrame[keysIdx].includes("[q] Quit") || helpFrame[keysIdx + 1].includes("[q] Quit"), "Keys footer must not clip [q] Quit");
+
+      // Align [ × Close ] right edge with Help card border right edge
+      const closeHit = tui.getHitboxes().find((h) => h.action === "close_help");
+      const topBorderRow = helpFrame.find((l) => l.includes("╭") && l.includes("╮"));
+      assert.ok(closeHit && topBorderRow);
+      const rightBorderCol1 = topBorderRow.indexOf("╮") + 1;
+      assert.equal(closeHit.endCol, rightBorderCol1, "[ × Close ] right edge must align with Help card border");
+
+      // True Zen Mode: empty home/peer and active thread both suppress redundant header separators
+      tui.setState({ activeNav: 0, zenMode: true, selectedAgent: "jules" });
+      const zenHome = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(!zenHome.includes("✉ Intercom"), "Zen Mode Home must suppress ✉ Intercom header");
+      assert.ok(zenHome.includes("[ ↵ Send ]"), "Zen Mode Home keeps composer controls");
+
+      tui.setState({
+        activeNav: 1,
+        zenMode: true,
+        selectedAgent: "jules",
+        threadMessages: {
+          "peer:jules": [{ from: "jules", message: "Focus stream check", timestamp: "2026-11-25T10:00:00Z", read: false }]
+        }
+      });
+      const zenThread = tui.renderFrame(100, 30).map(stripAnsi).join("\n");
+      assert.ok(!zenThread.includes("○ Offline"), "Zen Mode thread must suppress status header row");
+      assert.ok(!zenThread.includes("✉ Intercom"), "Zen Mode thread must suppress ✉ Intercom header");
+      assert.ok(zenThread.includes("Focus stream check"), "Zen Mode thread renders clean message bubble");
+      assert.ok(zenThread.includes("[ ↵ Send ]"), "Zen Mode thread renders composer box");
     });
   });
 });

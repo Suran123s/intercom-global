@@ -94,7 +94,7 @@ const LIGHT_THEME = Object.freeze({
   fgPrimary:    "\x1b[38;5;234m",
   fgSubtle:     "\x1b[38;5;236m",
   fgMuted:      "\x1b[38;5;240m",
-  fgDimBorder:  "\x1b[38;5;244m",
+  fgDimBorder:  "\x1b[38;5;246m",
   fgAccent:     "\x1b[38;5;25m",
   fgChannel:    "\x1b[38;5;127m",
   fgSelf:       "\x1b[38;5;28m",
@@ -883,11 +883,29 @@ function syncComposerFocusForNav(navIndex) {
 
 function getPeerUnreadCount(name) {
   if (!name) return 0;
-  const meta = agentMetaMap.get(name);
+  const lower = String(name).toLowerCase();
+  let meta = agentMetaMap.get(name);
+  if (!meta) {
+    for (const [k, v] of agentMetaMap.entries()) {
+      if (String(k).toLowerCase() === lower) {
+        meta = v;
+        break;
+      }
+    }
+  }
   if (meta && typeof meta.unread === "number") return Math.max(0, meta.unread);
   const cached = threadCache.get(`peer:${name}`);
   if (cached && Array.isArray(cached.messages)) {
-    return cached.messages.filter((m) => !(m.read || (m.metadata && m.metadata.read))).length;
+    const cacheUnread = cached.messages.filter((m) => !(m.read || (m.metadata && m.metadata.read))).length;
+    if (cacheUnread > 0) return cacheUnread;
+  }
+  const activeTab = getActiveSubTab();
+  const isActiveInboxMatch =
+    selectedAgent &&
+    String(selectedAgent).toLowerCase() === lower &&
+    (activeNav === 1 || (activeTab && activeTab.kind === "peer" && String(activeTab.target || "").toLowerCase() === lower));
+  if (agentMetaMap.size === 0 && isActiveInboxMatch && meshStats && typeof meshStats.unread === "number" && meshStats.unread > 0) {
+    return meshStats.unread;
   }
   return 0;
 }
@@ -1111,7 +1129,10 @@ function renderTopBar(cols) {
     const isActive = i === activeSubTabIndex && (activeNav === 0 || activeNav === 1 || activeNav === 2);
     const pillBg = isActive ? theme.bgActiveNav : theme.bgSelected;
     const pillFg = isActive ? `${A.bold}${theme.fgOnActive}` : theme.fgSubtle;
-    const unread = tab.kind === "peer" ? getPeerUnreadCount(tab.target) : 0;
+    const peerTarget = tab.kind === "peer"
+      ? (tab.target || String(tab.label || "").replace(/^@/, ""))
+      : "";
+    const unread = tab.kind === "peer" ? getPeerUnreadCount(peerTarget) : 0;
     const unreadPlain = unread > 0 ? ` (${unread})` : "";
     const unreadStyled = unread > 0
       ? ` ${isActive ? `${A.bold}${theme.fgOnActive}` : theme.fgWarn}(${unread})${pillFg}`
@@ -1123,6 +1144,7 @@ function renderTopBar(cols) {
         index: i,
         tab,
         closable: false,
+        isActive,
         text,
         totalW: stringWidth(text),
         pillBg,
@@ -1137,6 +1159,7 @@ function renderTopBar(cols) {
       index: i,
       tab,
       closable: true,
+      isActive,
       mainStyled: `[ ${safeLabel}${unreadStyled} `,
       closePart,
       mainW,
@@ -1213,7 +1236,8 @@ function renderTopBar(cols) {
       registerHitbox(row, leftPlainCol, leftPlainCol + spec.mainW - 1, "switch_subtab", { index: spec.index, id: spec.tab.id });
       registerHitbox(row, leftPlainCol + spec.mainW, leftPlainCol + spec.totalW - 1, "close_subtab", { index: spec.index, id: spec.tab.id });
 
-      leftRendered += `${spec.pillBg}${spec.pillFg}${spec.mainStyled}${theme.fgMuted}${spec.closePart}${A.reset}${theme.bgHeader} `;
+      const closeFg = spec.isActive ? theme.fgOnActive : theme.fgMuted;
+      leftRendered += `${spec.pillBg}${spec.pillFg}${spec.mainStyled}${closeFg}${spec.closePart}${A.reset}${theme.bgHeader} `;
       leftPlainCol += spec.totalW + 1;
     }
   }
@@ -1265,10 +1289,12 @@ function renderSidebar(widthOpt, heightOpt, startRow = 2, colsOpt) {
   const sidebarStartCol = cols - sW + 1;
   const sidebarEndCol = cols;
   const inner = Math.max(10, sW - 2);
+  const isLight = settings.darkTheme === false;
+  const borderFg = isLight ? theme.fgDimBorder : `${A.dim}${theme.fgAccent}`;
   const lines = [];
 
   // Top border
-  lines.push(`${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.tl}${B.h} ${A.bold}${theme.fgPrimary}MENU${A.reset}${theme.bgSidebar}${A.dim}${theme.fgAccent} ${B.h.repeat(Math.max(0, inner - 7))}${B.tr}${A.reset}`);
+  lines.push(`${theme.bgSidebar}${borderFg}${B.tl}${B.h} ${A.bold}${theme.fgPrimary}MENU${A.reset}${theme.bgSidebar}${borderFg} ${B.h.repeat(Math.max(0, inner - 7))}${B.tr}${A.reset}`);
 
   // Vertical categories: Home, Inbox, Channels, Peers, Info, Settings, Help
   for (let i = 0; i < NAV_TABS.length && lines.length < sH - 2; i++) {
@@ -1284,9 +1310,9 @@ function renderSidebar(widthOpt, heightOpt, startRow = 2, colsOpt) {
       : `${theme.fgSubtle}[ ${label} ]${A.reset}`;
     const rawContent = ` ${indicator} ${pill}`;
     lines.push(
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}${bg}` +
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}${bg}` +
       fitToWidth(rawContent, inner, bg) +
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}`
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}`
     );
   }
 
@@ -1299,18 +1325,18 @@ function renderSidebar(widthOpt, heightOpt, startRow = 2, colsOpt) {
     const bg = isAct ? theme.bgActiveNav : theme.bgSidebar;
     const pill = isAct
       ? `${A.bold}${theme.fgOnActive}[ Activity ]${A.reset}`
-      : `${theme.fgMuted}[ Activity ]${A.reset}`;
+      : `${theme.fgAccent}[ Activity ]${A.reset}`;
     lines.push(
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}${bg}` +
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}${bg}` +
       fitToWidth(` ${indicator} ${pill}`, inner, bg) +
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}`
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}`
     );
   }
 
   // Peers section
   if (lines.length < sH - 3) {
     lines.push(
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.vl}${B.h} ${A.bold}${theme.fgPrimary}PEERS${A.reset}${theme.bgSidebar}${A.dim}${theme.fgAccent} ${B.h.repeat(Math.max(0, inner - 8))}${B.vr}${A.reset}`
+      `${theme.bgSidebar}${borderFg}${B.vl}${B.h} ${A.bold}${theme.fgPrimary}PEERS${A.reset}${theme.bgSidebar}${borderFg} ${B.h.repeat(Math.max(0, inner - 8))}${B.vr}${A.reset}`
     );
   }
 
@@ -1326,20 +1352,20 @@ function renderSidebar(widthOpt, heightOpt, startRow = 2, colsOpt) {
     const meta = agentMetaMap.get(name);
     const unread = meta && meta.unread > 0 ? ` ${theme.fgWarn}(${meta.unread})${A.reset}` : "";
     const bg = isSelected ? theme.bgSelected : theme.bgSidebar;
-    const nameFmt = isSelected ? `${A.bold}${theme.fgPrimary}${safeName}${A.reset}` : `${theme.fgMuted}${safeName}${A.reset}`;
+    const nameFmt = isSelected ? `${A.bold}${theme.fgPrimary}${safeName}${A.reset}` : `${theme.fgSubtle}${safeName}${A.reset}`;
     const rowContent = ` ${indicator} ${dot} ${nameFmt}${unread}`;
 
     lines.push(
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}${bg}` +
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}${bg}` +
       fitToWidth(rowContent, inner, bg) +
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}`
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}`
     );
   }
 
   // Channels section
   if (lines.length < sH - 2) {
     lines.push(
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.vl}${B.h} ${A.bold}${theme.fgPrimary}CHANNELS${A.reset}${theme.bgSidebar}${A.dim}${theme.fgAccent} ${B.h.repeat(Math.max(0, inner - 11))}${B.vr}${A.reset}`
+      `${theme.bgSidebar}${borderFg}${B.vl}${B.h} ${A.bold}${theme.fgPrimary}CHANNELS${A.reset}${theme.bgSidebar}${borderFg} ${B.h.repeat(Math.max(0, inner - 11))}${B.vr}${A.reset}`
     );
   }
 
@@ -1356,21 +1382,21 @@ function renderSidebar(widthOpt, heightOpt, startRow = 2, colsOpt) {
     const rowContent = ` ${indicator} ${nameFmt}`;
 
     lines.push(
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}${bg}` +
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}${bg}` +
       fitToWidth(rowContent, inner, bg) +
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}`
+      `${theme.bgSidebar}${borderFg}${B.v}${A.reset}`
     );
   }
 
-  // Fill remaining rows
-  while (lines.length < sH - 1) {
-    lines.push(
-      `${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.v}${A.reset}${theme.bgSidebar}${" ".repeat(inner)}${A.dim}${theme.fgAccent}${B.v}${A.reset}`
-    );
+  // Close sidebar card cleanly immediately after Channels
+  if (lines.length < sH) {
+    lines.push(`${theme.bgSidebar}${borderFg}${B.bl}${B.h.repeat(inner)}${B.br}${A.reset}`);
   }
 
-  // Bottom border
-  lines.push(`${theme.bgSidebar}${A.dim}${theme.fgAccent}${B.bl}${B.h.repeat(inner)}${B.br}${A.reset}`);
+  // Fill any remaining unused rows with clean bgSidebar padding (no empty box borders or grid stripes)
+  while (lines.length < sH) {
+    lines.push(fitToWidth("", sW, theme.bgSidebar));
+  }
 
   return lines.slice(0, sH);
 }
@@ -1775,14 +1801,14 @@ function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChanne
   const cacheEntry = threadCache.get(getThreadCacheKey(isChannel, targetName));
   const msgs = (cacheEntry && Array.isArray(cacheEntry.messages)) ? cacheEntry.messages : [];
 
-  // Empty conversation -> Centered Composer (plus Channels Bar on Channels view!)
+  // Empty conversation -> Centered Composer (plus Channels Bar on Channels view when not in Zen mode)
   if (!msgs || msgs.length === 0) {
     const prefix = isChannel ? `#${safeTargetName}` : `@${safeTargetName}`;
-    if (isChannel && bodyHeight >= 10) {
+    if (isChannel && bodyHeight >= 10 && !zenMode) {
       const chBar = renderChannelsBar(mainWidth, screenStartRow);
       const compLines = renderComposerPanel(mainWidth, bodyHeight - 1, screenStartRow + 1, {
         centeredVertically: true,
-        showHeading: true,
+        showHeading: !zenMode,
         headingText: `✉ Intercom`,
         subHeadingText: `${prefix} · No messages yet`
       });
@@ -1790,53 +1816,55 @@ function renderThreadAndComposer(mainWidth, bodyHeight, screenStartRow, isChanne
     }
     return renderComposerPanel(mainWidth, bodyHeight, screenStartRow, {
       centeredVertically: true,
-      showHeading: true,
+      showHeading: !zenMode,
       headingText: `✉ Intercom`,
       subHeadingText: `${prefix} · No messages yet`
     });
   }
 
-  // Active conversation with messages -> clean header + optional Channels bar + speech bubbles + centered-width composer
-  const headerRows = isChannel ? 2 : 1;
+  // Active conversation with messages -> clean header (suppressed in Zen mode) + speech bubbles + centered-width composer
+  const headerRows = zenMode ? 0 : (isChannel ? 2 : 1);
   const composerH = Math.min(Math.max(4, bodyHeight - headerRows - 2), 4); // 3-row box + 1-row controls
   const streamTotalH = Math.max(headerRows + 2, bodyHeight - composerH);
   const lines = Array.from({ length: bodyHeight }, () => bg + " ".repeat(mainWidth) + A.reset);
 
-  // Header row (row 0 of body) — right-aligned buttons never shift or clip on narrow widths
-  const targetTag = isChannel
-    ? `${theme.fgChannel}${A.bold}#${safeTargetName}${A.reset}`
-    : `${theme.fgAccent}${A.bold}@${safeTargetName}${A.reset}`;
-  const statusBadge = isChannel ? null : formatPeerStatusBadge(targetName, theme);
-  const statusPill = isChannel
-    ? `${theme.fgMuted}· Topic Channel (${msgs.length})${A.reset}`
-    : `${statusBadge.label}${A.reset} ${theme.fgMuted}· Inbox (${msgs.length})${A.reset}`;
+  if (!zenMode) {
+    // Header row (row 0 of body) — right-aligned buttons never shift or clip on narrow widths
+    const targetTag = isChannel
+      ? `${theme.fgChannel}${A.bold}#${safeTargetName}${A.reset}`
+      : `${theme.fgAccent}${A.bold}@${safeTargetName}${A.reset}`;
+    const statusBadge = isChannel ? null : formatPeerStatusBadge(targetName, theme);
+    const statusPill = isChannel
+      ? `${theme.fgMuted}· Topic Channel (${msgs.length})${A.reset}`
+      : `${statusBadge.label}${A.reset} ${theme.fgMuted}· Thread (${msgs.length})${A.reset}`;
 
-  const refreshBtn = compact ? "[↻]" : "[ ↻ Refresh ]";
-  const refreshW = stringWidth(refreshBtn);
-  const markReadBtn = !isChannel ? (compact ? "[✓Read]" : "[ ✓ Mark Read ]") : "";
-  const markReadW = markReadBtn ? stringWidth(markReadBtn) : 0;
+    const refreshBtn = compact ? "[↻]" : "[ ↻ Refresh ]";
+    const refreshW = stringWidth(refreshBtn);
+    const markReadBtn = !isChannel ? (compact ? "[✓Read]" : "[ ✓ Mark Read ]") : "";
+    const markReadW = markReadBtn ? stringWidth(markReadBtn) : 0;
 
-  const rightGroupW = markReadBtn ? (markReadW + 1 + refreshW) : refreshW;
-  const rightStart0 = Math.max(2, mainWidth - rightGroupW - 1);
-  const maxLeftW = Math.max(4, rightStart0 - 1);
-  const rawLeftHdr = `  ${targetTag}  ${statusPill}`;
-  const clippedLeftHdr = clipAnsi(rawLeftHdr, maxLeftW);
-  const hdrGap = Math.max(1, rightStart0 - stringWidth(clippedLeftHdr));
+    const rightGroupW = markReadBtn ? (markReadW + 1 + refreshW) : refreshW;
+    const rightStart0 = Math.max(2, mainWidth - rightGroupW - 1);
+    const maxLeftW = Math.max(4, rightStart0 - 1);
+    const rawLeftHdr = `  ${targetTag}  ${statusPill}`;
+    const clippedLeftHdr = clipAnsi(rawLeftHdr, maxLeftW);
+    const hdrGap = Math.max(1, rightStart0 - stringWidth(clippedLeftHdr));
 
-  let rightRendered = "";
-  let curCol1 = rightStart0 + 1;
-  if (markReadBtn) {
-    registerHitbox(screenStartRow, curCol1, Math.min(mainWidth, curCol1 + markReadW - 1), "btn_mark_read", { agent: targetName });
-    rightRendered += `${theme.bgSelected}${theme.fgSelf}${markReadBtn}${A.reset}${bg} `;
-    curCol1 += markReadW + 1;
-  }
-  registerHitbox(screenStartRow, curCol1, Math.min(mainWidth, curCol1 + refreshW - 1), "btn_refresh", {});
-  rightRendered += `${theme.bgSelected}${theme.fgAccent}${refreshBtn}${A.reset}`;
+    let rightRendered = "";
+    let curCol1 = rightStart0 + 1;
+    if (markReadBtn) {
+      registerHitbox(screenStartRow, curCol1, Math.min(mainWidth, curCol1 + markReadW - 1), "btn_mark_read", { agent: targetName });
+      rightRendered += `${theme.bgSelected}${theme.fgSelf}${markReadBtn}${A.reset}${bg} `;
+      curCol1 += markReadW + 1;
+    }
+    registerHitbox(screenStartRow, curCol1, Math.min(mainWidth, curCol1 + refreshW - 1), "btn_refresh", {});
+    rightRendered += `${theme.bgSelected}${theme.fgAccent}${refreshBtn}${A.reset}`;
 
-  lines[0] = fitToWidth(`${bg}${clippedLeftHdr}${bg}${" ".repeat(hdrGap)}${rightRendered}`, mainWidth, bg);
+    lines[0] = fitToWidth(`${bg}${clippedLeftHdr}${bg}${" ".repeat(hdrGap)}${rightRendered}`, mainWidth, bg);
 
-  if (isChannel && bodyHeight > 1) {
-    lines[1] = renderChannelsBar(mainWidth, screenStartRow + 1);
+    if (isChannel && bodyHeight > 1) {
+      lines[1] = renderChannelsBar(mainWidth, screenStartRow + 1);
+    }
   }
 
   // Build speech bubbles centered cleanly
@@ -2317,21 +2345,27 @@ function renderHelpView(mainWidth, bodyHeight, screenStartRow = 2) {
     const rawHdr = compact
       ? `${A.bold}${theme.fgAccent}? Shortcuts & Commands${A.reset}`
       : `${A.bold}${theme.fgAccent}? Intercom Shortcuts & Slash Commands${A.reset}`;
-    const hdr = clipAnsi(rawHdr, Math.max(4, cardW - closeW - 1));
+    const hdr = clipAnsi(rawHdr, Math.max(4, cardW - closeW - 2));
     const hdrW = stringWidth(hdr);
     const gap = Math.max(1, cardW - hdrW - closeW);
     const closeCol1 = padL0 + hdrW + gap + 1;
     registerHitbox(screenStartRow + r, closeCol1, Math.min(mainWidth, closeCol1 + closeW - 1), "close_help", {});
-    lines[r] = fitToWidth(`${bg}${" ".repeat(padL0)}${hdr}${bg}${" ".repeat(gap)}${theme.bgSelected}${theme.fgMuted}${closeBtn}${A.reset}`, mainWidth, bg);
+    lines[r] = fitToWidth(`${bg}${" ".repeat(padL0)}${hdr}${bg}${" ".repeat(gap)}${theme.bgSelected}${theme.fgAccent}${closeBtn}${A.reset}`, mainWidth, bg);
     r += 2;
   }
   if (r < bodyHeight) {
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.tl}${B.h.repeat(inner)}${B.tr}${A.reset}`, mainWidth, bg);
   }
 
+  const keysText = "Keys: [Tab] Tabs · [Ctrl+B] Menu · [Esc then z / Ctrl+Z] Zen · [a] Activity · [F5] Refresh · [q] Quit";
+  const keysWrapped = wrapText(keysText, Math.max(10, inner - 4));
+  const hasPadRow = bodyHeight >= 10;
+  const footerReserve = 1 + keysWrapped.length + (hasPadRow ? 1 : 0);
+  const cmdMaxRow = Math.max(r, bodyHeight - footerReserve);
+
   for (let i = 0; i < SLASH_COMMANDS.length; i++) {
     const sc = SLASH_COMMANDS[i];
-    if (r >= bodyHeight - 3) break;
+    if (r >= cmdMaxRow) break;
     const syntaxPad = compact ? 16 : 25;
     const row = fitToWidth(`  ${A.bold}${theme.fgAccent}${padEnd(sc.syntax, syntaxPad)}${A.reset} ${theme.fgSubtle}${sc.desc}${A.reset}`, inner, theme.bgInput);
     registerHitbox(
@@ -2344,8 +2378,14 @@ function renderHelpView(mainWidth, bodyHeight, screenStartRow = 2) {
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${row}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
   }
 
-  if (r < bodyHeight - 1) {
-    const keysLine = fitToWidth(`  ${theme.fgMuted}Keys: [Tab] Tabs  [Ctrl+B] Menu  [Esc then z / Ctrl+Z] Zen  [a] Activity  [F5] Refresh  [q] Quit${A.reset}`, inner, theme.bgInput);
+  if (hasPadRow && r < bodyHeight - keysWrapped.length - 1) {
+    const padRow = fitToWidth("", inner, theme.bgInput);
+    lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${padRow}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
+  }
+
+  for (let k = 0; k < keysWrapped.length && r < bodyHeight - 1; k++) {
+    const prefix = k === 0 ? "  " : "        ";
+    const keysLine = fitToWidth(`${prefix}${theme.fgMuted}${keysWrapped[k]}${A.reset}`, inner, theme.bgInput);
     lines[r++] = fitToWidth(`${bg}${" ".repeat(padL0)}${theme.fgAccent}${B.v}${A.reset}${keysLine}${theme.fgAccent}${B.v}${A.reset}`, mainWidth, bg);
   }
   if (r < bodyHeight) {
@@ -2388,7 +2428,7 @@ function renderViewLines(mainWidth, bodyHeight, startRow) {
   if (activeNav === 0) {
     return renderComposerPanel(mainWidth, bodyHeight, startRow, {
       centeredVertically: true,
-      showHeading: true,
+      showHeading: !zenMode,
       headingText: "✉ Intercom"
     });
   }
@@ -2462,6 +2502,68 @@ function getThreadCacheKey(isChannel, targetName) {
   return `${isChannel ? "channel" : "peer"}:${String(targetName || "")}`;
 }
 
+async function readAgentInboxEnvelopes(meshDir, agentName, maxFiles = 50) {
+  const inboxDir = path.join(meshDir, "inbox", agentName);
+  const legacyFile = path.join(meshDir, `${agentName}.json`);
+
+  let dirStat = null;
+  try {
+    dirStat = await fs.promises.stat(inboxDir);
+  } catch {}
+
+  if (dirStat && dirStat.isDirectory()) {
+    const dirMtime = dirStat.mtimeMs || 0;
+    try {
+      const files = await fs.promises.readdir(inboxDir);
+      const parsedFiles = [];
+      for (const f of files) {
+        if (!/^\d+_[a-zA-Z0-9\-]+\.json$/.test(f)) continue;
+        const sepIdx = f.indexOf("_");
+        parsedFiles.push({
+          file: f,
+          ts: parseInt(f.slice(0, sepIdx), 10) || 0,
+          idPart: f.slice(sepIdx + 1, -5)
+        });
+      }
+      parsedFiles.sort((a, b) => (a.ts !== b.ts ? a.ts - b.ts : a.idPart.localeCompare(b.idPart)));
+      const tailFiles = parsedFiles.slice(-maxFiles);
+      const envelopes = (await Promise.all(
+        tailFiles.map(async ({ file }) => {
+          try {
+            const content = await fs.promises.readFile(path.join(inboxDir, file), "utf8");
+            return JSON.parse(content);
+          } catch {
+            return null;
+          }
+        })
+      )).filter(Boolean);
+
+      if (envelopes.length > 0) {
+        return { messages: envelopes, stamp: `dir:${dirMtime}:${parsedFiles.length}` };
+      }
+    } catch {}
+  }
+
+  try {
+    const st = await fs.promises.stat(legacyFile);
+    const legMtime = st.mtimeMs || 0;
+    const raw = await fs.promises.readFile(legacyFile, "utf8");
+    const parsed = JSON.parse(raw);
+    const messages = Array.isArray(parsed) ? parsed.slice(-maxFiles) : [];
+    return { messages, stamp: `leg:${legMtime}` };
+  } catch {
+    return { messages: [], stamp: dirStat ? `dir:${dirStat.mtimeMs || 0}:0` : "none:0" };
+  }
+}
+
+function getSafeSelfAgent() {
+  try {
+    return validateAgentName(getSelfIdentity());
+  } catch {
+    return null;
+  }
+}
+
 async function loadThreadMessages(isChannel, targetName, { force = false } = {}) {
   const cleanRaw = String(targetName || "").replace(/^[@#]/, "").trim();
   if (!cleanRaw) return [];
@@ -2504,68 +2606,77 @@ async function loadThreadMessages(isChannel, targetName, { force = false } = {})
   } catch {
     return [];
   }
-  const inboxDir = path.join(meshDir, "inbox", cleanAgent);
-  const legacyFile = path.join(meshDir, `${cleanAgent}.json`);
 
-  let dirStat = null;
-  try {
-    dirStat = await fs.promises.stat(inboxDir);
-  } catch {}
+  const cleanSelf = getSafeSelfAgent();
+  const isSelfThread = Boolean(cleanSelf && cleanSelf.toLowerCase() === cleanAgent.toLowerCase());
 
-  if (dirStat && dirStat.isDirectory()) {
-    const mtimeMs = dirStat.mtimeMs || 0;
-    const cached = threadCache.get(key);
-    if (!force && cached && cached.mtimeMs === mtimeMs) {
-      return cached.messages;
-    }
+  // Stat check for fast mtime cache hit before reading envelopes
+  const statStampFor = async (agentName) => {
+    const dirPath = path.join(meshDir, "inbox", agentName);
+    const legPath = path.join(meshDir, `${agentName}.json`);
+    let dStamp = "0";
+    let lStamp = "0";
     try {
-      const files = await fs.promises.readdir(inboxDir);
-      const parsedFiles = [];
-      for (const f of files) {
-        if (!/^\d+_[a-zA-Z0-9\-]+\.json$/.test(f)) continue;
-        const sepIdx = f.indexOf("_");
-        parsedFiles.push({
-          file: f,
-          ts: parseInt(f.slice(0, sepIdx), 10) || 0,
-          idPart: f.slice(sepIdx + 1, -5)
-        });
-      }
-      parsedFiles.sort((a, b) => (a.ts !== b.ts ? a.ts - b.ts : a.idPart.localeCompare(b.idPart)));
-      const tailFiles = parsedFiles.slice(-25);
-      const envelopes = (await Promise.all(
-        tailFiles.map(async ({ file }) => {
-          try {
-            const content = await fs.promises.readFile(path.join(inboxDir, file), "utf8");
-            return JSON.parse(content);
-          } catch {
-            return null;
-          }
-        })
-      )).filter(Boolean);
-
-      if (envelopes.length > 0) {
-        threadCache.set(key, { messages: envelopes, mtimeMs, loadedAt: Date.now() });
-        return envelopes;
-      }
+      const st = await fs.promises.stat(dirPath);
+      if (st.isDirectory()) dStamp = String(st.mtimeMs || 0);
     } catch {}
+    try {
+      const st = await fs.promises.stat(legPath);
+      lStamp = String(st.mtimeMs || 0);
+    } catch {}
+    return `${dStamp}:${lStamp}`;
+  };
+
+  const peerStatStamp = await statStampFor(cleanAgent);
+  const selfStatStamp = (!isSelfThread && cleanSelf) ? await statStampFor(cleanSelf) : "none";
+  const combinedStamp = `${peerStatStamp}|${selfStatStamp}`;
+
+  const cached = threadCache.get(key);
+  if (!force && cached && cached.mtimeMs === combinedStamp) {
+    return cached.messages;
   }
 
-  try {
-    const st = await fs.promises.stat(legacyFile);
-    const mtimeMs = st.mtimeMs || 0;
-    const cached = threadCache.get(key);
-    if (!force && cached && cached.mtimeMs === mtimeMs) {
-      return cached.messages;
-    }
-    const raw = await fs.promises.readFile(legacyFile, "utf8");
-    const parsed = JSON.parse(raw);
-    const messages = Array.isArray(parsed) ? parsed.slice(-25) : [];
-    threadCache.set(key, { messages, mtimeMs, loadedAt: Date.now() });
-    return messages;
-  } catch {
-    threadCache.set(key, { messages: [], mtimeMs: 0, loadedAt: Date.now() });
-    return [];
+  const [peerRes, selfRes] = await Promise.all([
+    readAgentInboxEnvelopes(meshDir, cleanAgent, 50),
+    (!isSelfThread && cleanSelf) ? readAgentInboxEnvelopes(meshDir, cleanSelf, 100) : Promise.resolve({ messages: [], stamp: "none" })
+  ]);
+
+  const peerLower = cleanAgent.toLowerCase();
+  const incomingFromPeer = selfRes.messages.filter((m) => {
+    if (!m) return false;
+    const fromLower = String(m.from || m.sender || "").trim().toLowerCase();
+    return fromLower === peerLower;
+  });
+
+  // Merge outgoing/direct messages in inbox/<selectedPeer> + incoming replies in inbox/<self> from selectedPeer
+  const combined = [...peerRes.messages, ...incomingFromPeer];
+  const seen = new Set();
+  const deduped = [];
+  for (const m of combined) {
+    if (!m) continue;
+    const dedupKey = m.id
+      ? `id:${m.id}`
+      : `sig:${m.timestamp || ""}|${m.from || m.sender || ""}|${m.message || (m.payload && m.payload.message) || m.body || ""}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    deduped.push(m);
   }
+
+  const getMsgEpoch = (m) => {
+    if (typeof m.epochMs === "number" && Number.isFinite(m.epochMs)) return m.epochMs;
+    const parsed = Date.parse(m.timestamp || "");
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  deduped.sort((a, b) => {
+    const ea = getMsgEpoch(a);
+    const eb = getMsgEpoch(b);
+    if (ea !== eb) return ea - eb;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
+
+  const finalMsgs = deduped.slice(-25);
+  threadCache.set(key, { messages: finalMsgs, mtimeMs: combinedStamp, loadedAt: Date.now() });
+  return finalMsgs;
 }
 
 async function loadActiveThread(options = {}) {
@@ -2584,7 +2695,8 @@ function syncWatchedInboxDir() {
   if (!nextAgent || nextAgent === watchedInboxAgent) return;
   try {
     const meshDir = getMeshDir();
-    if (watchedInboxAgent) {
+    const cleanSelf = getSafeSelfAgent();
+    if (watchedInboxAgent && (!cleanSelf || watchedInboxAgent.toLowerCase() !== cleanSelf.toLowerCase())) {
       watcher.unwatch(path.join(meshDir, "inbox", watchedInboxAgent));
     }
     watcher.add(path.join(meshDir, "inbox", nextAgent));
@@ -2647,23 +2759,47 @@ async function loadListsImpl() {
       }
     }
 
+    const cleanSelf = getSafeSelfAgent();
+    const incomingUnreadByPeer = new Map();
+    const incomingTotalByPeer = new Map();
+    if (cleanSelf) {
+      try {
+        const selfDiskMsgs = readInboxSync(cleanSelf) || [];
+        for (const m of selfDiskMsgs) {
+          if (!m) continue;
+          const sender = String(m.from || m.sender || "").trim();
+          if (!sender) continue;
+          const senderLower = sender.toLowerCase();
+          if (senderLower === cleanSelf.toLowerCase()) continue;
+          incomingTotalByPeer.set(senderLower, (incomingTotalByPeer.get(senderLower) || 0) + 1);
+          if (!(m.read || (m.metadata && m.metadata.read))) {
+            incomingUnreadByPeer.set(senderLower, (incomingUnreadByPeer.get(senderLower) || 0) + 1);
+          }
+        }
+      } catch {}
+    }
+
     const allPeers = peerMap.size > 0
       ? Array.from(peerMap.values())
       : KNOWN_DEFAULT_PEERS.map((name) => ({ name, total: 0, unread: 0, online: nextOnlineSet.has(name.toLowerCase()) }));
 
     agentMetaMap = new Map();
     for (const p of allPeers) {
-      let unreadCount = p.unread || 0;
+      const pKey = p.name.toLowerCase();
+      const incTotal = incomingTotalByPeer.get(pKey) || 0;
+      const incUnread = incomingUnreadByPeer.get(pKey) || 0;
+      let unreadCount = (p.unread || 0) + incUnread;
       const cached = threadCache.get(`peer:${p.name}`);
       if (cached && Array.isArray(cached.messages)) {
         const readInCache = cached.messages.filter((m) => Boolean(m.read || (m.metadata && m.metadata.read))).length;
-        if ((p.total || 0) <= cached.messages.length) {
+        const combinedTotal = (p.total || 0) + incTotal;
+        if (combinedTotal <= cached.messages.length) {
           unreadCount = Math.max(0, cached.messages.length - readInCache);
         } else {
           unreadCount = Math.max(0, unreadCount - readInCache);
         }
       }
-      agentMetaMap.set(p.name, { total: p.total || 0, unread: unreadCount, online: Boolean(p.online) });
+      agentMetaMap.set(p.name, { total: (p.total || 0) + incTotal, unread: unreadCount, online: Boolean(p.online) });
       totalUnread += unreadCount;
     }
     agentList = allPeers.map((p) => p.name);
@@ -2891,6 +3027,26 @@ async function markPeerInboxRead(agentName) {
     const legacyMarked = checkAndMarkRead(cleanAgent);
     if (Array.isArray(legacyMarked)) markedCount += legacyMarked.length;
   } catch {}
+
+  const cleanSelf = getSafeSelfAgent();
+  if (cleanSelf && cleanSelf.toLowerCase() !== cleanAgent.toLowerCase()) {
+    try {
+      const selfDiskMsgs = readInboxSync(cleanSelf) || [];
+      const targetLower = cleanAgent.toLowerCase();
+      for (const m of selfDiskMsgs) {
+        if (!m || !m.id) continue;
+        const fromLower = String(m.from || m.sender || "").trim().toLowerCase();
+        if (fromLower === targetLower && !(m.read || (m.metadata && m.metadata.read))) {
+          const updated = updateDiscreteEnvelopeSync(cleanSelf, m.id, (env) => ({
+            ...env,
+            read: true,
+            metadata: { ...(env.metadata || {}), read: true }
+          }));
+          if (updated) markedCount++;
+        }
+      }
+    } catch {}
+  }
 
   const key = getThreadCacheKey(false, cleanAgent);
   const existingCache = threadCache.get(key);
@@ -3211,7 +3367,12 @@ async function executeHitAction(hit) {
       break;
 
     case "reply_message": {
-      const replyTarget = sanitizeTerminalText(p.from || selectedAgent || "operator").replace(/^@/, "");
+      const rawFrom = String(p.from || "").trim();
+      const fromLower = rawFrom.toLowerCase();
+      const selfLower = getSelfIdentity().toLowerCase();
+      const isSelfSender = fromLower === selfLower || fromLower === "operator" || fromLower === "exdelegate";
+      const targetName = (isSelfSender && selectedAgent) ? selectedAgent : (rawFrom || selectedAgent || "operator");
+      const replyTarget = sanitizeTerminalText(targetName).replace(/^@/, "");
       composerBuffer = `@${replyTarget} `;
       composerCursor = composerBuffer.length;
       composerFocused = true;
@@ -3904,6 +4065,10 @@ if (!isHeadlessTest) {
     if (selectedAgent) {
       watchedInboxAgent = selectedAgent;
       watchTargets.push(path.join(meshDir, "inbox", selectedAgent));
+    }
+    const cleanSelf = getSafeSelfAgent();
+    if (cleanSelf && cleanSelf !== selectedAgent) {
+      watchTargets.push(path.join(meshDir, "inbox", cleanSelf));
     }
     watcher = chokidar.watch(watchTargets, {
       persistent:    true,
