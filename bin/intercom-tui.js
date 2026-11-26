@@ -1116,7 +1116,9 @@ function renderTopBar(cols) {
     ? (compact ? "[ ☰·Open ]" : "[ ☰ Menu · Open ]")
     : (compact ? "[ ☰ ]" : "[ ☰ Menu ]");
   const menuW = stringWidth(menuText);
-  const menuStartCol = Math.max(2, cols - menuW);
+  // Leave a 2-column right margin when Menu is wide so Cascadia Mono / DirectWrite
+  // glyphs like '☰' never clip the closing ']' at the terminal edge.
+  const menuStartCol = Math.max(2, cols - menuW - 1);
   const menuEndCol = menuStartCol + menuW - 1;
 
   // Build sub-tab descriptors with unread count badges for @peer tabs
